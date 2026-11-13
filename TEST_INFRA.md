@@ -20,12 +20,12 @@ Derived from `ORIGINAL_REQUEST.md` (R1–R3) and `PROJECT.md § Feature Inventor
 | 6 | Pitch & Fundamental Frequency Accuracy | ORIGINAL_REQUEST §R1, R3, PROJECT §12 | 6 tests (T1-PIT-01..06) | 3 tests | ✓ (T3-CMB-01, 04) |
 | 7 | Velocity Dynamics & Spectral Centroid | ORIGINAL_REQUEST §R1, R3, PROJECT §13 | 5 tests (T1-VEL-01..05) | 3 tests | ✓ (T3-CMB-02) |
 | 8 | Damping & Rapid Release Decay | ORIGINAL_REQUEST §R1, R3, PROJECT §14 | 5 tests (T1-DMP-01..05) | 2 tests | ✓ (T3-CMB-01, 02) |
-| **Total** | **8 Core Requirement Features** | | **43 tests** | **18 tests** | **8 tests** |
+| **Total** | **8 Core Requirement Features** | | **49 tests** | **13 tests** | **9 tests** |
 
 ## Test Architecture
 - **Test Runner**:
   - `npm run test:e2e`: Executes Playwright E2E test runner (`playwright test`).
-  - Runner invokes Headless Chromium with `--autoplay-policy=no-user-gesture-required` and `--no-sandbox` on local Vite web server (`http://localhost:5173/pianosim/`).
+  - Runner invokes Headless Chromium with `--autoplay-policy=no-user-gesture-required` and `--no-sandbox` on local Vite web server (`http://localhost:5173/pianosim/`; override with `PIANOSIM_PORT=<port>` when 5173 is unavailable, e.g. `PIANOSIM_PORT=5188 npx playwright test`).
   - Unit & acoustic sanity tests run independently via `npm test` (`vitest run`).
 - **Pass/Fail Semantics**:
   - Strict exit code 0 requirement.
@@ -66,7 +66,8 @@ tests/e2e/
 └── helpers/
     ├── audio-analysis.ts         # FFT, parabolic peak interpolation, RMS, spectral centroid calculation
     ├── dom-driver.ts             # Pointer and keyboard event dispatch helpers and DOM assertions
-    └── audio-mock.ts             # Web Audio telemetry and spy fixtures
+    ├── engine.ts                 # binding to the REAL src/audio/PianoSynthesizer (no mock); renderMono() L/R render + mixdown
+    └── page-audio.ts             # browser AudioContext spy + passive AnalyserNode tap on the real audio output
 ```
 
 ## Real-World Application Scenarios (Tier 4)
@@ -79,8 +80,8 @@ tests/e2e/
 | 5 | Extended Two-Hand Session (`endurance-session.spec.ts`) | All UI & Audio Features Concurrently | High | 200 alternating musical events over 30s; bounded memory; 0 console errors; zero audio corruption |
 
 ## Coverage Thresholds
-- **Tier 1 (Feature Coverage)**: 43 test cases ($\ge 5$ isolated tests for each of the 8 features).
+- **Tier 1 (Feature Coverage)**: 49 test cases (incl. `engine-in-browser` and `ui-audio-path`: real engine executed in the page and observed at the AudioContext destination) ($\ge 5$ isolated tests for each of the 8 features).
 - **Tier 2 (Boundary & Corner Cases)**: 13 test cases (extremes of pitch, velocity, polyphony, and error handling).
-- **Tier 3 (Cross-Feature Combinations)**: 8 test cases (concurrency, pedal pumping, chord sustain, glissando sustain).
+- **Tier 3 (Cross-Feature Combinations)**: 9 test cases (concurrency, pedal pumping, chord sustain, glissando sustain).
 - **Tier 4 (Real-World Application Scenarios)**: 5 realistic application-level musical workloads.
-- **Grand Total**: **69 distinct, opaque-box E2E test cases**.
+- **Grand Total**: **76 distinct, opaque-box E2E test cases**.
