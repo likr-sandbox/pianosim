@@ -38,6 +38,7 @@ class WaveguideString {
     this.lossGainTarget = 0.997;
     this.lossS = 0.15;
     this.lossSTarget = 0.15;
+    this.lossSSus = 0.15;
     this.lossState = 0.0;
     this.fadeCoeff = 1.0 - Math.exp(-1.0 / (0.005 * this.sampleRate));
     this.configureTuning(69, 440.0);
@@ -61,8 +62,10 @@ class WaveguideString {
     const phiDisp = Math.atan2(numIm, numRe) - Math.atan2(denIm, denRe);
     const tauDisp = -phiDisp / w0;
 
-    this.lossS = 0.15;
-    this.lossSTarget = 0.15;
+    const t60Sus = this.sustainT60(midiNote);
+    this.lossSSus = this.sustainLossS(f0, t60Sus);
+    this.lossS = this.lossSSus;
+    this.lossSTarget = this.lossSSus;
     const lossRe = (1.0 - this.lossS) + this.lossS * Math.cos(w0);
     const lossIm = -this.lossS * Math.sin(w0);
     const phiLoss = Math.atan2(lossIm, lossRe);
@@ -75,10 +78,28 @@ class WaveguideString {
     const dFrac = remainingDelay - this.integerDelay;
     this.thiranA = (1.0 - dFrac) / (1.0 + dFrac);
 
-    const t60Sus = 1.2 + 10.8 * Math.pow(Math.max(0.0, (108.0 - midiNote) / 87.0), 1.2);
-    const gSus = Math.pow(10.0, -3.0 / (f0 * t60Sus));
+    const gSus = this.sustainLoopGain(f0, t60Sus);
     this.lossGain = gSus;
     this.lossGainTarget = gSus;
+  }
+
+  sustainT60(midiNote) {
+    return 1.8 + 10.2 * Math.pow(Math.max(0.0, (108.0 - midiNote) / 87.0), 1.2);
+  }
+
+  sustainLossS(f0, t60) {
+    const w0 = (2.0 * Math.PI * f0) / this.sampleRate;
+    const oneMinusCos = Math.max(1e-9, 1.0 - Math.cos(w0));
+    const s = 3.45 / (f0 * t60 * oneMinusCos);
+    return Math.max(0.005, Math.min(0.15, s));
+  }
+
+  sustainLoopGain(f0, t60) {
+    const w0 = (2.0 * Math.PI * f0) / this.sampleRate;
+    const s = this.lossSSus;
+    const mag = Math.sqrt((1.0 - s) * (1.0 - s) + s * s + 2.0 * s * (1.0 - s) * Math.cos(w0));
+    const g = Math.pow(10.0, -3.0 / (f0 * t60)) / Math.max(1e-6, mag);
+    return Math.min(0.99995, g);
   }
 
   setDamper(damped, midiNote, f0) {
@@ -90,14 +111,12 @@ class WaveguideString {
         this.lossGainTarget = Math.pow(10.0, -3.0 / (freq * t60Rel));
         this.lossSTarget = 0.42;
       } else {
-        const t60Sus = 1.2 + 10.8 * Math.pow(Math.max(0.0, (108.0 - note) / 87.0), 1.2);
-        this.lossGainTarget = Math.pow(10.0, -3.0 / (freq * t60Sus));
-        this.lossSTarget = 0.15;
+        this.lossGainTarget = this.sustainLoopGain(freq, this.sustainT60(note));
+        this.lossSTarget = this.lossSSus;
       }
     } else {
-      const t60Sus = 1.2 + 10.8 * Math.pow(Math.max(0.0, (108.0 - note) / 87.0), 1.2);
-      this.lossGainTarget = Math.pow(10.0, -3.0 / (freq * t60Sus));
-      this.lossSTarget = 0.15;
+      this.lossGainTarget = this.sustainLoopGain(freq, this.sustainT60(note));
+      this.lossSTarget = this.lossSSus;
     }
   }
 
@@ -159,8 +178,9 @@ class HammerModel {
       f0 = 440.0 * Math.pow(2.0, (f0OrMidi - 69.0) / 12.0);
     }
     const v = Math.max(0.01, Math.min(1.0, midiVelocity / 127.0));
-    const amplitude = Math.pow(v, 1.5);
-    const tau0 = 0.0018 * Math.pow(440.0 / Math.max(100.0, f0), 0.15);
+    const tauRef = 0.0018 * Math.pow(440.0 / Math.max(100.0, f0), 0.15);
+    const tau0 = Math.min(tauRef, 0.6 / f0);
+    const amplitude = Math.pow(v, 1.5) * Math.pow(tauRef / tau0, 0.2);
     const tauC = Math.max(2.0 / this.sampleRate, Math.min(0.008, tau0 * Math.pow(v, -0.4)));
     const pulseLen = Math.max(4, Math.min(512, Math.round(tauC * this.sampleRate)));
 

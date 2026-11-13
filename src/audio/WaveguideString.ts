@@ -35,6 +35,8 @@ export class WaveguideString {
   private lossGainTarget: number = 0.997;
   private lossS: number = 0.15;
   private lossSTarget: number = 0.15;
+  // Sustained-mode loop lowpass coefficient (register dependent, see sustainLossS)
+  private lossSSus: number = 0.15;
   private lossState: number = 0.0;
   private readonly fadeCoeff: number;
 
@@ -92,9 +94,11 @@ export class WaveguideString {
     const phiDisp = Math.atan2(numIm, numRe) - Math.atan2(denIm, denRe);
     const tauDisp = -phiDisp / w0;
 
-    // 2. Loop loss filter phase delay at w0 (s = 0.15)
-    this.lossS = 0.15;
-    this.lossSTarget = 0.15;
+    // 2. Loop loss filter phase delay at w0 (register dependent s, 0.15 for bass/mid)
+    const t60Sus = WaveguideString.sustainT60(midiNote);
+    this.lossSSus = WaveguideString.sustainLossS(f0, t60Sus, this.sampleRate);
+    this.lossS = this.lossSSus;
+    this.lossSTarget = this.lossSSus;
     const lossRe = (1.0 - this.lossS) + this.lossS * Math.cos(w0);
     const lossIm = -this.lossS * Math.sin(w0);
     const phiLoss = Math.atan2(lossIm, lossRe);
@@ -110,11 +114,42 @@ export class WaveguideString {
     this.thiranA = (1.0 - dFrac) / (1.0 + dFrac);
 
     // 4. Configure natural sustain and release decay times
-    const t60Sus = 1.2 + 10.8 * Math.pow(Math.max(0.0, (108.0 - midiNote) / 87.0), 1.2);
-    const gSus = Math.pow(10.0, -3.0 / (f0 * t60Sus));
+    const gSus = this.sustainLoopGain(f0, t60Sus);
 
     this.lossGain = gSus;
     this.lossGainTarget = gSus;
+  }
+
+  /** Natural (undamped) T60 of the fundamental in seconds. */
+  private static sustainT60(midiNote: number): number {
+    return 1.8 + 10.2 * Math.pow(Math.max(0.0, (108.0 - midiNote) / 87.0), 1.2);
+  }
+
+  /**
+   * Loop lowpass coefficient s. High strings circulate many times per second, so the
+   * 1-pole loss filter (which attenuates the fundamental by ~s(1-s)(1-cos w0) per pass)
+   * would otherwise dominate the decay and mute the treble. Cap s so the filter consumes at
+   * most half of the per-pass loss budget implied by the target T60.
+   */
+  private static sustainLossS(f0: number, t60: number, sampleRate: number): number {
+    const w0 = (2.0 * Math.PI * f0) / sampleRate;
+    const oneMinusCos = Math.max(1e-9, 1.0 - Math.cos(w0));
+    const s = 3.45 / (f0 * t60 * oneMinusCos);
+    return Math.max(0.005, Math.min(0.15, s));
+  }
+
+  /**
+   * Per-pass gain g such that the fundamental (attenuated by |H_lp(w0)| each pass) decays
+   * with the requested T60. g < 1 is guaranteed by sustainLossS (DC gain stays < 1).
+   */
+  private sustainLoopGain(f0: number, t60: number): number {
+    const w0 = (2.0 * Math.PI * f0) / this.sampleRate;
+    const s = this.lossSSus;
+    const mag = Math.sqrt(
+      (1.0 - s) * (1.0 - s) + s * s + 2.0 * s * (1.0 - s) * Math.cos(w0),
+    );
+    const g = Math.pow(10.0, -3.0 / (f0 * t60)) / Math.max(1e-6, mag);
+    return Math.min(0.99995, g);
   }
 
   /**
@@ -131,14 +166,12 @@ export class WaveguideString {
         this.lossSTarget = 0.42;
       } else {
         // High treble register (> F#6) has no dampers on acoustic pianos
-        const t60Sus = 1.2 + 10.8 * Math.pow(Math.max(0.0, (108.0 - note) / 87.0), 1.2);
-        this.lossGainTarget = Math.pow(10.0, -3.0 / (freq * t60Sus));
-        this.lossSTarget = 0.15;
+        this.lossGainTarget = this.sustainLoopGain(freq, WaveguideString.sustainT60(note));
+        this.lossSTarget = this.lossSSus;
       }
     } else {
-      const t60Sus = 1.2 + 10.8 * Math.pow(Math.max(0.0, (108.0 - note) / 87.0), 1.2);
-      this.lossGainTarget = Math.pow(10.0, -3.0 / (freq * t60Sus));
-      this.lossSTarget = 0.15;
+      this.lossGainTarget = this.sustainLoopGain(freq, WaveguideString.sustainT60(note));
+      this.lossSTarget = this.lossSSus;
     }
   }
 

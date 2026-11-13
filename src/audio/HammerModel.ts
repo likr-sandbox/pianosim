@@ -5,6 +5,8 @@
  * peak amplitude (A ~ v^1.5), and suppresses 7th/8th harmonics at x0 = L/8.
  */
 
+const TREBLE_COMP_EXP = 0.2;
+
 export class HammerModel {
   private readonly sampleRate: number;
   private readonly pulseBuffer: Float32Array;
@@ -32,11 +34,16 @@ export class HammerModel {
 
     const v = Math.max(0.01, Math.min(1.0, midiVelocity / 127.0));
 
-    // 1. Amplitude scaling: A(v) proportional to v^1.5
-    const amplitude = Math.pow(v, 1.5);
+    // 2. Contact duration: tau_c proportional to v^-0.4. A felt contact much longer than
+    // about half the string period low-passes the excitation below the fundamental, so the
+    // reference duration is capped at 0.6 / f0 (only binds above ~C5).
+    const tauRef = 0.0018 * Math.pow(440.0 / Math.max(100.0, f0), 0.15);
+    const tau0 = Math.min(tauRef, 0.6 / f0);
 
-    // 2. Contact duration: tau_c proportional to v^-0.4
-    const tau0 = 0.0018 * Math.pow(440.0 / Math.max(100.0, f0), 0.15);
+    // 1. Amplitude scaling: A(v) proportional to v^1.5, with register compensation for the
+    // shorter (lower-area) treble pulse so that treble notes keep a realistic level.
+    const trebleComp = Math.pow(tauRef / tau0, TREBLE_COMP_EXP);
+    const amplitude = Math.pow(v, 1.5) * trebleComp;
     const tauC = Math.max(2.0 / this.sampleRate, Math.min(0.008, tau0 * Math.pow(v, -0.4)));
     const pulseLen = Math.max(4, Math.min(512, Math.round(tauC * this.sampleRate)));
 
