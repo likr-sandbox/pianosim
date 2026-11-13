@@ -1,0 +1,23 @@
+{
+  "name": "pianosim",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser-based real-time piano physical simulation audio engine and responsive interactive keyboard Web application",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:e2e": "echo \"Placeholder for Playwright E2E tests\" && exit 0",
+    "verify:acoustic": "vitest run tests/acoustic",
+    "deploy": "gh-pages -d dist"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "gh-pages": "^6.3.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.4.6",
+    "vitest": "^5.1.0"
+  }
+}
