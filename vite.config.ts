@@ -14,6 +14,7 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["tests/**/*.{test,spec}.ts"],
+    include: ["tests/acoustic/**/*.test.ts", "tests/unit/**/*.test.ts"],
+    exclude: ["tests/e2e/**", "node_modules/**", "dist/**"],
   },
 });

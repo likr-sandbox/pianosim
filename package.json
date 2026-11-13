@@ -9,11 +9,12 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:e2e": "echo \"Placeholder for Playwright E2E tests\" && exit 0",
+    "test:e2e": "playwright test",
     "verify:acoustic": "vitest run tests/acoustic",
     "deploy": "gh-pages -d dist"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/node": "^22.13.0",
     "gh-pages": "^6.3.0",
     "typescript": "^5.7.3",
