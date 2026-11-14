@@ -9,17 +9,18 @@
 extern crate alloc;
 
 pub mod choir_map;
+pub mod contact;
 pub mod modal_soa;
 pub mod zoh_kernel;
 
-use piano_spec::{build_scale_design, VoicingSpec, NUM_KEYS, TOTAL_STRINGS};
+pub use contact::KeyActionDriver;
+
+use piano_spec::{build_scale_design, VoicingSpec};
 
 use crate::choir_map::ChoirMap;
+use crate::contact::ContactPorts;
 use crate::modal_soa::ModalSoa;
-use crate::zoh_kernel::{
-    flush_subnormals_soa, inject_excitation, render_subblock_core, step_all_strings, KeyPulseSpec,
-    StringPulse,
-};
+use crate::zoh_kernel::{flush_subnormals_range, inject_excitation, step_all_strings};
 
 /// All-88-key, 230-string, ~26k-mode continuous SIMD coupled-form ZOH bank.
 #[derive(Clone, Debug)]
@@ -27,16 +28,12 @@ pub struct StringBank {
     sample_rate: f32,
     choir_map: ChoirMap,
     soa: ModalSoa,
-    key_hold: [f32; NUM_KEYS],
-    key_pulses: [KeyPulseSpec; NUM_KEYS],
-    string_pulses: [StringPulse; TOTAL_STRINGS],
+    ports: ContactPorts,
 }
 
 impl StringBank {
-    /// Allocates and precomputes all SoA mode tables for `sample_rate` and `voicing`.
-    ///
-    /// Initial damper state is resting (`hold_01 = 0.0`: dampers resting on keys
-    /// `0..70`, undamped keys `70..88` free-ringing).
+    /// Allocates and precomputes permanent undamped SoA mode tables and physical SI
+    /// dual-port projections for `sample_rate` and `voicing`.
     #[must_use]
     pub fn new(sample_rate: f32, voicing: &VoicingSpec) -> Self {
         let safe_rate = if sample_rate.is_finite() {
@@ -47,28 +44,20 @@ impl StringBank {
         let specs = build_scale_design(voicing);
         let choir_map = ChoirMap::build_with_specs(&specs, voicing);
         let soa = ModalSoa::build(f64::from(safe_rate), voicing, &specs, &choir_map);
-        let key_pulses = core::array::from_fn(|k| {
-            KeyPulseSpec::for_key(
-                piano_spec::key_tuned_f0_hz(k, &specs, voicing),
-                f64::from(safe_rate),
-            )
-        });
+        let ports = ContactPorts::build(f64::from(safe_rate), voicing, &specs, &choir_map);
 
         Self {
             sample_rate: safe_rate,
             choir_map,
             soa,
-            key_hold: [0.0; NUM_KEYS],
-            key_pulses,
-            string_pulses: [StringPulse::default(); TOTAL_STRINGS],
+            ports,
         }
     }
 
-    /// Resets all modal state buffers, active pulses, and damper positions without reallocating.
+    /// Resets all modal state buffers and cached contact ports without reallocating.
     pub fn reset(&mut self) {
         self.soa.reset_resting();
-        self.key_hold.fill(0.0);
-        self.string_pulses.fill(StringPulse::default());
+        self.ports.reset_resting();
     }
 
     /// Returns the configured sample rate in Hz.
@@ -106,53 +95,19 @@ impl StringBank {
         &self.choir_map
     }
 
-    /// Returns the current damper hold level `[0.0, 1.0]` for `key_idx`.
-    #[must_use]
-    #[inline]
-    pub fn key_hold(&self, key_idx: usize) -> f32 {
-        self.key_hold.get(key_idx).copied().unwrap_or(0.0)
-    }
-
-    /// Sets continuous damper hold (`0.0` = fully damped, `1.0` = undamped/held)
-    /// for `key_idx` using exact pitch-invariant affine pole interpolation.
-    pub fn set_key_hold(&mut self, key_idx: usize, hold_01: f32) {
-        let Some(key_entry) = self.choir_map.key(key_idx) else {
-            return;
-        };
-        let clamped = if hold_01.is_finite() {
-            hold_01.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        if self.key_hold[key_idx].to_bits() == clamped.to_bits() {
-            return;
-        }
-        self.key_hold[key_idx] = clamped;
-        if key_entry.has_damper {
-            self.soa
-                .set_vec_range_hold(key_entry.vec_range.clone(), clamped);
-        }
-    }
-
-    /// Triggers a key-period-adapted half-sine hammer excitation pulse on `key_idx`
-    /// weighted per choir string (`string_weights`, e.g. for una corda shifting).
-    pub fn trigger_key_pulse(&mut self, key_idx: usize, string_weights: [f32; 3], amplitude: f32) {
-        let Some(key_entry) = self.choir_map.key(key_idx) else {
-            return;
-        };
-        if !amplitude.is_finite() || amplitude == 0.0 {
-            return;
-        }
-        let spec = &self.key_pulses[key_idx];
-        for (str_in_choir, str_idx) in key_entry.string_range.clone().enumerate() {
-            let w = string_weights[str_in_choir];
-            let eff = if w.is_finite() { amplitude * w } else { 0.0 };
-            self.string_pulses[str_idx].trigger(spec, eff);
+    /// Marks all strings belonging to `key_idx` as potentially carrying non-zero
+    /// modal state and invalidates cached dual-port readouts until resynchronized.
+    pub fn mark_key_possibly_active(&mut self, key_idx: usize) {
+        if let Some(key_entry) = self.choir_map.key(key_idx) {
+            for s_idx in key_entry.string_range.clone() {
+                self.ports.may_be_nonzero[s_idx] = true;
+                self.ports.ports_synced[s_idx] = false;
+            }
         }
     }
 
     /// Injects a single-sample force impulse into `key_idx` across its choir strings
-    /// weighted by `string_weights`. Intended for sample-accurate external action forces.
+    /// weighted by `string_weights`. Intended for sample-accurate test/external impulses.
     pub fn apply_excitation_sample(
         &mut self,
         key_idx: usize,
@@ -168,14 +123,13 @@ impl StringBank {
         let total_vecs = self.choir_map.total_vecs();
         let u_vecs = &mut self.soa.u.as_f32x4_slice_mut()[..total_vecs];
         let b_vecs = &self.soa.b_exc.as_f32x4_slice()[..total_vecs];
-        for (str_in_choir, entry) in self.choir_map.strings()[key_entry.string_range.clone()]
-            .iter()
-            .enumerate()
-        {
+        for (str_in_choir, str_idx) in key_entry.string_range.clone().enumerate() {
             let w = string_weights[str_in_choir];
             if w.is_finite() && w != 0.0 {
-                let range = entry.all_vecs();
+                let range = self.choir_map.strings()[str_idx].all_vecs();
                 inject_excitation(&mut u_vecs[range.clone()], &b_vecs[range], force * w);
+                self.ports.may_be_nonzero[str_idx] = true;
+                self.ports.ports_synced[str_idx] = false;
             }
         }
     }
@@ -185,17 +139,32 @@ impl StringBank {
     #[must_use]
     #[inline]
     pub fn render_frame(&mut self) -> (f32, f32) {
-        step_all_strings(&mut self.soa, &self.choir_map)
+        let frame = step_all_strings(&mut self.soa, &self.choir_map);
+        for (s_idx, flag) in self.ports.ports_synced.iter_mut().enumerate() {
+            if self.ports.may_be_nonzero[s_idx] {
+                *flag = false;
+            }
+        }
+        frame
     }
 
-    /// Flushes subnormals (`< 1e-20`) in `u` and `v` once at subblock end.
+    /// Flushes subnormals (`< 1e-20`) in `u` and `v` and clears dormant string flags.
     #[inline]
     pub fn flush_subnormals(&mut self) {
-        flush_subnormals_soa(&mut self.soa);
+        for (s_idx, entry) in self.choir_map.strings().iter().enumerate() {
+            if !flush_subnormals_range(&mut self.soa, entry.all_vecs()) {
+                self.ports.may_be_nonzero[s_idx] = false;
+                self.ports.y_h[s_idx] = 0.0;
+                self.ports.v_h[s_idx] = 0.0;
+                self.ports.y_d[s_idx] = 0.0;
+                self.ports.v_d[s_idx] = 0.0;
+                self.ports.ports_synced[s_idx] = true;
+            }
+        }
     }
 
-    /// Renders a stereo subblock across all 230 strings, stepping any queued
-    /// key pulses and flushing subnormals once at the end of the subblock.
+    /// Renders an uncoupled stereo subblock across all 230 strings in `TILE = 8` mode
+    /// and flushes subnormals once at the end of the subblock.
     pub fn render_subblock(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         let frames = out_l.len().min(out_r.len());
         if out_l.len() > frames {
@@ -204,10 +173,39 @@ impl StringBank {
         if out_r.len() > frames {
             out_r[frames..].fill(0.0);
         }
-        render_subblock_core(
+        zoh_kernel::step_all_tiles(
             &mut self.soa,
             &self.choir_map,
-            &mut self.string_pulses,
+            &mut out_l[..frames],
+            &mut out_r[..frames],
+        );
+        for (s_idx, flag) in self.ports.ports_synced.iter_mut().enumerate() {
+            if self.ports.may_be_nonzero[s_idx] {
+                *flag = false;
+            }
+        }
+    }
+
+    /// Steps all 88 keys / 230 strings across `out_l`/`out_r` with closed-loop Stage 1
+    /// hammer and unilateral damper port coupling (`Newtons`, `meters`, `m/s`).
+    pub fn render_subblock_coupled(
+        &mut self,
+        driver: &mut impl KeyActionDriver,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+    ) {
+        let frames = out_l.len().min(out_r.len());
+        if out_l.len() > frames {
+            out_l[frames..].fill(0.0);
+        }
+        if out_r.len() > frames {
+            out_r[frames..].fill(0.0);
+        }
+        contact::render_subblock_coupled_core(
+            &mut self.soa,
+            &mut self.ports,
+            &self.choir_map,
+            driver,
             &mut out_l[..frames],
             &mut out_r[..frames],
         );
@@ -257,10 +255,14 @@ impl StringBank {
             &mut self.soa,
             key_entry,
             self.choir_map.strings(),
-            &mut self.string_pulses,
             out_l,
             out_r,
         );
+        for s_idx in key_entry.string_range.clone() {
+            if self.ports.may_be_nonzero[s_idx] {
+                self.ports.ports_synced[s_idx] = false;
+            }
+        }
     }
 }
 
@@ -286,11 +288,6 @@ mod tests {
 
     fn rms(slice: &[f32]) -> f32 {
         (slice.iter().map(|x| x * x).sum::<f32>() / (slice.len().max(1) as f32)).sqrt()
-    }
-
-    fn pol_rms(bank: &StringBank, key: usize) -> f32 {
-        let (v, h) = bank.measure_key_polarization_rms(key);
-        (v * v + h * h).sqrt()
     }
 
     fn goertzel_power(samples: &[f64], freq_hz: f64, sr: f64) -> f64 {
@@ -342,7 +339,6 @@ mod tests {
             assert!((25_000..=26_500).contains(&bank.total_modes()));
             for &key in &GATE1_KEYS {
                 bank.reset();
-                bank.set_key_hold(key, 1.0);
                 bank.apply_excitation_sample(key, [1.0, 1.0, 1.0], 1.0);
                 bank.render_key_subblock(key, &mut out_l, &mut out_r);
                 for i in 0..N {
@@ -384,11 +380,10 @@ mod tests {
     }
 
     #[test]
-    fn full_render_subblock_c6_to_c8_dampers_and_frame_api() {
+    fn full_render_subblock_c6_to_c8_and_frame_api() {
         let mut full_bank = StringBank::new(48_000.0, &VoicingSpec::default());
         for &k in &[0, 39, 87] {
-            full_bank.set_key_hold(k, 1.0);
-            full_bank.trigger_key_pulse(k, [1.0; 3], 1.0);
+            full_bank.apply_excitation_sample(k, [1.0; 3], 1.0);
         }
         let mut slice_bank = full_bank.clone();
         let (mut fl, mut fr) = (vec![0.0_f32; 2_048], vec![0.0_f32; 2_048]);
@@ -406,49 +401,41 @@ mod tests {
             assert!((fl[i] - sl[i]).abs() < 1e-6 && (fr[i] - sr_v[i]).abs() < 1e-6);
         }
 
-        // C6, C7, C8 pulse attack RMS + sustained T60 (~1..4 s).
+        let vert_env_rms = |bank: &StringBank, key: usize| -> f64 {
+            let ke = bank.choir_map.key(key).unwrap();
+            let (u, v, c) = (
+                bank.soa.u.as_f32x4_slice(),
+                bank.soa.v.as_f32x4_slice(),
+                bank.soa.c_bridge.as_f32x4_slice(),
+            );
+            let mut sum = 0.0_f64;
+            for entry in &bank.choir_map.strings()[ke.string_range.clone()] {
+                for i in entry.vert_vecs.clone() {
+                    let e = ((u[i] * u[i] + v[i] * v[i]) * (c[i] * c[i])).reduce_sum();
+                    sum += f64::from(e);
+                }
+            }
+            sum.sqrt()
+        };
+
         let (mut buf_l, mut buf_r) = (vec![0.0_f32; 12_000], vec![0.0_f32; 12_000]);
         for &(key, lo, hi) in &[(63, 2.5, 6.0), (75, 1.3, 3.5), (87, 0.7, 2.0)] {
             full_bank.reset();
-            full_bank.set_key_hold(key, 1.0);
-            full_bank.trigger_key_pulse(key, [1.0; 3], 1.0);
+            full_bank.apply_excitation_sample(key, [1.0; 3], 1.0);
             full_bank.render_subblock(&mut buf_l[..960], &mut buf_r[..960]);
             let atk = rms(&buf_l[..960]);
             assert!(atk > 0.01 && atk.is_finite(), "k={key} atk={atk}");
-            let (v0, _) = full_bank.measure_key_polarization_rms(key);
+            let e0 = vert_env_rms(&full_bank, key);
             full_bank.render_key_subblock(key, &mut buf_l, &mut buf_r); // +0.25s
-            let (v1, _) = full_bank.measure_key_polarization_rms(key);
-            let t60 = (0.25 * 3.0) / (v0 / v1).log10();
+            let e1 = vert_env_rms(&full_bank, key);
+            let t60 = (0.25 * 3.0) / (e0 / e1).log10();
             assert!((lo..=hi).contains(&t60), "k={key} t60={t60}");
-        }
-
-        // Damper release across 0..70 vs undamped 70..88 + stereo pan + half-pedal.
-        let keys = [0usize, 39, 63, 69, 70, 75, 87];
-        full_bank.reset();
-        for &k in &keys {
-            full_bank.set_key_hold(k, 1.0);
-            full_bank.trigger_key_pulse(k, [1.0, 0.5, 1.0], 1.0);
-        }
-        full_bank.render_subblock(&mut buf_l[..960], &mut buf_r[..960]);
-        let atk_pol: Vec<f32> = keys.iter().map(|&k| pol_rms(&full_bank, k)).collect();
-        for &k in &keys {
-            full_bank.set_key_hold(k, 0.0);
-        }
-        full_bank.render_subblock(&mut buf_l, &mut buf_r);
-        let damped_end = piano_spec::DAMPED_KEYS;
-        for (&k, &e0) in keys.iter().zip(atk_pol.iter()) {
-            let r = pol_rms(&full_bank, k) / e0;
-            assert!(
-                if k < damped_end { r < 1e-3 } else { r > 0.14 },
-                "k={k} r={r}"
-            );
         }
 
         // render_frame + flush_subnormals + out-of-range/NaN resilience.
         full_bank.reset();
-        full_bank.set_key_hold(99, f32::NAN);
-        full_bank.set_key_hold(39, 0.5);
-        full_bank.apply_excitation_sample(39, [1.0, 0.0, 1.0], 1.0);
+        full_bank.mark_key_possibly_active(99);
+        full_bank.apply_excitation_sample(39, [1.0, f32::NAN, 1.0], 1.0);
         let (l0, r0) = full_bank.render_frame();
         assert!(l0.is_finite() && r0.is_finite() && l0.abs() + r0.abs() > 0.0);
         full_bank.flush_subnormals();
@@ -457,7 +444,6 @@ mod tests {
     #[test]
     fn gate3_two_polarization_decay_and_trichord_beating() {
         let mut bank = StringBank::new(48_000.0, &no_detune());
-        bank.set_key_hold(63, 1.0);
         bank.apply_excitation_sample(63, [1.0; 3], 1.0);
         let (mut ol, mut or) = (vec![0.0_f32; 4_800], vec![0.0_f32; 4_800]);
         bank.render_key_subblock(63, &mut ol, &mut or);
@@ -468,11 +454,9 @@ mod tests {
         let (v_late, h_late) = bank.measure_key_polarization_rms(63);
         assert!(v_early > h_early && (h_late / h_early) > (v_late / v_early) * 2.0);
 
-        // Gate #3B: C4 trichord beating modulation across 8.0 s.
         let mut detuned = StringBank::new(48_000.0, &VoicingSpec::default());
         let mut flat = StringBank::new(48_000.0, &no_detune());
         for b in [&mut detuned, &mut flat] {
-            b.set_key_hold(39, 1.0);
             b.apply_excitation_sample(39, [1.0; 3], 1.0);
         }
         let win = 2_400usize;

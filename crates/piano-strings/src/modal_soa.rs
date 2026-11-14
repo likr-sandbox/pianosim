@@ -6,9 +6,7 @@
 //! once per string after summing `v_next * c_bridge`.
 
 use core::f64::consts::{FRAC_2_PI, LN_10, LOG2_E, PI, TAU};
-use core::ops::Range;
-
-use piano_simd::{AlignedBuf, F32x4};
+use piano_simd::AlignedBuf;
 use piano_spec::{
     effective_string_f0_hz, partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec,
     NUM_KEYS,
@@ -21,9 +19,9 @@ const PIO2_HI: f64 = 1.570_796_326_734_125_6;
 const PIO2_LO: f64 = 6.077_100_506_506_192e-11;
 const LN2_HI: f64 = 0.693_147_180_485_539_1;
 const LN2_LO: f64 = 7.440_614_790_965_583e-11;
-const NYQUIST_CUTOFF_RATIO: f64 = 0.49;
-const C_VERT: f32 = 1.0;
-const C_HORIZ: f32 = 0.18;
+pub(crate) const NYQUIST_CUTOFF_RATIO: f64 = 0.49;
+pub(crate) const C_VERT: f32 = 1.0;
+pub(crate) const C_HORIZ: f32 = 0.18;
 
 const SIN_COEFFS: [f64; 8] = [
     1.0,
@@ -175,20 +173,12 @@ pub struct ModalSoa {
     pub s_coeff: AlignedBuf,
     /// Bridge coupling weight `c_bridge` per mode (hot L2 array).
     pub c_bridge: AlignedBuf,
-    /// Held (undamped) `d_hold` coefficient.
-    pub d_hold: AlignedBuf,
-    /// Held (undamped) `s_hold` coefficient.
-    pub s_hold: AlignedBuf,
-    /// Damped `d_damp` coefficient (equals `d_hold` on keys `70..88`).
-    pub d_damp: AlignedBuf,
-    /// Damped `s_damp` coefficient (equals `s_hold` on keys `70..88`).
-    pub s_damp: AlignedBuf,
-    /// Excitation coupling weight `b_exc` per mode.
+    /// Excitation coupling weight `b_exc` per mode (for test impulse helpers).
     pub b_exc: AlignedBuf,
 }
 
 impl ModalSoa {
-    /// Allocates and initializes all SoA arrays for `sample_rate`, `specs`, `voicing`, and `map`.
+    /// Allocates and initializes permanent undamped SoA arrays for `sample_rate`, `specs`, `voicing`, and `map`.
     #[must_use]
     pub fn build(
         sample_rate: f64,
@@ -203,50 +193,24 @@ impl ModalSoa {
             d_coeff: AlignedBuf::filled(len, 1.0),
             s_coeff: AlignedBuf::zeroed(len),
             c_bridge: AlignedBuf::zeroed(len),
-            d_hold: AlignedBuf::filled(len, 1.0),
-            s_hold: AlignedBuf::zeroed(len),
-            d_damp: AlignedBuf::filled(len, 1.0),
-            s_damp: AlignedBuf::zeroed(len),
             b_exc: AlignedBuf::zeroed(len),
         };
         for entry in map.strings() {
             populate_string_modes(&mut soa, entry, sample_rate, voicing, specs);
         }
-        soa.d_coeff.as_mut_slice().copy_from_slice(&soa.d_damp);
-        soa.s_coeff.as_mut_slice().copy_from_slice(&soa.s_damp);
         soa
     }
 
-    /// Clears `(u, v)` and resets `d_coeff/s_coeff` to resting (`hold = 0.0`).
+    /// Clears `(u, v)` back to zero resting state.
     pub fn reset_resting(&mut self) {
         self.u.clear();
         self.v.clear();
-        self.d_coeff.as_mut_slice().copy_from_slice(&self.d_damp);
-        self.s_coeff.as_mut_slice().copy_from_slice(&self.s_damp);
-    }
-
-    /// Affine pole interpolation across `vec_range` with zero pitch drift.
-    pub fn set_vec_range_hold(&mut self, vec_range: Range<usize>, hold_01: f32) {
-        let damp = F32x4::splat(1.0 - hold_01);
-        let d_dst = &mut self.d_coeff.as_f32x4_slice_mut()[vec_range.clone()];
-        let s_dst = &mut self.s_coeff.as_f32x4_slice_mut()[vec_range.clone()];
-        let d_h = &self.d_hold.as_f32x4_slice()[vec_range.clone()];
-        let s_h = &self.s_hold.as_f32x4_slice()[vec_range.clone()];
-        let d_d = &self.d_damp.as_f32x4_slice()[vec_range.clone()];
-        let s_d = &self.s_damp.as_f32x4_slice()[vec_range];
-        for i in 0..d_dst.len() {
-            let (dh, sh) = (d_h[i], s_h[i]);
-            d_dst[i] = damp.mul_add(d_d[i] - dh, dh);
-            s_dst[i] = damp.mul_add(s_d[i] - sh, sh);
-        }
     }
 
     #[inline]
-    fn write_slot(&mut self, slot: usize, poles: (f32, f32, f32, f32), c_bridge: f32, b_exc: f32) {
-        self.d_hold.as_mut_slice()[slot] = poles.0;
-        self.s_hold.as_mut_slice()[slot] = poles.1;
-        self.d_damp.as_mut_slice()[slot] = poles.2;
-        self.s_damp.as_mut_slice()[slot] = poles.3;
+    fn write_slot(&mut self, slot: usize, poles: (f32, f32), c_bridge: f32, b_exc: f32) {
+        self.d_coeff.as_mut_slice()[slot] = poles.0;
+        self.s_coeff.as_mut_slice()[slot] = poles.1;
         self.c_bridge.as_mut_slice()[slot] = c_bridge;
         self.b_exc.as_mut_slice()[slot] = b_exc;
     }
@@ -260,23 +224,15 @@ struct PolParams {
     b_inharm: f64,
     sample_rate: f64,
     t60_v_base: f64,
-    t60_d_base: f64,
-    has_damper: bool,
     hold_mult: f64,
-    damp_mult: f64,
     c_bridge: f32,
     exc_scale: f64,
 }
 
 #[inline]
-fn t60_vert_fundamental(key_idx: usize) -> f64 {
+pub(crate) fn t60_vert_fundamental(key_idx: usize) -> f64 {
     let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
     30.0 * exp_f64(-0.45 * x - 4.35 * x * x + 1.50 * x * x * x)
-}
-
-#[inline]
-fn t60_damp_fundamental(key_idx: usize) -> f64 {
-    0.18 - 0.05 * ((key_idx.min(69) as f64) / 69.0)
 }
 
 #[inline]
@@ -289,13 +245,7 @@ fn strike_mode_shape(key_idx: usize, partial_index: usize) -> f64 {
 }
 
 #[inline]
-fn coupled_pole_f32(
-    freq_hz: f64,
-    sample_rate: f64,
-    t60_hold: f64,
-    t60_damp: f64,
-    has_damper: bool,
-) -> Option<(f32, f32, f32, f32)> {
+fn coupled_pole_f32(freq_hz: f64, sample_rate: f64, t60_hold: f64) -> Option<(f32, f32)> {
     if !freq_hz.is_finite() || freq_hz <= 0.0 || freq_hz >= NYQUIST_CUTOFF_RATIO * sample_rate {
         return None;
     }
@@ -308,18 +258,7 @@ fn coupled_pole_f32(
     let r_hold = 1.0 - one_minus_rh;
     let d_hold = (one_minus_rh + r_hold * two_sin_half_sq) as f32;
     let s_hold = (r_hold * sin_t) as f32;
-
-    let (d_damp, s_damp) = if has_damper {
-        let one_minus_rd = one_minus_exp_neg_f64(LN_1000 / (t60_damp.min(t60_hold) * sample_rate));
-        let r_damp = 1.0 - one_minus_rd;
-        (
-            (one_minus_rd + r_damp * two_sin_half_sq) as f32,
-            (r_damp * sin_t) as f32,
-        )
-    } else {
-        (d_hold, s_hold)
-    };
-    Some((d_hold, s_hold, d_damp, s_damp))
+    Some((d_hold, s_hold))
 }
 
 fn populate_string_modes(
@@ -334,7 +273,6 @@ fn populate_string_modes(
     let spec = specs[k];
     let b_inharm = spec.inharmonicity_b;
     let t60_v_base = t60_vert_fundamental(k);
-    let t60_d_base = t60_damp_fundamental(k);
 
     let f0_vert = effective_string_f0_hz(k, s_choir, Polarization::Vertical, specs, voicing);
     let f0_horiz = effective_string_f0_hz(k, s_choir, Polarization::Horizontal, specs, voicing);
@@ -372,10 +310,7 @@ fn populate_string_modes(
             b_inharm,
             sample_rate,
             t60_v_base,
-            t60_d_base,
-            has_damper: entry.has_damper,
             hold_mult: 1.0,
-            damp_mult: 1.0,
             c_bridge: C_VERT,
             exc_scale: norm,
         },
@@ -390,10 +325,7 @@ fn populate_string_modes(
             b_inharm,
             sample_rate,
             t60_v_base,
-            t60_d_base,
-            has_damper: entry.has_damper,
             hold_mult: 2.8,
-            damp_mult: 1.05,
             c_bridge: C_HORIZ,
             exc_scale: 0.85 * norm,
         },
@@ -403,8 +335,7 @@ fn populate_string_modes(
     for m in 1..=entry.long_modes {
         let f_m = (m as f64) * spec.f_long_hz;
         let t60_l = (1.5 / (1.0 + 0.15 * ((m - 1) as f64))).max(0.15);
-        let t60_ld = (0.18 / (1.0 + 0.05 * ((m - 1) as f64))).max(0.035);
-        if let Some(poles) = coupled_pole_f32(f_m, sample_rate, t60_l, t60_ld, entry.has_damper) {
+        if let Some(poles) = coupled_pole_f32(f_m, sample_rate, t60_l) {
             soa.write_slot(long_base + (m - 1), poles, 0.0, 0.0);
         }
     }
@@ -416,10 +347,8 @@ fn populate_transverse_pol(soa: &mut ModalSoa, p: &PolParams) {
         let f_norm = f_j / 20_000.0;
         let loss_scale = 1.0 + 0.05 * ((j - 1) as f64) + 1.5 * f_norm * f_norm;
         let t60_h = (p.t60_v_base / loss_scale).max(0.25) * p.hold_mult;
-        let damp_scale = 1.0 + 0.03 * (((j - 1) as f64).min(80.0));
-        let t60_d = (p.t60_d_base / damp_scale).max(0.035) * p.damp_mult;
 
-        if let Some(poles) = coupled_pole_f32(f_j, p.sample_rate, t60_h, t60_d, p.has_damper) {
+        if let Some(poles) = coupled_pole_f32(f_j, p.sample_rate, t60_h) {
             let b = (strike_mode_shape(p.key_idx, j) * p.exc_scale) as f32;
             soa.write_slot(p.base_slot + (j - 1), poles, p.c_bridge, b);
         }
@@ -429,7 +358,7 @@ fn populate_transverse_pol(soa: &mut ModalSoa, p: &PolParams) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use piano_spec::{build_scale_design, DAMPED_KEYS};
+    use piano_spec::build_scale_design;
 
     #[test]
     fn nostd_math_matches_std_and_poles_preserve_padding_invariants() {
@@ -448,7 +377,7 @@ mod tests {
         let voicing = VoicingSpec::default();
         let specs = build_scale_design(&voicing);
         let map = ChoirMap::build_with_specs(&specs, &voicing);
-        let mut soa = ModalSoa::build(96_000.0, &voicing, &specs, &map);
+        let soa = ModalSoa::build(96_000.0, &voicing, &specs, &map);
         assert_eq!(soa.u.as_ptr() as usize % 64, 0);
         assert_eq!(soa.d_coeff.as_ptr() as usize % 64, 0);
 
@@ -456,37 +385,16 @@ mod tests {
         for slot in (a0.vert_vecs.start * 4 + a0.vert_modes)..(a0.vert_vecs.end * 4) {
             assert_eq!(
                 (
-                    soa.d_hold[slot],
-                    soa.s_hold[slot],
+                    soa.d_coeff[slot],
+                    soa.s_coeff[slot],
                     soa.c_bridge[slot],
                     soa.b_exc[slot]
                 ),
                 (1.0, 0.0, 0.0, 0.0)
             );
         }
-        for k in DAMPED_KEYS..NUM_KEYS {
-            for vec_idx in map.keys()[k].vec_range.clone() {
-                assert_eq!(
-                    soa.d_damp.load_f32x4(vec_idx),
-                    soa.d_hold.load_f32x4(vec_idx)
-                );
-                assert_eq!(
-                    soa.s_damp.load_f32x4(vec_idx),
-                    soa.s_hold.load_f32x4(vec_idx)
-                );
-            }
-        }
-        let a0_range = map.keys()[0].vec_range.clone();
-        soa.set_vec_range_hold(a0_range.clone(), 1.0);
-        for vec_idx in a0_range {
-            assert_eq!(
-                soa.d_coeff.load_f32x4(vec_idx),
-                soa.d_hold.load_f32x4(vec_idx)
-            );
-            assert_eq!(
-                soa.s_coeff.load_f32x4(vec_idx),
-                soa.s_hold.load_f32x4(vec_idx)
-            );
-        }
+        assert!(soa.d_coeff[a0.vert_vecs.start * 4] > 0.0);
+        assert!(soa.d_coeff[a0.vert_vecs.start * 4] < 1.0e-3);
+        assert!(soa.s_coeff[a0.vert_vecs.start * 4] > 0.0);
     }
 }
