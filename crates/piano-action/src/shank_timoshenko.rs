@@ -1,5 +1,5 @@
 //! 1st-order Timoshenko flexible hammer shank (`8 * sample_rate`) with let-off
-//! free flight, backcheck catch deactivation, and 12 ms safety timeout.
+//! free flight under gravity, rest-rail / backcheck catch, and 12 ms safety timeout.
 
 use core::f64::consts::TAU;
 
@@ -7,12 +7,20 @@ use piano_spec::{u16_to_unit_f32, NUM_KEYS};
 
 use crate::math::pow_nonneg_f64;
 
+/// Gravitational deceleration (`m/s^2`) acting on the hammer during free flight.
+pub const GRAVITY_MPS2: f32 = 9.81;
 /// Initial hammer position behind the let-off gap (`-20 um`).
 pub const HAMMER_LET_OFF_Y0_M: f32 = -2.0e-5;
 /// Backcheck catch threshold on downward rebound (`-60 um`).
 pub const BACKCHECK_CATCH_Y_M: f32 = -6.0e-5;
 /// Maximum hammer-active safety window (`12 ms`).
 pub const HAMMER_TIMEOUT_S: f64 = 0.012;
+
+const SILENT_KEY_MAX_U16: u16 = 64;
+const SILENT_KEY_V_MIN_MPS: f32 = 0.004;
+const SILENT_KEY_V_MAX_MPS: f32 = 0.015;
+const PP_ANCHOR_U16: u16 = 516; // piano_spec::u7_to_u16(1)
+const PP_ANCHOR_V_MPS: f32 = main_velocity_curve((PP_ANCHOR_U16 as f32) / 65_535.0);
 
 const MASS_A0_KG: f64 = 0.0112;
 const MASS_C8_KG: f64 = 0.0035;
@@ -28,6 +36,8 @@ pub struct ShankParams {
     pub modal_mass_kg: f32,
     pub dt_sub: f32,
     half_dt: f32,
+    g_dt: f32,
+    half_g_dt2: f32,
     c0_f: f32,
     k0_ham: f32,
     c_vv: f32,
@@ -61,6 +71,9 @@ impl ShankParams {
 
         let c0_f = dt / hammer_mass_kg;
         let k0_ham = h * c0_f;
+        let g = f64::from(GRAVITY_MPS2);
+        let g_dt = g * dt;
+        let half_g_dt2 = 0.5 * g * dt * dt;
         let timeout_host_samples =
             ((HAMMER_TIMEOUT_S * sample_rate) + 0.5).clamp(8.0, 65_000.0) as u16;
 
@@ -70,6 +83,8 @@ impl ShankParams {
             modal_mass_kg: modal_mass_kg as f32,
             dt_sub: dt as f32,
             half_dt: h as f32,
+            g_dt: g_dt as f32,
+            half_g_dt2: half_g_dt2 as f32,
             c0_f: c0_f as f32,
             k0_ham: k0_ham as f32,
             c_vv: c_vv as f32,
@@ -87,6 +102,7 @@ pub struct ShankFreePrediction {
     pub y_h_free: f32,
     pub k_ham: f32,
     y0_free: f32,
+    v0_free: f32,
     eta1_free: f32,
     v1_free: f32,
 }
@@ -159,16 +175,19 @@ impl ShankState {
         self.v0 + self.v1
     }
 
-    /// Computes unforced (`F = 0`) trapezoidal endpoint prediction over one `8x` substep.
+    /// Computes unforced (`F = 0`) trapezoidal endpoint prediction over one `8x` substep
+    /// including gravitational deceleration `-GRAVITY_MPS2`.
     #[must_use]
     #[inline]
     pub fn predict_free(&self, params: &ShankParams) -> ShankFreePrediction {
-        let y0_free = self.y0 + self.v0 * params.dt_sub;
+        let y0_free = self.y0 + self.v0 * params.dt_sub - params.half_g_dt2;
+        let v0_free = self.v0 - params.g_dt;
         if !self.flex_enabled {
             return ShankFreePrediction {
                 y_h_free: y0_free,
                 k_ham: params.k0_ham,
                 y0_free,
+                v0_free,
                 eta1_free: 0.0,
                 v1_free: 0.0,
             };
@@ -179,6 +198,7 @@ impl ShankState {
             y_h_free: y0_free + eta1_free,
             k_ham: params.k0_ham + params.k1_ham,
             y0_free,
+            v0_free,
             eta1_free,
             v1_free,
         }
@@ -190,7 +210,7 @@ impl ShankState {
         if force_n > 0.0 {
             self.has_contacted = true;
         }
-        self.v0 -= params.c0_f * force_n;
+        self.v0 = pred.v0_free - params.c0_f * force_n;
         self.y0 = pred.y0_free - params.k0_ham * force_n;
         if self.flex_enabled {
             self.v1 = pred.v1_free - params.c1_f * force_n;
@@ -201,37 +221,64 @@ impl ShankState {
         }
     }
 
-    /// Updates elapsed host sample count and applies backcheck catch / 12 ms timeout.
-    /// Returns `true` if hammer physics remains active for the next host sample.
+    /// Updates elapsed host sample count and applies backcheck catch, sub-escapement
+    /// rest-rail catch, or 12 ms safety timeout. Returns `true` if hammer stays active.
     #[inline]
     pub fn finish_host_sample(&mut self, params: &ShankParams) -> bool {
         if !self.active {
             return false;
         }
         self.elapsed_host_samples = self.elapsed_host_samples.saturating_add(1);
-        let caught = self.has_contacted && self.y_h() < BACKCHECK_CATCH_Y_M && self.v0 < 0.0;
+        let caught_rebound =
+            self.has_contacted && self.y_h() < BACKCHECK_CATCH_Y_M && self.v0 < 0.0;
+        let caught_rest_rail =
+            !self.has_contacted && self.v0 < 0.0 && self.y_h() <= HAMMER_LET_OFF_Y0_M;
         let timed_out = self.elapsed_host_samples >= params.timeout_host_samples;
-        if caught || timed_out {
+        if caught_rest_rail {
+            self.y0 = HAMMER_LET_OFF_Y0_M;
+            self.v0 = 0.0;
+        }
+        if caught_rebound || caught_rest_rail || timed_out {
             self.active = false;
         }
         self.active
     }
 }
 
-/// Maps 16-bit MIDI 2.0 velocity (`1..=65535`) strictly monotonically to hammer
-/// strike speed (`~0.10 m/s` at `pp`, `~1.83 m/s` at `51602`, `4.60 m/s` at `fff`).
-#[must_use]
 #[inline]
-pub fn velocity_from_u16(velocity_u16: u16) -> f32 {
-    let u = u16_to_unit_f32(velocity_u16);
+const fn main_velocity_curve(u: f32) -> f32 {
     let u2 = u * u;
     let u5 = u2 * u2 * u;
     0.10 + 0.75 * u + 3.75 * u5
 }
 
+/// Maps 16-bit MIDI 2.0 velocity (`1..=65535`) strictly monotonically to hammer
+/// strike speed:
+/// - `1..=64`: sub-escapement silent-key range (`0.004..=0.015 m/s < v_esc`)
+/// - `516` (`u7_to_u16(1)`): `~0.106 m/s` (`pp` audible strike)
+/// - `51_602`: `~1.83 m/s` (`mf`), `65_535`: `4.60 m/s` (`fff`).
+#[must_use]
+#[inline]
+pub fn velocity_from_u16(velocity_u16: u16) -> f32 {
+    if velocity_u16 == 0 {
+        return 0.0;
+    }
+    if velocity_u16 <= SILENT_KEY_MAX_U16 {
+        let t = f32::from(velocity_u16 - 1) / f32::from(SILENT_KEY_MAX_U16 - 1);
+        return SILENT_KEY_V_MIN_MPS + (SILENT_KEY_V_MAX_MPS - SILENT_KEY_V_MIN_MPS) * t;
+    }
+    if velocity_u16 < PP_ANCHOR_U16 {
+        let t = f32::from(velocity_u16 - SILENT_KEY_MAX_U16)
+            / f32::from(PP_ANCHOR_U16 - SILENT_KEY_MAX_U16);
+        return SILENT_KEY_V_MAX_MPS + (PP_ANCHOR_V_MPS - SILENT_KEY_V_MAX_MPS) * t;
+    }
+    main_velocity_curve(u16_to_unit_f32(velocity_u16))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use piano_spec::u7_to_u16;
 
     #[test]
     fn velocity_mapping_is_strictly_monotonic_and_hits_targets() {
@@ -241,12 +288,73 @@ mod tests {
             assert!(speed > prev, "non-monotonic at {v}: {speed} <= {prev}");
             prev = speed;
         }
-        let v_pp = velocity_from_u16(1);
+        let v_esc = (2.0 * GRAVITY_MPS2 * (-HAMMER_LET_OFF_Y0_M)).sqrt();
+        for v in 1..=SILENT_KEY_MAX_U16 {
+            let speed = velocity_from_u16(v);
+            assert!(
+                speed < v_esc,
+                "silent velocity {v} exceeded escape {speed} >= {v_esc}"
+            );
+        }
+        assert!((velocity_from_u16(1) - SILENT_KEY_V_MIN_MPS).abs() < 1e-6);
+        assert!((velocity_from_u16(SILENT_KEY_MAX_U16) - SILENT_KEY_V_MAX_MPS).abs() < 1e-6);
+
+        let v_pp = velocity_from_u16(u7_to_u16(1));
         let v_mf = velocity_from_u16(51_602);
         let v_fff = velocity_from_u16(u16::MAX);
         assert!((0.09..=0.11).contains(&v_pp), "pp={v_pp}");
         assert!((1.70..=1.95).contains(&v_mf), "mf={v_mf}");
         assert!((4.55..=4.65).contains(&v_fff), "fff={v_fff}");
+    }
+
+    #[test]
+    fn gravity_returns_sub_escapement_hammer_to_rest_rail() {
+        for &sr in &[44_100.0_f64, 48_000.0, 96_000.0] {
+            let params = ShankParams::for_key(39, sr);
+            for &vel_u16 in &[1_u16, 32, 64] {
+                let mut s = ShankState::default();
+                s.launch(velocity_from_u16(vel_u16));
+                let mut max_y = s.y_h();
+                let mut saw_reversal = false;
+
+                for _ in 0..params.timeout_host_samples {
+                    for _ in 0..8 {
+                        let pred = s.predict_free(&params);
+                        s.apply_force(&params, pred, 0.0);
+                        max_y = max_y.max(s.y_h());
+                        if s.v0 < 0.0 {
+                            saw_reversal = true;
+                        }
+                    }
+                    if !s.finish_host_sample(&params) {
+                        break;
+                    }
+                }
+                assert!(max_y < 0.0, "sr={sr} vel={vel_u16} reached string: {max_y}");
+                assert!(saw_reversal);
+                assert!(!s.active && !s.has_contacted);
+                assert!(s.elapsed_host_samples < params.timeout_host_samples);
+                assert_eq!(s.y_h(), HAMMER_LET_OFF_Y0_M);
+            }
+
+            // Audible pp (u7_to_u16(1)) overcomes gravity and reaches y >= 0.
+            let mut s_pp = ShankState::default();
+            s_pp.launch(velocity_from_u16(u7_to_u16(1)));
+            let mut reached = false;
+            for _ in 0..params.timeout_host_samples {
+                for _ in 0..8 {
+                    let pred = s_pp.predict_free(&params);
+                    s_pp.apply_force(&params, pred, 0.0);
+                    if s_pp.y_h() >= 0.0 {
+                        reached = true;
+                    }
+                }
+                if !s_pp.finish_host_sample(&params) {
+                    break;
+                }
+            }
+            assert!(reached, "pp did not cross let-off gap at sr={sr}");
+        }
     }
 
     #[test]
