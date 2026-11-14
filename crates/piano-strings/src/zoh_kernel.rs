@@ -1,7 +1,7 @@
 //! Coupled-form ZOH modal stepping kernel (`F32x4` SIMD, 8-sample L1-tiled).
 //!
-//! Loop order places samples inside L1-cached mode tiles (never more than `TILE`
-//! samples per pass) while iterating across all 230 strings unconditionally every
+//! Loop order keeps samples inside L1-cached mode tiles (unrolled at compile time for
+//! full `TILE = 8` tiles) while iterating across all 230 strings unconditionally every
 //! sample (D1 invariant: zero voice-stealing or dormant-string skipping).
 
 use core::ops::Range;
@@ -16,18 +16,18 @@ use crate::modal_soa::ModalSoa;
 /// Sample tile width kept resident across string/mode SIMD passes.
 pub(crate) const TILE: usize = 8;
 
-/// Magnitude threshold below which state variables flush to exact zero.
-pub(crate) const SUBNORMAL_FLOOR: f32 = 1.0e-20;
+const SUBNORMAL_FLUSH_BITS: u32 = 1.0e-20_f32.to_bits();
+const FINITE_EXP_BITS: u32 = 0x7f80_0000_u32;
 
 /// Coupled-form exact incremental ZOH rotation on one 4-mode `F32x4` lane.
 ///
 /// Advances `(u, v)` by pole `(1 - d) + i * s` without `2.0`-adjacent rounding:
 /// `u_next = u - (d * u + s * v)` and `v_next = v + (s * u - d * v)`.
 #[inline(always)]
-pub(crate) fn zoh_rotate(u: F32x4, v: F32x4, d: F32x4, s: F32x4) -> (F32x4, F32x4) {
-    let u_next = u - d.mul_add(u, s * v);
-    let v_next = v + s.mul_add(u, F32x4::zero() - (d * v));
-    (u_next, v_next)
+pub(crate) fn zoh_rotate(u0: F32x4, v0: F32x4, d0: F32x4, s0: F32x4) -> (F32x4, F32x4) {
+    let du = d0.mul_add(u0, s0 * v0);
+    let dv = s0 * u0 - d0 * v0;
+    (u0 - du, v0 + dv)
 }
 
 /// Injects scalar excitation impulse `force` into `u_slice` scaled by `b_slice`.
@@ -35,126 +35,194 @@ pub(crate) fn zoh_rotate(u: F32x4, v: F32x4, d: F32x4, s: F32x4) -> (F32x4, F32x
 pub(crate) fn inject_excitation(u_slice: &mut [F32x4], b_slice: &[F32x4], force: f32) {
     let f_v = F32x4::splat(force);
     for (u, &b) in u_slice.iter_mut().zip(b_slice.iter()) {
-        *u = f_v.mul_add(b, *u);
+        *u = b.mul_add(f_v, *u);
     }
 }
 
-/// Advances one contiguous vector range `[F32x4]` by 1 sample and returns `sum(v_next * c)`.
-#[inline]
+/// Advances one contiguous string vector range by 1 sample (4x unrolled, branchless).
+#[inline(always)]
 pub(crate) fn step_string_modes(
-    u_slice: &mut [F32x4],
-    v_slice: &mut [F32x4],
-    d_slice: &[F32x4],
-    s_slice: &[F32x4],
-    c_slice: &[F32x4],
+    u: &mut [F32x4],
+    v: &mut [F32x4],
+    d: &[F32x4],
+    s: &[F32x4],
+    c: &[F32x4],
 ) -> f32 {
-    let mut acc = F32x4::zero();
-    for ((((u, v), &d), &s), &c) in u_slice
-        .iter_mut()
-        .zip(v_slice.iter_mut())
-        .zip(d_slice.iter())
-        .zip(s_slice.iter())
-        .zip(c_slice.iter())
+    let n = u.len();
+    assert!(v.len() == n && d.len() == n && s.len() == n && c.len() == n);
+
+    let zero = F32x4::zero();
+    let (mut acc0, mut acc1, mut acc2, mut acc3) = (zero, zero, zero, zero);
+
+    let mut u_chunks = u.chunks_exact_mut(4);
+    let mut v_chunks = v.chunks_exact_mut(4);
+    let mut d_chunks = d.chunks_exact(4);
+    let mut s_chunks = s.chunks_exact(4);
+    let mut c_chunks = c.chunks_exact(4);
+
+    for ((((uc, vc), dc), sc), cc) in (&mut u_chunks)
+        .zip(&mut v_chunks)
+        .zip(&mut d_chunks)
+        .zip(&mut s_chunks)
+        .zip(&mut c_chunks)
     {
-        let (u_next, v_next) = zoh_rotate(*u, *v, d, s);
-        *u = u_next;
-        *v = v_next;
-        acc = v_next.mul_add(c, acc);
+        for lane in 0..4 {
+            let (un, vn) = zoh_rotate(uc[lane], vc[lane], dc[lane], sc[lane]);
+            uc[lane] = un;
+            vc[lane] = vn;
+            match lane {
+                0 => acc0 = vn.mul_add(cc[0], acc0),
+                1 => acc1 = vn.mul_add(cc[1], acc1),
+                2 => acc2 = vn.mul_add(cc[2], acc2),
+                _ => acc3 = vn.mul_add(cc[3], acc3),
+            }
+        }
     }
-    acc.reduce_sum()
+
+    for ((((ur, vr), &d0), &s0), &c0) in u_chunks
+        .into_remainder()
+        .iter_mut()
+        .zip(v_chunks.into_remainder().iter_mut())
+        .zip(d_chunks.remainder().iter())
+        .zip(s_chunks.remainder().iter())
+        .zip(c_chunks.remainder().iter())
+    {
+        let (un, vn) = zoh_rotate(*ur, *vr, d0, s0);
+        *ur = un;
+        *vr = vn;
+        acc0 = vn.mul_add(c0, acc0);
+    }
+
+    ((acc0 + acc1) + (acc2 + acc3)).reduce_sum()
 }
 
-/// Steps all 230 strings by exactly 1 sample without allocations or branching.
+/// Steps all 230 strings by 1 sample without allocations or branching.
 pub(crate) fn step_all_strings(soa: &mut ModalSoa, map: &ChoirMap) -> (f32, f32) {
-    let u_all = soa.u.as_f32x4_slice_mut();
-    let v_all = soa.v.as_f32x4_slice_mut();
-    let d_all = soa.d_coeff.as_f32x4_slice();
-    let s_all = soa.s_coeff.as_f32x4_slice();
-    let c_all = soa.c_bridge.as_f32x4_slice();
+    let total_vecs = map.total_vecs();
+    let mut u_rest = &mut soa.u.as_f32x4_slice_mut()[..total_vecs];
+    let mut v_rest = &mut soa.v.as_f32x4_slice_mut()[..total_vecs];
+    let mut d_rest = &soa.d_coeff.as_f32x4_slice()[..total_vecs];
+    let mut s_rest = &soa.s_coeff.as_f32x4_slice()[..total_vecs];
+    let mut c_rest = &soa.c_bridge.as_f32x4_slice()[..total_vecs];
 
     let (mut sum_l, mut sum_r) = (0.0_f32, 0.0_f32);
     for entry in map.strings() {
-        let vr = entry.all_vecs();
-        let term = step_string_modes(
-            &mut u_all[vr.clone()],
-            &mut v_all[vr.clone()],
-            &d_all[vr.clone()],
-            &s_all[vr.clone()],
-            &c_all[vr],
-        );
-        sum_l += term * entry.pan_l;
-        sum_r += term * entry.pan_r;
+        let n = entry.vec_len();
+        let (u_str, u_tail) = u_rest.split_at_mut(n);
+        let (v_str, v_tail) = v_rest.split_at_mut(n);
+        let (d_str, d_tail) = d_rest.split_at(n);
+        let (s_str, s_tail) = s_rest.split_at(n);
+        let (c_str, c_tail) = c_rest.split_at(n);
+        (u_rest, v_rest, d_rest, s_rest, c_rest) = (u_tail, v_tail, d_tail, s_tail, c_tail);
+
+        let f_term = step_string_modes(u_str, v_str, d_str, s_str, c_str);
+        sum_l += f_term * entry.pan_l;
+        sum_r += f_term * entry.pan_r;
     }
     (sum_l, sum_r)
 }
 
-/// Steps one string's vector range across `out_l.len() <= TILE` samples in L1 cache.
-#[inline]
+#[inline(always)]
+fn step_tile_inner<const FULL_TILE: bool>(
+    u: &mut [F32x4],
+    v: &mut [F32x4],
+    d: &[F32x4],
+    s: &[F32x4],
+    c: &[F32x4],
+    t_len: usize,
+) -> [F32x4; TILE] {
+    let n = u.len();
+    assert!(v.len() == n && d.len() == n && s.len() == n && c.len() == n);
+    let steps = if FULL_TILE { TILE } else { t_len.min(TILE) };
+    let mut acc = [F32x4::zero(); TILE];
+
+    for ((((u_ref, v_ref), &d0), &s0), &c0) in u[..n]
+        .iter_mut()
+        .zip(v[..n].iter_mut())
+        .zip(d[..n].iter())
+        .zip(s[..n].iter())
+        .zip(c[..n].iter())
+    {
+        let (mut u0, mut v0) = (*u_ref, *v_ref);
+        for acc_slot in &mut acc[..steps] {
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            *acc_slot = v0.mul_add(c0, *acc_slot);
+        }
+        *u_ref = u0;
+        *v_ref = v0;
+    }
+    acc
+}
+
+/// Register-tiled 8-sample coupled-form ZOH stepper for one string vector slice.
+/// Loads each `(u, v, d, s, c)` vector once into SIMD registers across up to `TILE` samples.
+#[inline(always)]
 pub(crate) fn step_string_tile(
     soa: &mut ModalSoa,
     vr: Range<usize>,
+    t_len: usize,
+) -> [F32x4; TILE] {
+    let u = &mut soa.u.as_f32x4_slice_mut()[vr.clone()];
+    let v = &mut soa.v.as_f32x4_slice_mut()[vr.clone()];
+    let d = &soa.d_coeff.as_f32x4_slice()[vr.clone()];
+    let s = &soa.s_coeff.as_f32x4_slice()[vr.clone()];
+    let c = &soa.c_bridge.as_f32x4_slice()[vr];
+    if t_len == TILE {
+        step_tile_inner::<true>(u, v, d, s, c, TILE)
+    } else {
+        step_tile_inner::<false>(u, v, d, s, c, t_len)
+    }
+}
+
+/// Accumulates `acc[..t_len]` reduced terminal outputs into L1 stack `tile_l`/`tile_r`.
+#[inline(always)]
+pub(crate) fn accum_tile_stereo(
+    acc: &[F32x4; TILE],
     pan_l: f32,
     pan_r: f32,
-    out_l: &mut [f32],
-    out_r: &mut [f32],
+    t_len: usize,
+    tile_l: &mut [f32; TILE],
+    tile_r: &mut [f32; TILE],
 ) {
-    let t_len = out_l.len().min(out_r.len());
-    debug_assert!(t_len <= TILE);
-    if t_len == 0 {
-        return;
-    }
-
-    let u_s = &mut soa.u.as_f32x4_slice_mut()[vr.clone()];
-    let v_s = &mut soa.v.as_f32x4_slice_mut()[vr.clone()];
-    let d_s = &soa.d_coeff.as_f32x4_slice()[vr.clone()];
-    let s_s = &soa.s_coeff.as_f32x4_slice()[vr.clone()];
-    let c_s = &soa.c_bridge.as_f32x4_slice()[vr];
-
-    let mut acc = [F32x4::zero(); TILE];
-    for i in 0..u_s.len() {
-        let (mut u, mut v) = (u_s[i], v_s[i]);
-        let (d, s, c) = (d_s[i], s_s[i], c_s[i]);
-        for acc_t in &mut acc[..t_len] {
-            let (un, vn) = zoh_rotate(u, v, d, s);
-            u = un;
-            v = vn;
-            *acc_t = vn.mul_add(c, *acc_t);
-        }
-        u_s[i] = u;
-        v_s[i] = v;
-    }
-
-    for t in 0..t_len {
-        let term = acc[t].reduce_sum();
-        out_l[t] += term * pan_l;
-        out_r[t] += term * pan_r;
+    let steps = t_len.min(TILE);
+    for ((acc_vec, tl), tr) in acc[..steps]
+        .iter()
+        .zip(&mut tile_l[..steps])
+        .zip(&mut tile_r[..steps])
+    {
+        let f_term = acc_vec.reduce_sum();
+        *tl += f_term * pan_l;
+        *tr += f_term * pan_r;
     }
 }
 
-/// Flushes `< SUBNORMAL_FLOOR` state entries to zero within `vec_range`, returning
-/// `true` if any remaining state sample is strictly non-zero.
+/// Branchlessly flushes `< 1e-20` and non-finite entries to zero within `vec_range`,
+/// returning `true` if any remaining state slot is non-zero.
 #[inline]
 pub(crate) fn flush_subnormals_range(soa: &mut ModalSoa, vec_range: Range<usize>) -> bool {
+    const RANGE: u32 = FINITE_EXP_BITS - SUBNORMAL_FLUSH_BITS;
     let slot_range = (vec_range.start * 4)..(vec_range.end * 4);
-    let mut any_nonzero = false;
+    let mut nonzero_bits = 0_u32;
     for x in &mut soa.u.as_mut_slice()[slot_range.clone()] {
-        if x.abs() < SUBNORMAL_FLOOR {
-            *x = 0.0;
-        } else {
-            any_nonzero = true;
-        }
+        let bits = x.to_bits();
+        let abs_bits = bits & 0x7fff_ffff;
+        let keep = abs_bits.wrapping_sub(SUBNORMAL_FLUSH_BITS) < RANGE;
+        let kept = bits & 0_u32.wrapping_sub(u32::from(keep));
+        *x = f32::from_bits(kept);
+        nonzero_bits |= kept;
     }
     for x in &mut soa.v.as_mut_slice()[slot_range] {
-        if x.abs() < SUBNORMAL_FLOOR {
-            *x = 0.0;
-        } else {
-            any_nonzero = true;
-        }
+        let bits = x.to_bits();
+        let abs_bits = bits & 0x7fff_ffff;
+        let keep = abs_bits.wrapping_sub(SUBNORMAL_FLUSH_BITS) < RANGE;
+        let kept = bits & 0_u32.wrapping_sub(u32::from(keep));
+        *x = f32::from_bits(kept);
+        nonzero_bits |= kept;
     }
-    any_nonzero
+    (nonzero_bits & 0x7fff_ffff) != 0
 }
 
-/// Flushes subnormals across the entire `ModalSoa` buffer.
+/// Branchless flush of subnormals across the entire `ModalSoa` buffer.
 pub(crate) fn flush_subnormals_soa(soa: &mut ModalSoa) {
     let total_vecs = soa.u.as_f32x4_slice().len();
     let _ = flush_subnormals_range(soa, 0..total_vecs);
@@ -168,24 +236,24 @@ pub(crate) fn step_all_tiles(
     out_r: &mut [f32],
 ) {
     let total = out_l.len().min(out_r.len());
-    out_l[..total].fill(0.0);
-    out_r[..total].fill(0.0);
-
     let mut base = 0usize;
     while base < total {
         let t_len = (total - base).min(TILE);
-        let l_tile = &mut out_l[base..base + t_len];
-        let r_tile = &mut out_r[base..base + t_len];
+        let mut tile_l = [0.0_f32; TILE];
+        let mut tile_r = [0.0_f32; TILE];
         for entry in map.strings() {
-            step_string_tile(
-                soa,
-                entry.all_vecs(),
+            let acc = step_string_tile(soa, entry.all_vecs(), t_len);
+            accum_tile_stereo(
+                &acc,
                 entry.pan_l,
                 entry.pan_r,
-                l_tile,
-                r_tile,
+                t_len,
+                &mut tile_l,
+                &mut tile_r,
             );
         }
+        out_l[base..base + t_len].copy_from_slice(&tile_l[..t_len]);
+        out_r[base..base + t_len].copy_from_slice(&tile_r[..t_len]);
         base += t_len;
     }
     flush_subnormals_soa(soa);
@@ -200,25 +268,25 @@ pub(crate) fn step_key_subblock(
     out_r: &mut [f32],
 ) {
     let total = out_l.len().min(out_r.len());
-    out_l[..total].fill(0.0);
-    out_r[..total].fill(0.0);
-
     let key_strings = &strings[key.string_range.clone()];
     let mut base = 0usize;
     while base < total {
         let t_len = (total - base).min(TILE);
-        let l_tile = &mut out_l[base..base + t_len];
-        let r_tile = &mut out_r[base..base + t_len];
+        let mut tile_l = [0.0_f32; TILE];
+        let mut tile_r = [0.0_f32; TILE];
         for entry in key_strings {
-            step_string_tile(
-                soa,
-                entry.all_vecs(),
+            let acc = step_string_tile(soa, entry.all_vecs(), t_len);
+            accum_tile_stereo(
+                &acc,
                 entry.pan_l,
                 entry.pan_r,
-                l_tile,
-                r_tile,
+                t_len,
+                &mut tile_l,
+                &mut tile_r,
             );
         }
+        out_l[base..base + t_len].copy_from_slice(&tile_l[..t_len]);
+        out_r[base..base + t_len].copy_from_slice(&tile_r[..t_len]);
         base += t_len;
     }
     let _ = flush_subnormals_range(soa, key.vec_range.clone());

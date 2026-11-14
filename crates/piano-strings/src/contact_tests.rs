@@ -1,7 +1,8 @@
 use super::*;
+use crate::contact_ports::{damper_phi, HORIZ_DAMP_SCALE};
 use crate::StringBank;
 use piano_simd::{Complex, RealFft};
-use piano_spec::{build_scale_design, DAMPED_KEYS, NUM_KEYS};
+use piano_spec::{build_scale_design, VoicingSpec, DAMPED_KEYS, NUM_KEYS};
 
 struct MockAction {
     sr: f32,
@@ -14,6 +15,7 @@ struct MockAction {
     y_clear: [f32; NUM_KEYS],
     weights: [[f32; 3]; NUM_KEYS],
     damper_calls: [usize; NUM_KEYS],
+    slot_parity: [u8; NUM_KEYS],
     last_impulse_once: Option<(usize, f32)>,
 }
 
@@ -42,6 +44,7 @@ impl MockAction {
             y_clear: [5.0e-3; NUM_KEYS],
             weights: [[1.0; 3]; NUM_KEYS],
             damper_calls: [0; NUM_KEYS],
+            slot_parity: [0; NUM_KEYS],
             last_impulse_once: None,
         }
     }
@@ -69,6 +72,19 @@ impl KeyActionDriver for MockAction {
 
     fn step_key_clearance(&mut self, key_idx: usize) -> f32 {
         self.y_clear[key_idx]
+    }
+
+    fn step_key_clearance_tile(
+        &mut self,
+        key_idx: usize,
+        t_len: usize,
+        out_clears: &mut [f32; TILE],
+    ) -> f32 {
+        let c = self.y_clear[key_idx];
+        for yc in &mut out_clears[..t_len] {
+            *yc = c;
+        }
+        c
     }
 
     fn step_hammer_sample(
@@ -119,13 +135,14 @@ impl KeyActionDriver for MockAction {
     fn step_damper_sample(
         &mut self,
         key_idx: usize,
-        _str_idx: usize,
+        slot_idx: usize,
         y_damp_m: f32,
         v_damp_mps: f32,
         r_port_damp: f32,
         y_clear_m: f32,
     ) -> f32 {
         self.damper_calls[key_idx] += 1;
+        self.slot_parity[key_idx] |= 1 << (slot_idx & 1);
         if y_damp_m == 0.0 && v_damp_mps == 0.0 {
             return 0.0;
         }
@@ -133,9 +150,14 @@ impl KeyActionDriver for MockAction {
         if pen <= 0.0 {
             return 0.0;
         }
-        // Unilateral passive felt damping guaranteed bounded by r_port_damp.
-        let z_eff = 1.0 / (r_port_damp + 1.0 / (16.0 * pen.min(4.0)));
-        -0.9 * z_eff * v_damp_mps
+        // Unilateral passive felt damping matching DamperPadBank bilinear port passivity.
+        let c_raw = 80.0 * pen.min(4.0);
+        let c_eff = if r_port_damp > 0.0 {
+            c_raw.min(2.4 / r_port_damp)
+        } else {
+            c_raw
+        };
+        -(c_eff * v_damp_mps) / (1.0 + 0.5 * r_port_damp * c_eff)
     }
 }
 
@@ -169,13 +191,38 @@ fn port_duality_conservation_and_damper_profile_invariants() {
 
             if (entry.key_idx as usize) >= DAMPED_KEYS {
                 assert!(bd.iter().all(|&x| x == 0.0) && ad.iter().all(|&x| x == 0.0));
-                assert_eq!(bank.ports.r_port_damp[s_idx], 0.0);
+                assert_eq!(bank.ports.r_port_damp_v[s_idx], 0.0);
+                assert_eq!(bank.ports.r_port_damp_h[s_idx], 0.0);
             } else {
-                let r_d_check =
-                    alpha * bd.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>();
-                let rel_d = (r_d_check - f64::from(bank.ports.r_port_damp[s_idx])).abs()
-                    / r_d_check.max(1e-20);
-                assert!(rel_d < 1e-5, "sr={sr} s={s_idx} rel_d={rel_d}");
+                let bd_all = bank.ports.b_damp.as_slice();
+                let ad_all = bank.ports.a_damp.as_slice();
+                let (vv, hv, lv) = (
+                    entry.vert_vecs.clone(),
+                    entry.horiz_vecs.clone(),
+                    entry.long_vecs.clone(),
+                );
+                let bd_v = &bd_all[vv.start * 4..vv.end * 4];
+                let bd_h = &bd_all[hv.start * 4..hv.end * 4];
+                let bd_l = &bd_all[lv.start * 4..lv.end * 4];
+                let ad_l = &ad_all[lv.start * 4..lv.end * 4];
+                assert!(bd_l.iter().all(|&x| x == 0.0) && ad_l.iter().all(|&x| x == 0.0));
+
+                let rv_check = alpha
+                    * bd_v
+                        .iter()
+                        .map(|&x| f64::from(x) * f64::from(x))
+                        .sum::<f64>();
+                let rh_check = alpha
+                    * bd_h
+                        .iter()
+                        .map(|&x| f64::from(x) * f64::from(x))
+                        .sum::<f64>();
+                let rel_v = (rv_check - f64::from(bank.ports.r_port_damp_v[s_idx])).abs()
+                    / rv_check.max(1e-20);
+                let rel_h = (rh_check - f64::from(bank.ports.r_port_damp_h[s_idx])).abs()
+                    / rh_check.max(1e-20);
+                assert!(rel_v < 1e-5, "sr={sr} s={s_idx} rel_v={rel_v}");
+                assert!(rel_h < 1e-5, "sr={sr} s={s_idx} rel_h={rel_h}");
             }
         }
 
@@ -289,11 +336,12 @@ fn unilateral_damper_passivity_transition_sync_and_una_corda() {
             let ratio = (v * v + h * h).sqrt() / e0;
             assert!(
                 if k < DAMPED_KEYS {
-                    ratio < 0.08 && drv.damper_calls[k] > 0
+                    ratio < 0.08 && drv.damper_calls[k] > 0 && drv.slot_parity[k] == 0b11
                 } else {
                     ratio > 0.14
                 },
-                "sr={sr} k={k} ratio={ratio}"
+                "sr={sr} k={k} ratio={ratio} parity={:b}",
+                drv.slot_parity[k]
             );
         }
     }
@@ -336,4 +384,74 @@ fn unilateral_damper_passivity_transition_sync_and_una_corda() {
         .string_range
         .clone()
         .all(|s| !bank.ports.may_be_nonzero[s]));
+}
+
+#[test]
+fn orthogonal_vh_damper_kills_null_space_decay() {
+    let sr = 48_000.0_f32;
+    let voicing = VoicingSpec::default();
+    let specs = build_scale_design(&voicing);
+    let map = ChoirMap::build_with_specs(&specs, &voicing);
+
+    let mut failures = Vec::new();
+    for &k in &[0usize, 15, 27, 39, 51, 63, 69] {
+        let mut bank = StringBank::new(sr, &voicing);
+        let mut drv = MockAction::new(sr);
+        let inv_h = 1.0_f32 / (HORIZ_DAMP_SCALE as f32);
+
+        // Construct the exact anti-phase rank-1 null-space state (V + 0.85*H == 0).
+        for s_idx in map.keys()[k].string_range.clone() {
+            let e = &map.strings()[s_idx];
+            let vb = e.vert_vecs.start * 4;
+            let hb = e.horiz_vecs.start * 4;
+            let n_modes = e.vert_modes.min(e.horiz_modes).min(12);
+            for m in 0..n_modes {
+                let bd_v = bank.ports.b_damp.as_slice()[vb + m];
+                let u_mut = bank.soa.u.as_mut_slice();
+                u_mut[vb + m] = 200.0 * bd_v;
+                u_mut[hb + m] = -200.0 * inv_h * bd_v;
+            }
+        }
+        bank.mark_key_possibly_active(k);
+
+        let (mut l_pre, mut r_pre) = ([0.0_f32; 32], [0.0_f32; 32]);
+        drv.y_clear[k] = 5.0e-3;
+        bank.render_subblock_coupled(&mut drv, &mut l_pre, &mut r_pre);
+        let (v0, h0) = bank.measure_key_polarization_rms(k);
+        assert!(v0 > 1.0e-4 && h0 > 1.0e-4, "k={k} v0={v0} h0={h0}");
+
+        drv.y_clear[k] = -3.0e-4;
+        let n_damp = (sr * 0.25) as usize;
+        let (mut dl, mut dr) = (vec![0.0_f32; n_damp], vec![0.0_f32; n_damp]);
+        bank.render_subblock_coupled(&mut drv, &mut dl, &mut dr);
+        let (v1, h1) = bank.measure_key_polarization_rms(k);
+        let rv = v1 / v0;
+        let rh = h1 / h0;
+        let s0 = map.keys()[k].string_range.start;
+        eprintln!(
+            "orthogonal null-space damp k={k}: r_v={:.4} r_h={:.4} rv={rv:.5} rh={rh:.5} parity={:b}",
+            bank.ports.r_port_damp_v[s0],
+            bank.ports.r_port_damp_h[s0],
+            drv.slot_parity[k]
+        );
+        // A0 has 36.4 ms fundamental period & 140 modes; check > 26 dB @ 250 ms and > 40 dB @ 500 ms.
+        let ok_250 = if k == 0 {
+            rv < 0.05 && rh < 0.05
+        } else {
+            rv < 0.01 && rh < 0.01
+        };
+        if !(ok_250 && drv.slot_parity[k] == 0b11) {
+            failures.push((k, rv, rh, drv.slot_parity[k]));
+        }
+        if k == 0 {
+            bank.render_subblock_coupled(&mut drv, &mut dl, &mut dr);
+            let (v2, h2) = bank.measure_key_polarization_rms(k);
+            let (rv2, rh2) = (v2 / v0, h2 / h0);
+            eprintln!("orthogonal null-space damp k=0 @ 500ms: rv={rv2:.5} rh={rh2:.5}");
+            if rv2 >= 0.01 || rh2 >= 0.01 {
+                failures.push((100, rv2, rh2, drv.slot_parity[k]));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "failures={failures:?}");
 }

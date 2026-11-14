@@ -10,6 +10,7 @@ extern crate alloc;
 
 pub mod choir_map;
 pub mod contact;
+pub(crate) mod contact_ports;
 pub mod modal_soa;
 pub mod zoh_kernel;
 
@@ -18,7 +19,7 @@ pub use contact::KeyActionDriver;
 use piano_spec::{build_scale_design, VoicingSpec};
 
 use crate::choir_map::ChoirMap;
-use crate::contact::ContactPorts;
+use crate::contact_ports::ContactPorts;
 use crate::modal_soa::ModalSoa;
 use crate::zoh_kernel::{flush_subnormals_range, inject_excitation, step_all_strings};
 
@@ -153,12 +154,7 @@ impl StringBank {
     pub fn flush_subnormals(&mut self) {
         for (s_idx, entry) in self.choir_map.strings().iter().enumerate() {
             if !flush_subnormals_range(&mut self.soa, entry.all_vecs()) {
-                self.ports.may_be_nonzero[s_idx] = false;
-                self.ports.y_h[s_idx] = 0.0;
-                self.ports.v_h[s_idx] = 0.0;
-                self.ports.y_d[s_idx] = 0.0;
-                self.ports.v_d[s_idx] = 0.0;
-                self.ports.ports_synced[s_idx] = true;
+                self.ports.clear_string_state(s_idx);
             }
         }
     }
