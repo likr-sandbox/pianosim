@@ -28,6 +28,7 @@ version = "0.1.0"
 dependencies = [
  "piano-simd",
  "piano-spec",
+ "piano-strings",
 ]
 
 [[package]]

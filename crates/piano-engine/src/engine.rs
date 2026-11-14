@@ -1,33 +1,29 @@
-//! Polyphonic SIMD-accelerated ZOH modal synthesizer core for M1 verification.
+//! Real-time 88-key / 230-string / ~26k-mode piano synthesizer engine core.
 
-use piano_simd::F32x4;
-use piano_spec::{u16_to_unit_f32, EventKind, PedalKind, SampleEvent};
+use piano_spec::{
+    midi_to_key, u16_to_unit_f32, EventKind, PedalKind, SampleEvent, VoicingSpec, CHOIR_LAYOUTS,
+    DAMPED_KEYS, NUM_KEYS,
+};
+use piano_strings::StringBank;
 
 use crate::event_queue::{is_sorted_by_offset, EventQueue};
-use crate::modal_bank::{
-    build_key_table, KeyModalParams, ModalBank, VoiceState, MIDI_KEY_COUNT, NUM_VOICES,
-    PARTIALS_PER_VOICE,
-};
 use crate::telemetry::{compute_block_telemetry, EngineTelemetry};
 
-const PARTIAL_WEIGHTS: [f32; PARTIALS_PER_VOICE] = [1.0, 0.42, 0.20, 0.10];
-const VOICE_SILENCE_THRESHOLD: f32 = 1.0e-5;
-const SUBNORMAL_FLUSH_THRESHOLD: f32 = 1.0e-20;
+const KEY_SILENCE_RMS_THRESHOLD: f32 = 1.0e-4;
 
 /// Core synthesizer state separated from scratch event queue for clean borrowing.
 #[derive(Clone, Debug)]
 struct EngineCore {
-    sample_rate: f32,
-    key_table: [KeyModalParams; MIDI_KEY_COUNT],
-    voices: [VoiceState; NUM_VOICES],
-    bank: ModalBank,
+    bank: StringBank,
+    key_down: [bool; NUM_KEYS],
+    sostenuto_latched: [bool; NUM_KEYS],
+    ringing: [bool; NUM_KEYS],
     sustain: f32,
     una_corda: f32,
     sostenuto_down: bool,
-    trigger_seq: u64,
 }
 
-/// Zero-allocation polyphonic piano test engine for the M1 vertical slice.
+/// Zero-allocation 88-key polyphonic piano engine backed by [`StringBank`].
 #[derive(Clone, Debug)]
 pub struct PianoEngine {
     core: EngineCore,
@@ -36,24 +32,24 @@ pub struct PianoEngine {
 }
 
 impl PianoEngine {
-    /// Allocates and precomputes all modal tuning tables for `sample_rate` once.
+    /// Allocates and precomputes all 88-key / 230-string tables with default voicing.
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
-        let safe_rate = if sample_rate.is_finite() {
-            sample_rate.clamp(8_000.0, 384_000.0)
-        } else {
-            48_000.0
-        };
+        Self::new_with_voicing(sample_rate, &VoicingSpec::default())
+    }
+
+    /// Allocates and precomputes all 88-key / 230-string tables for `voicing`.
+    #[must_use]
+    pub fn new_with_voicing(sample_rate: f32, voicing: &VoicingSpec) -> Self {
         Self {
             core: EngineCore {
-                sample_rate: safe_rate,
-                key_table: build_key_table(f64::from(safe_rate)),
-                voices: [VoiceState::default(); NUM_VOICES],
-                bank: ModalBank::new(),
+                bank: StringBank::new(sample_rate, voicing),
+                key_down: [false; NUM_KEYS],
+                sostenuto_latched: [false; NUM_KEYS],
+                ringing: [false; NUM_KEYS],
                 sustain: 0.0,
                 una_corda: 0.0,
                 sostenuto_down: false,
-                trigger_seq: 0,
             },
             scratch_events: EventQueue::new(),
             telemetry: EngineTelemetry::default(),
@@ -64,7 +60,14 @@ impl PianoEngine {
     #[must_use]
     #[inline]
     pub const fn sample_rate(&self) -> f32 {
-        self.core.sample_rate
+        self.core.bank.sample_rate()
+    }
+
+    /// Returns total SIMD4-padded modal slots driven on every sample (`~26,184`).
+    #[must_use]
+    #[inline]
+    pub const fn total_modes(&self) -> usize {
+        self.core.bank.total_modes()
     }
 
     /// Returns the telemetry captured during the most recent `render_block` call.
@@ -74,19 +77,15 @@ impl PianoEngine {
         self.telemetry
     }
 
-    /// Returns the count of currently active ringing voices.
+    /// Returns the count of currently active ringing keys.
     #[must_use]
     pub fn active_voices(&self) -> u32 {
         self.core.active_voice_count()
     }
 
-    /// Resets all voices, pedal states, and modal buffers without reallocating.
+    /// Resets all 88 keys, pedal states, and modal buffers without reallocating.
     pub fn reset(&mut self) {
-        self.core.voices = [VoiceState::default(); NUM_VOICES];
-        self.core.bank.clear_all();
-        self.core.sustain = 0.0;
-        self.core.una_corda = 0.0;
-        self.core.sostenuto_down = false;
+        self.core.all_notes_off();
         self.telemetry = EngineTelemetry::default();
     }
 
@@ -112,14 +111,14 @@ impl PianoEngine {
                 .render_event_slice(self.scratch_events.as_slice(), out_l, out_r);
         }
 
-        self.core.retire_silent_voices();
+        self.core.retire_silent_keys();
         self.telemetry = compute_block_telemetry(self.core.active_voice_count(), out_l, out_r);
     }
 }
 
 impl EngineCore {
     fn active_voice_count(&self) -> u32 {
-        self.voices.iter().filter(|v| v.active).count() as u32
+        self.ringing.iter().filter(|&&r| r).count() as u32
     }
 
     fn render_event_slice(&mut self, events: &[SampleEvent], out_l: &mut [f32], out_r: &mut [f32]) {
@@ -139,34 +138,10 @@ impl EngineCore {
     }
 
     fn render_subblock(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
-        let frames = out_l.len();
-        let q0_vecs = self.bank.q0.as_padded_f32x4_slice_mut();
-        let q1_vecs = self.bank.q1.as_padded_f32x4_slice_mut();
-        let a1_vecs = self.bank.a1.as_padded_f32x4_slice();
-        let a2_vecs = self.bank.a2.as_padded_f32x4_slice();
-        let b_vecs = self.bank.b_gain.as_padded_f32x4_slice();
-        let gl_vecs = self.bank.gain_l.as_padded_f32x4_slice();
-        let gr_vecs = self.bank.gain_r.as_padded_f32x4_slice();
-
-        for i in 0..frames {
-            let mut acc_l = F32x4::zero();
-            let mut acc_r = F32x4::zero();
-
-            for v in 0..NUM_VOICES {
-                let exc = self.voices[v].next_excitation();
-                let cur = q0_vecs[v];
-                let prev = q1_vecs[v];
-                let next =
-                    a1_vecs[v].mul_add(cur, b_vecs[v] * F32x4::splat(exc)) - a2_vecs[v] * prev;
-                q1_vecs[v] = cur;
-                q0_vecs[v] = next;
-
-                acc_l = next.mul_add(gl_vecs[v], acc_l);
-                acc_r = next.mul_add(gr_vecs[v], acc_r);
-            }
-
-            out_l[i] = soft_limit(acc_l.reduce_sum());
-            out_r[i] = soft_limit(acc_r.reduce_sum());
+        self.bank.render_subblock(out_l, out_r);
+        for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
+            *l = soft_limit(*l);
+            *r = soft_limit(*r);
         }
     }
 
@@ -189,68 +164,36 @@ impl EngineCore {
     }
 
     fn note_on(&mut self, midi_key: u8, velocity_u16: u16) {
-        let key = midi_key.min(127);
-        let (voice_idx, retrigger) = self.allocate_voice(key);
-        self.trigger_seq = self.trigger_seq.wrapping_add(1);
-
-        let params = self.key_table[key as usize];
-        let v_unit = u16_to_unit_f32(velocity_u16).max(1.0 / 65_535.0);
-        let amp = 0.28 * (0.08 + 0.92 * v_unit * v_unit) * (1.0 - 0.25 * self.una_corda);
-        let bright = (0.35 + 0.65 * v_unit) * (1.0 - 0.35 * self.una_corda);
-        let weights = [
-            PARTIAL_WEIGHTS[0],
-            PARTIAL_WEIGHTS[1] * bright,
-            PARTIAL_WEIGHTS[2] * bright * bright,
-            PARTIAL_WEIGHTS[3] * bright * bright * bright,
-        ];
-
-        let sin_w = F32x4::from_array(params.sin_w);
-        let b_vec = sin_w * F32x4::from_array(weights) * F32x4::splat(amp);
-
-        if !retrigger {
-            self.bank.clear_voice_state(voice_idx);
-            self.bank
-                .two_cos_w
-                .store_f32x4(voice_idx, F32x4::from_array(params.two_cos_w));
-            self.bank
-                .r_hold
-                .store_f32x4(voice_idx, F32x4::from_array(params.r_hold));
-            self.bank
-                .r_damp
-                .store_f32x4(voice_idx, F32x4::from_array(params.r_damp));
-            self.bank
-                .gain_l
-                .store_f32x4(voice_idx, F32x4::from_array(params.gain_l));
-            self.bank
-                .gain_r
-                .store_f32x4(voice_idx, F32x4::from_array(params.gain_r));
-        }
-
-        self.bank.b_gain.store_f32x4(voice_idx, b_vec);
-        self.voices[voice_idx] = VoiceState {
-            active: true,
-            key_down: true,
-            sostenuto_latched: self.voices[voice_idx].sostenuto_latched && retrigger,
-            midi_key: key,
-            age: self.trigger_seq,
-            pulse_remaining: params.pulse_len,
-            pulse_sin: params.pulse_init_sin,
-            pulse_cos: params.pulse_init_cos,
-            pulse_step_sin: params.pulse_step_sin,
-            pulse_step_cos: params.pulse_step_cos,
-            pulse_scale: params.pulse_inv_sum,
+        let Some(k) = midi_to_key(midi_key) else {
+            return;
         };
-        self.refresh_voice_damping(voice_idx);
+        self.key_down[k] = true;
+        self.ringing[k] = true;
+        self.bank.set_key_hold(k, 1.0);
+
+        let u = self.una_corda;
+        let weights = match CHOIR_LAYOUTS[k].strings_per_key {
+            3 => [1.0 - u, 1.0, 1.0],
+            2 => [1.0 - u, 1.0, 0.0],
+            _ => [1.0 - 0.25 * u, 0.0, 0.0],
+        };
+
+        let v = u16_to_unit_f32(velocity_u16).max(1.0 / 65_535.0);
+        let amp = 0.08 + 0.92 * v * v;
+        self.bank.trigger_key_pulse(k, weights, amp);
     }
 
     fn note_off(&mut self, midi_key: u8) {
-        let key = midi_key.min(127);
-        for v in 0..NUM_VOICES {
-            if self.voices[v].active && self.voices[v].key_down && self.voices[v].midi_key == key {
-                self.voices[v].key_down = false;
-                self.refresh_voice_damping(v);
-            }
-        }
+        let Some(k) = midi_to_key(midi_key) else {
+            return;
+        };
+        self.key_down[k] = false;
+        let eff_hold = if self.sostenuto_latched[k] {
+            1.0
+        } else {
+            self.sustain
+        };
+        self.bank.set_key_hold(k, eff_hold);
     }
 
     fn set_pedal(&mut self, kind: PedalKind, value_u16: u16) {
@@ -258,9 +201,9 @@ impl EngineCore {
         match kind {
             PedalKind::Sustain => {
                 self.sustain = unit;
-                for v in 0..NUM_VOICES {
-                    if self.voices[v].active {
-                        self.refresh_voice_damping(v);
+                for k in 0..DAMPED_KEYS {
+                    if !self.key_down[k] && !self.sostenuto_latched[k] {
+                        self.bank.set_key_hold(k, unit);
                     }
                 }
             }
@@ -270,17 +213,17 @@ impl EngineCore {
             PedalKind::Sostenuto => {
                 let down = unit >= 0.5;
                 if down && !self.sostenuto_down {
-                    for v in 0..NUM_VOICES {
-                        if self.voices[v].active && self.voices[v].key_down {
-                            self.voices[v].sostenuto_latched = true;
+                    for k in 0..NUM_KEYS {
+                        if self.key_down[k] {
+                            self.sostenuto_latched[k] = true;
                         }
                     }
                 } else if !down && self.sostenuto_down {
-                    for v in 0..NUM_VOICES {
-                        if self.voices[v].sostenuto_latched {
-                            self.voices[v].sostenuto_latched = false;
-                            if self.voices[v].active {
-                                self.refresh_voice_damping(v);
+                    for k in 0..NUM_KEYS {
+                        if self.sostenuto_latched[k] {
+                            self.sostenuto_latched[k] = false;
+                            if !self.key_down[k] {
+                                self.bank.set_key_hold(k, self.sustain);
                             }
                         }
                     }
@@ -292,82 +235,25 @@ impl EngineCore {
 
     fn all_notes_off(&mut self) {
         self.sustain = 0.0;
+        self.una_corda = 0.0;
         self.sostenuto_down = false;
-        for v in 0..NUM_VOICES {
-            if self.voices[v].active {
-                self.voices[v].key_down = false;
-                self.voices[v].sostenuto_latched = false;
-                self.refresh_voice_damping(v);
-            }
-        }
+        self.key_down.fill(false);
+        self.sostenuto_latched.fill(false);
+        self.ringing.fill(false);
+        self.bank.reset();
     }
 
-    fn allocate_voice(&self, midi_key: u8) -> (usize, bool) {
-        for (idx, v) in self.voices.iter().enumerate() {
-            if v.active && v.midi_key == midi_key {
-                return (idx, true);
-            }
-        }
-        for (idx, v) in self.voices.iter().enumerate() {
-            if !v.active {
-                return (idx, false);
-            }
-        }
-        let mut best_idx = 0_usize;
-        let mut best_released = !self.voices[0].key_down;
-        let mut best_age = self.voices[0].age;
-        for (idx, v) in self.voices.iter().enumerate().skip(1) {
-            let released = !v.key_down;
-            if (released && !best_released) || (released == best_released && v.age < best_age) {
-                best_idx = idx;
-                best_released = released;
-                best_age = v.age;
-            }
-        }
-        (best_idx, false)
-    }
-
-    fn refresh_voice_damping(&mut self, voice_idx: usize) {
-        let v = self.voices[voice_idx];
-        let r_hold = self.bank.r_hold.load_f32x4(voice_idx);
-        let r_damp = self.bank.r_damp.load_f32x4(voice_idx);
-        let two_cos_w = self.bank.two_cos_w.load_f32x4(voice_idx);
-
-        let hold_amount = if v.key_down || v.sostenuto_latched {
-            1.0_f32
-        } else {
-            self.sustain
-        };
-        let r = r_damp + (r_hold - r_damp) * F32x4::splat(hold_amount);
-        self.bank.a1.store_f32x4(voice_idx, two_cos_w * r);
-        self.bank.a2.store_f32x4(voice_idx, r * r);
-    }
-
-    fn retire_silent_voices(&mut self) {
-        for v in 0..NUM_VOICES {
-            if !self.voices[v].active {
+    fn retire_silent_keys(&mut self) {
+        for k in 0..NUM_KEYS {
+            if !self.ringing[k] || self.key_down[k] || self.sostenuto_latched[k] {
                 continue;
             }
-            let q0 = self.bank.q0.load_f32x4(v).abs();
-            let q1 = self.bank.q1.load_f32x4(v).abs();
-            let peak_arr = q0.max(q1).to_array();
-            let max_lane = peak_arr[0]
-                .max(peak_arr[1])
-                .max(peak_arr[2])
-                .max(peak_arr[3]);
-
-            let damped = !self.voices[v].key_down
-                && !self.voices[v].sostenuto_latched
-                && self.sustain < 0.99;
-            if damped && self.voices[v].pulse_remaining == 0 && max_lane < VOICE_SILENCE_THRESHOLD {
-                self.voices[v].active = false;
-                self.bank.clear_voice_state(v);
+            if k < DAMPED_KEYS && self.sustain >= 0.99 {
                 continue;
             }
-
-            if max_lane < SUBNORMAL_FLUSH_THRESHOLD && self.voices[v].pulse_remaining == 0 {
-                self.bank.q0.store_f32x4(v, F32x4::zero());
-                self.bank.q1.store_f32x4(v, F32x4::zero());
+            let (v_rms, h_rms) = self.bank.measure_key_polarization_rms(k);
+            if v_rms.max(h_rms) < KEY_SILENCE_RMS_THRESHOLD {
+                self.ringing[k] = false;
             }
         }
     }

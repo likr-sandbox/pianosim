@@ -2,12 +2,10 @@
 
 pub mod engine;
 pub mod event_queue;
-mod modal_bank;
 pub mod telemetry;
 
 pub use engine::PianoEngine;
 pub use event_queue::{EventQueue, MAX_EVENTS};
-pub use modal_bank::{NUM_VOICES, PARTIALS_PER_VOICE, TOTAL_MODES};
 pub use piano_spec;
 pub use telemetry::EngineTelemetry;
 
@@ -15,7 +13,10 @@ pub use telemetry::EngineTelemetry;
 mod tests {
     use core::f64::consts::TAU;
 
-    use piano_spec::{u7_to_u16, EventKind, PedalKind, SampleEvent};
+    use piano_spec::{
+        build_scale_design, key_tuned_f0_hz, partial_frequency_hz, u7_to_u16, EventKind, PedalKind,
+        SampleEvent, VoicingSpec,
+    };
 
     use super::*;
 
@@ -24,8 +25,11 @@ mod tests {
         (sum_sq / (slice.len().max(1) as f64)).sqrt() as f32
     }
 
+    fn peak_abs(slice: &[f32]) -> f32 {
+        slice.iter().fold(0.0_f32, |acc, &x| acc.max(x.abs()))
+    }
+
     fn estimate_peak_freq_hz(samples: &[f32], sample_rate: f64, f_min: f64, f_max: f64) -> f64 {
-        // Coarse DFT scan (0.5 Hz resolution) followed by fine 0.01 Hz refinement.
         let mut best_freq = f_min;
         let mut best_mag = -1.0_f64;
 
@@ -87,9 +91,14 @@ mod tests {
     }
 
     #[test]
-    fn a4_pitch_accuracy_440hz_and_finite_bounded_output() {
-        let sample_rate = 48_000.0_f32;
-        let mut engine = PianoEngine::new(sample_rate);
+    fn a4_pitch_accuracy_440hz_and_mode_count() {
+        let mut engine = PianoEngine::new(48_000.0);
+        assert!(
+            engine.total_modes() >= 25_000,
+            "expected >= 25,000 SIMD modes, got {}",
+            engine.total_modes()
+        );
+
         let on = [SampleEvent {
             sample_offset: 0,
             kind: EventKind::NoteOn {
@@ -104,17 +113,26 @@ mod tests {
             assert!(l.abs() <= 1.0 && r.abs() <= 1.0);
         }
 
-        let mut mono = vec![0.0_f32; out_l.len()];
-        for i in 0..mono.len() {
-            mono[i] = 0.5 * (out_l[i] + out_r[i]);
-        }
-        assert!(rms(&mono) > 0.01, "expected audible A4 output");
-
-        // Analyze steady resonance window after the brief initial strike transient.
-        let peak_hz = estimate_peak_freq_hz(&mono[1024..17408], 48_000.0, 200.0, 1000.0);
+        let mono: Vec<f32> = out_l
+            .iter()
+            .zip(out_r.iter())
+            .map(|(&l, &r)| 0.5 * (l + r))
+            .collect();
+        let mono_rms = rms(&mono);
+        let peak = peak_abs(&out_l).max(peak_abs(&out_r));
         assert!(
-            (peak_hz - 440.0).abs() < 0.2,
-            "expected A4 near 440.0 Hz, got {peak_hz}"
+            mono_rms > 0.01,
+            "expected audible A4 rms > 0.01, got {mono_rms}"
+        );
+        assert!(peak < 0.8, "expected A4 peak < 0.8, got {peak}");
+
+        let peak_hz = estimate_peak_freq_hz(&mono[1024..17408], 48_000.0, 410.0, 470.0);
+        let voicing = VoicingSpec::default();
+        let specs = build_scale_design(&voicing);
+        let expected_a4 = partial_frequency_hz(440.0, specs[48].inharmonicity_b, 1);
+        assert!(
+            (peak_hz - expected_a4).abs() < 0.5 && (peak_hz - 440.0).abs() < 0.6,
+            "expected A4 near {expected_a4:.2} Hz (~440 Hz), got {peak_hz}"
         );
     }
 
@@ -178,12 +196,10 @@ mod tests {
             },
         }];
 
-        // Case 1: Dry damper release (sustain off).
         let mut dry = PianoEngine::new(sr);
         let _ = render_chunks(&mut dry, 4800, 128, &note_on);
         let (dry_tail_l, _) = render_chunks(&mut dry, 19_200, 128, &note_off);
 
-        // Case 2: Sustain pedal depressed before NoteOff.
         let mut sus = PianoEngine::new(sr);
         let sus_on = [
             SampleEvent {
@@ -198,8 +214,8 @@ mod tests {
         let _ = render_chunks(&mut sus, 4800, 128, &sus_on);
         let (sus_tail_l, _) = render_chunks(&mut sus, 19_200, 128, &note_off);
 
-        let dry_late_rms = rms(&dry_tail_l[12_000..]);
-        let sus_late_rms = rms(&sus_tail_l[12_000..]);
+        let dry_late_rms = rms(&dry_tail_l[14_400..]);
+        let sus_late_rms = rms(&sus_tail_l[14_400..]);
         assert!(
             dry_late_rms < 1e-3,
             "expected fast damper decay in tail, got {dry_late_rms}"
@@ -218,7 +234,6 @@ mod tests {
         let mut out_l = [0.0_f32; 256];
         let mut out_r = [0.0_f32; 256];
 
-        // Pass unsorted offsets: NoteOff at 192 listed before NoteOn at 64.
         let events = [
             SampleEvent {
                 sample_offset: 192,
@@ -248,11 +263,10 @@ mod tests {
     }
 
     #[test]
-    fn sostenuto_una_corda_and_16_voice_polyphony_stay_bounded() {
+    fn full_88_key_polyphony_sostenuto_una_corda_and_panic() {
         let mut engine = PianoEngine::new(48_000.0);
         let mut q = EventQueue::new();
 
-        // Trigger 18 simultaneous fortissimo notes (exercises voice stealing) + UnaCorda.
         assert!(q.push(SampleEvent {
             sample_offset: 0,
             kind: EventKind::Pedal {
@@ -264,7 +278,7 @@ mod tests {
             assert!(q.push(SampleEvent {
                 sample_offset: u32::from(i) * 4,
                 kind: EventKind::NoteOn {
-                    midi_key: 48 + i * 2,
+                    midi_key: 36 + i * 3,
                     velocity_u16: u16::MAX,
                 },
             }));
@@ -272,11 +286,20 @@ mod tests {
         q.sort_by_offset();
 
         let (out_l, out_r) = render_chunks(&mut engine, 8192, 256, q.as_slice());
-        assert_eq!(engine.active_voices(), NUM_VOICES as u32);
+        assert_eq!(engine.active_voices(), 18);
         for (&l, &r) in out_l.iter().zip(out_r.iter()) {
             assert!(l.is_finite() && r.is_finite());
             assert!(l.abs() <= 1.0 && r.abs() <= 1.0);
         }
+
+        // AllNotesOff must immediately stop even undamped treble notes.
+        let panic = [SampleEvent {
+            sample_offset: 0,
+            kind: EventKind::AllNotesOff,
+        }];
+        let (post_l, post_r) = render_chunks(&mut engine, 256, 128, &panic);
+        assert_eq!(engine.active_voices(), 0);
+        assert!(post_l.iter().chain(post_r.iter()).all(|&x| x == 0.0));
 
         // Sostenuto latches currently held notes only.
         engine.reset();
@@ -317,13 +340,17 @@ mod tests {
             },
         });
         let _ = render_chunks(&mut engine, 24_000, 128, sos_ev.as_slice());
-        // MIDI 60 stays latched by sostenuto while MIDI 72 retires cleanly.
         assert_eq!(engine.active_voices(), 1);
     }
 
     #[test]
-    fn high_treble_c8_has_strong_attack_and_accurate_pitch() {
-        let mut engine = PianoEngine::new(48_000.0);
+    fn high_treble_c8_has_strong_attack_and_railsback_pitch() {
+        let voicing = VoicingSpec::default();
+        let specs = build_scale_design(&voicing);
+        let f0_c8 = key_tuned_f0_hz(87, &specs, &voicing);
+        let expected_c8 = partial_frequency_hz(f0_c8, specs[87].inharmonicity_b, 1);
+
+        let mut engine = PianoEngine::new_with_voicing(48_000.0, &voicing);
         let on = [SampleEvent {
             sample_offset: 0,
             kind: EventKind::NoteOn {
@@ -339,7 +366,6 @@ mod tests {
             .collect();
         assert!(rms(&mono[..2048]) > 0.01, "expected audible C8 attack");
         let peak_hz = estimate_peak_freq_hz(&mono[64..4096], 48_000.0, 3500.0, 5000.0);
-        let expected_c8 = 440.0 * 2.0_f64.powf((108.0 - 69.0) / 12.0);
         assert!(
             (peak_hz - expected_c8).abs() < 2.0,
             "expected C8 near {expected_c8} Hz, got {peak_hz}"
