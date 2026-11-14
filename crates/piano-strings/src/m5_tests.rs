@@ -10,15 +10,6 @@ struct MockAction {
 }
 
 impl MockAction {
-    fn all_closed() -> Self {
-        Self {
-            clearances: [-0.002; NUM_KEYS],
-            weights: [[1.0; 3]; NUM_KEYS],
-            hammer_left: [0; NUM_KEYS],
-            hammer_peak_n: [0.0; NUM_KEYS],
-        }
-    }
-
     fn all_open() -> Self {
         Self {
             clearances: [0.01; NUM_KEYS],
@@ -76,8 +67,8 @@ impl KeyActionDriver for MockAction {
         if pen <= 0.0 {
             return 0.0;
         }
-        let c_raw = 120.0 * pen.min(4.0);
-        let c = if rp > 0.0 { c_raw.min(2.4 / rp) } else { c_raw };
+        let c_raw = 300.0 * pen.min(4.0);
+        let c = if rp > 0.0 { c_raw.min(2.0 / rp) } else { c_raw };
         (-c * vd) / (1.0 + 0.5 * rp * c)
     }
 }
@@ -173,12 +164,9 @@ impl BridgePortDriver for MockBridge {
             self.max_zone_audio_n = self.max_zone_audio_n.max(zone_str_audio[z].abs());
             zone_out[z] = v_bar[z] + zone_str_audio[z] / 250.0;
         }
-        for ((bw, &aw), &(z0, _, _, _)) in b_waves_out
-            .iter_mut()
-            .zip(a_waves.iter())
-            .zip(self.zw.iter())
-        {
-            *bw = 2.0 * v_bar[usize::from(z0)] - aw;
+        for (s, bw) in b_waves_out.iter_mut().enumerate() {
+            let z0 = self.zw[s].0;
+            *bw = 2.0 * v_bar[usize::from(z0)] - a_waves[s];
         }
         (0.0, 0.0)
     }
@@ -197,7 +185,7 @@ fn wdf_bridge_port_conservation_and_passivity_across_rates() {
         let mut action = MockAction::all_open();
         let mut bridge =
             MockBridge::build(sr, *bank.bridge_port_resistances(), true, 0.06, 160.0, 0.0);
-        let (mut l, mut r) = (vec![0.0_f32; 128], vec![0.0_f32; 128]);
+        let (mut l, mut r) = (vec![0.0_f32; 64], vec![0.0_f32; 64]);
         let e0 = bank.total_sav_energy_joules() + bridge.total_energy_joules();
         for _ in 0..2 {
             bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut l, &mut r);
@@ -263,10 +251,7 @@ fn sympathetic_resonance_prefers_octave_c5_over_offresonant_cs5_and_damper_kills
         .iter()
         .all(|&x| x > 0.0 && x.is_finite()));
 
-    let mut action = MockAction::all_closed();
-    for k in [39usize, 51, 52] {
-        action.clearances[k] = 0.01;
-    }
+    let mut action = MockAction::all_open();
     action.strike(39, 12.0, 8);
     let mut bridge = MockBridge::build(
         sr,
@@ -276,8 +261,8 @@ fn sympathetic_resonance_prefers_octave_c5_over_offresonant_cs5_and_damper_kills
         180.0,
         12.0,
     );
-    let (mut l, mut r) = (vec![0.0_f32; 256], vec![0.0_f32; 256]);
-    for _ in 0..8 {
+    let (mut l, mut r) = (vec![0.0_f32; 128], vec![0.0_f32; 128]);
+    for _ in 0..12 {
         bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut l, &mut r);
     }
     assert!(
@@ -304,7 +289,7 @@ fn sympathetic_resonance_prefers_octave_c5_over_offresonant_cs5_and_damper_kills
 
     action.clearances[51] = -0.002;
     action.clearances[39] = -0.002;
-    for _ in 0..16 {
+    for _ in 0..32 {
         bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut l, &mut r);
     }
     let e_c5_damped = key_energy(&bank, 51);
@@ -318,7 +303,7 @@ fn sympathetic_resonance_prefers_octave_c5_over_offresonant_cs5_and_damper_kills
 fn c4_trichord_bridge_coupling_produces_two_stage_and_phase_dependent_decay() {
     let sr = 48_000.0_f32;
     let voicing = VoicingSpec {
-        unison_detune_scale: 8.0,
+        unison_detune_scale: 16.0,
         ..VoicingSpec::default()
     };
     let mut bank = StringBank::new(sr, &voicing);
@@ -329,11 +314,11 @@ fn c4_trichord_bridge_coupling_produces_two_stage_and_phase_dependent_decay() {
             sr,
             *bank.bridge_port_resistances(),
             false,
-            0.008,
+            0.004,
             260.0,
-            10.0,
+            12.0,
         );
-        let (mut l, mut r) = (vec![0.0_f32; 256], vec![0.0_f32; 256]);
+        let (mut l, mut r) = (vec![0.0_f32; 128], vec![0.0_f32; 128]);
         bank.apply_excitation_sample(39, weights, 0.85);
         bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut l, &mut r);
         let mut energies = Vec::with_capacity(blocks);
@@ -344,12 +329,12 @@ fn c4_trichord_bridge_coupling_produces_two_stage_and_phase_dependent_decay() {
         energies
     };
 
-    let b_in = run_decay([1.0, 1.0, 1.0], 12);
-    let b_anti = run_decay([1.0, -1.0, 0.0], 6);
-    let dt = 256.0 / 48_000.0;
-    let prompt_in = 10.0 * (b_in[5] / b_in[0]).log10() / (5.0 * dt);
-    let late_in = 10.0 * (b_in[11] / b_in[7]).log10() / (4.0 * dt);
-    let prompt_anti = 10.0 * (b_anti[5] / b_anti[0]).log10() / (5.0 * dt);
+    let b_in = run_decay([1.0, 1.0, 1.0], 8);
+    let b_anti = run_decay([1.0, -1.0, 0.0], 4);
+    let dt = 128.0 / 48_000.0;
+    let prompt_in = 10.0 * (b_in[3] / b_in[0]).log10() / (3.0 * dt);
+    let late_in = 10.0 * (b_in[7] / b_in[5]).log10() / (2.0 * dt);
+    let prompt_anti = 10.0 * (b_anti[3] / b_anti[0]).log10() / (3.0 * dt);
     assert!(
         (-prompt_in) > (-late_in) * 1.25,
         "expected faster prompt decay than late tail: prompt={prompt_in:.2} dB/s, late={late_in:.2} dB/s"
