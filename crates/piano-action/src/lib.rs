@@ -293,3 +293,67 @@ impl ActionBank {
             .map_or(0.0, |slot| slot.felt_state.z_mem)
     }
 }
+
+#[cfg(test)]
+mod escapement_tests {
+    use piano_spec::{u7_to_u16, PedalKind, VoicingSpec};
+
+    use super::ActionBank;
+
+    #[test]
+    fn silent_key_lifts_damper_without_string_contact_and_3_pedals_hold() {
+        let voicing = VoicingSpec::default();
+        let mut bank = ActionBank::new(48_000.0, &voicing);
+        let c4 = 39_usize;
+        let e4 = 43_usize;
+
+        for vel in [1_u16, 16, 32, 64] {
+            bank.reset();
+            bank.note_on(c4, vel);
+            let mut peak_force = 0.0_f32;
+            for _ in 0..2_400 {
+                let f = bank.step_hammer_sample(c4, 0.0, 0.0, 0.01);
+                peak_force = peak_force.max(f);
+                let c = bank.step_key_clearance(c4);
+                assert!(c >= 4.5e-3, "vel={vel} clearance dropped: {c}");
+            }
+            assert_eq!(peak_force, 0.0, "silent vel={vel} struck string");
+            assert!(!bank.is_hammer_active(c4));
+            assert!(bank.damper_clearance_m(c4) >= 4.5e-3);
+        }
+
+        // Audible MIDI velocity 1 (`u7_to_u16(1)`) DOES strike the string.
+        bank.reset();
+        bank.note_on(c4, u7_to_u16(1));
+        let mut pp_peak = 0.0_f32;
+        for _ in 0..480 {
+            pp_peak = pp_peak.max(bank.step_hammer_sample(c4, 0.0, 0.0, 0.01));
+        }
+        assert!(pp_peak > 0.0, "pp strike produced zero force");
+
+        // 3-pedal invariants: Una Corda, Sostenuto, and Sustain.
+        bank.reset();
+        bank.set_pedal(PedalKind::UnaCorda, u16::MAX);
+        assert_eq!(bank.strike_weights(c4), [0.0, 1.0, 1.0]);
+
+        bank.note_on(c4, 1); // Silent C4 held open -> latched by Sostenuto.
+        bank.set_pedal(PedalKind::Sostenuto, u16::MAX);
+        bank.note_off(c4, 32_768);
+        bank.note_on(e4, 40_000);
+        bank.note_off(e4, 32_768);
+        let mut tile = [0.0_f32; 8];
+        for _ in 0..1_200 {
+            bank.step_key_clearance_tile(c4, 8, &mut tile);
+            bank.step_key_clearance_tile(e4, 8, &mut tile);
+        }
+        assert!(bank.damper_clearance_m(c4) >= 4.5e-3);
+        assert!(bank.damper_clearance_m(e4) < 0.0);
+
+        bank.set_pedal(PedalKind::Sostenuto, 0);
+        bank.set_pedal(PedalKind::Sustain, u16::MAX);
+        for _ in 0..1_200 {
+            bank.step_key_clearance_tile(e4, 8, &mut tile);
+        }
+        assert!(bank.damper_clearance_m(e4) >= 4.5e-3);
+    }
+}
