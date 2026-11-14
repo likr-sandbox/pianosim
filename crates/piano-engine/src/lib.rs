@@ -13,6 +13,9 @@ pub use telemetry::EngineTelemetry;
 mod m3_tests;
 
 #[cfg(test)]
+mod m4_tests;
+
+#[cfg(test)]
 mod tests {
     use core::f64::consts::TAU;
 
