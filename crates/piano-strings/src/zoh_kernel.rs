@@ -9,8 +9,6 @@ use core::ops::Range;
 use piano_simd::F32x4;
 
 use crate::choir_map::ChoirMap;
-#[cfg(test)]
-use crate::choir_map::{KeyMapEntry, StringMapEntry};
 use crate::modal_soa::ModalSoa;
 
 /// Sample tile width kept resident across string/mode SIMD passes.
@@ -123,18 +121,23 @@ pub(crate) fn step_all_strings(soa: &mut ModalSoa, map: &ChoirMap) -> (f32, f32)
 }
 
 #[inline(always)]
-fn step_tile_inner<const FULL_TILE: bool>(
-    u: &mut [F32x4],
-    v: &mut [F32x4],
-    d: &[F32x4],
-    s: &[F32x4],
-    c: &[F32x4],
+pub(crate) fn accum_string_tile_in<const FULL_TILE: bool>(
+    soa: &mut ModalSoa,
+    vr: Range<usize>,
     t_len: usize,
-) -> [F32x4; TILE] {
+    acc: &mut [F32x4; TILE],
+) {
+    if vr.is_empty() {
+        return;
+    }
+    let u = &mut soa.u.as_f32x4_slice_mut()[vr.clone()];
+    let v = &mut soa.v.as_f32x4_slice_mut()[vr.clone()];
+    let d = &soa.d_coeff.as_f32x4_slice()[vr.clone()];
+    let s = &soa.s_coeff.as_f32x4_slice()[vr.clone()];
+    let c = &soa.c_bridge.as_f32x4_slice()[vr];
     let n = u.len();
     assert!(v.len() == n && d.len() == n && s.len() == n && c.len() == n);
     let steps = if FULL_TILE { TILE } else { t_len.min(TILE) };
-    let mut acc = [F32x4::zero(); TILE];
 
     for ((((u_ref, v_ref), &d0), &s0), &c0) in u[..n]
         .iter_mut()
@@ -151,7 +154,6 @@ fn step_tile_inner<const FULL_TILE: bool>(
         *u_ref = u0;
         *v_ref = v0;
     }
-    acc
 }
 
 /// Register-tiled 8-sample coupled-form ZOH stepper for one string vector slice.
@@ -162,16 +164,13 @@ pub(crate) fn step_string_tile(
     vr: Range<usize>,
     t_len: usize,
 ) -> [F32x4; TILE] {
-    let u = &mut soa.u.as_f32x4_slice_mut()[vr.clone()];
-    let v = &mut soa.v.as_f32x4_slice_mut()[vr.clone()];
-    let d = &soa.d_coeff.as_f32x4_slice()[vr.clone()];
-    let s = &soa.s_coeff.as_f32x4_slice()[vr.clone()];
-    let c = &soa.c_bridge.as_f32x4_slice()[vr];
+    let mut acc = [F32x4::zero(); TILE];
     if t_len == TILE {
-        step_tile_inner::<true>(u, v, d, s, c, TILE)
+        accum_string_tile_in::<true>(soa, vr, TILE, &mut acc);
     } else {
-        step_tile_inner::<false>(u, v, d, s, c, t_len)
+        accum_string_tile_in::<false>(soa, vr, t_len, &mut acc);
     }
+    acc
 }
 
 /// Accumulates `acc[..t_len]` reduced terminal outputs into L1 stack `tile_l`/`tile_r`.
@@ -223,12 +222,120 @@ pub(crate) fn flush_subnormals_range(soa: &mut ModalSoa, vec_range: Range<usize>
 }
 
 /// Branchless flush of subnormals across the entire `ModalSoa` buffer.
+#[cfg(test)]
 pub(crate) fn flush_subnormals_soa(soa: &mut ModalSoa) {
     let total_vecs = soa.u.as_f32x4_slice().len();
     let _ = flush_subnormals_range(soa, 0..total_vecs);
 }
 
+/// Advances one linear string across an entire subblock in `CHUNK = 128` L1-resident passes
+/// with 2-vector interleaved register rotation (`16` XMM registers, single-pass `ModalSoa` access).
+#[inline]
+pub(crate) fn step_string_subblock(
+    soa: &mut ModalSoa,
+    vr: Range<usize>,
+    pan_l: f32,
+    pan_r: f32,
+    out_l: &mut [f32],
+    out_r: &mut [f32],
+) {
+    step_string_subblock_3(soa, [vr, 0..0, 0..0], pan_l, pan_r, out_l, out_r);
+}
+
+/// Advances up to three modal ranges of one linear string across `out_l`/`out_r` in `CHUNK = 128`
+/// L1-resident passes, accumulating stereo once per sample across all ranges.
+#[inline(never)]
+pub(crate) fn step_string_subblock_3(
+    soa: &mut ModalSoa,
+    ranges: [Range<usize>; 3],
+    pan_l: f32,
+    pan_r: f32,
+    out_l: &mut [f32],
+    out_r: &mut [f32],
+) {
+    const CHUNK: usize = 128;
+    let total = out_l.len().min(out_r.len());
+    if total == 0 || ranges.iter().all(Range::is_empty) {
+        return;
+    }
+    let (u, v, d, s, c) = (
+        soa.u.as_f32x4_slice_mut(),
+        soa.v.as_f32x4_slice_mut(),
+        soa.d_coeff.as_f32x4_slice(),
+        soa.s_coeff.as_f32x4_slice(),
+        soa.c_bridge.as_f32x4_slice(),
+    );
+    let min_len = u.len().min(v.len()).min(d.len()).min(s.len()).min(c.len());
+    for r in &ranges {
+        assert!(r.start <= r.end && r.end <= min_len);
+    }
+
+    let mut base = 0usize;
+    while base < total {
+        let c_len = (total - base).min(CHUNK);
+        let mut acc = [F32x4::zero(); CHUNK];
+        let full4 = c_len & !3;
+        for r in &ranges {
+            let mut idx = r.start;
+            let end = r.end;
+            while idx + 1 < end {
+                let (mut u0, mut v0) = (u[idx], v[idx]);
+                let (d0, s0, c0) = (d[idx], s[idx], c[idx]);
+                let (mut u1, mut v1) = (u[idx + 1], v[idx + 1]);
+                let (d1, s1, c1) = (d[idx + 1], s[idx + 1], c[idx + 1]);
+                for chunk in acc[..full4].chunks_exact_mut(4) {
+                    let (mut a0, mut a1, mut a2, mut a3) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+                    (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+                    (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+                    a0 = v0.mul_add(c0, v1.mul_add(c1, a0));
+                    (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+                    (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+                    a1 = v0.mul_add(c0, v1.mul_add(c1, a1));
+                    (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+                    (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+                    a2 = v0.mul_add(c0, v1.mul_add(c1, a2));
+                    (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+                    (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+                    a3 = v0.mul_add(c0, v1.mul_add(c1, a3));
+                    (chunk[0], chunk[1], chunk[2], chunk[3]) = (a0, a1, a2, a3);
+                }
+                for slot in &mut acc[full4..c_len] {
+                    (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+                    (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+                    *slot = v0.mul_add(c0, v1.mul_add(c1, *slot));
+                }
+                u[idx] = u0;
+                v[idx] = v0;
+                u[idx + 1] = u1;
+                v[idx + 1] = v1;
+                idx += 2;
+            }
+            if idx < end {
+                let (mut u0, mut v0) = (u[idx], v[idx]);
+                let (d0, s0, c0) = (d[idx], s[idx], c[idx]);
+                for slot in &mut acc[..c_len] {
+                    (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+                    *slot = v0.mul_add(c0, *slot);
+                }
+                u[idx] = u0;
+                v[idx] = v0;
+            }
+        }
+        for ((a, l), r) in acc[..c_len]
+            .iter()
+            .zip(&mut out_l[base..base + c_len])
+            .zip(&mut out_r[base..base + c_len])
+        {
+            let f = a.reduce_sum();
+            *l += f * pan_l;
+            *r += f * pan_r;
+        }
+        base += c_len;
+    }
+}
+
 /// Steps all 230 strings across an uncoupled audio subblock in `TILE`-sample tiles.
+#[cfg(test)]
 pub(crate) fn step_all_tiles(
     soa: &mut ModalSoa,
     map: &ChoirMap,
@@ -257,39 +364,6 @@ pub(crate) fn step_all_tiles(
         base += t_len;
     }
     flush_subnormals_soa(soa);
-}
-
-#[cfg(test)]
-pub(crate) fn step_key_subblock(
-    soa: &mut ModalSoa,
-    key: &KeyMapEntry,
-    strings: &[StringMapEntry],
-    out_l: &mut [f32],
-    out_r: &mut [f32],
-) {
-    let total = out_l.len().min(out_r.len());
-    let key_strings = &strings[key.string_range.clone()];
-    let mut base = 0usize;
-    while base < total {
-        let t_len = (total - base).min(TILE);
-        let mut tile_l = [0.0_f32; TILE];
-        let mut tile_r = [0.0_f32; TILE];
-        for entry in key_strings {
-            let acc = step_string_tile(soa, entry.all_vecs(), t_len);
-            accum_tile_stereo(
-                &acc,
-                entry.pan_l,
-                entry.pan_r,
-                t_len,
-                &mut tile_l,
-                &mut tile_r,
-            );
-        }
-        out_l[base..base + t_len].copy_from_slice(&tile_l[..t_len]);
-        out_r[base..base + t_len].copy_from_slice(&tile_r[..t_len]);
-        base += t_len;
-    }
-    let _ = flush_subnormals_range(soa, key.vec_range.clone());
 }
 
 #[cfg(test)]
@@ -364,5 +438,53 @@ mod tests {
         let db_margin = 10.0 * (band_max(290, 310) / band_max(590, 615).max(1e-20)).log10();
         eprintln!("A4 peak_hz={peak_hz:.2} Hz, fund_vs_2nd={db_margin:.2} dB");
         assert!((435.0..=445.0).contains(&peak_hz) && db_margin > 3.9);
+    }
+
+    #[test]
+    fn subblock_kernel_matches_tiled_128_frames() {
+        const FRAMES: usize = 131; // 1 full CHUNK=128 + partial tail=3
+        let voicing = VoicingSpec::default();
+        let specs = build_scale_design(&voicing);
+        let map = ChoirMap::build_with_specs(&specs, &voicing);
+        let mut sub_soa = ModalSoa::build(48_000.0, &voicing, &specs, &map);
+        let mut tile_soa = sub_soa.clone();
+        for s_idx in [0usize, 120, 229] {
+            let r = map.strings()[s_idx].all_vecs();
+            inject_excitation(
+                &mut sub_soa.u.as_f32x4_slice_mut()[r.clone()],
+                &sub_soa.b_exc.as_f32x4_slice()[r.clone()],
+                1.5,
+            );
+            inject_excitation(
+                &mut tile_soa.u.as_f32x4_slice_mut()[r.clone()],
+                &tile_soa.b_exc.as_f32x4_slice()[r],
+                1.5,
+            );
+        }
+        let (mut sl, mut sr_v) = (vec![0.0_f32; FRAMES], vec![0.0_f32; FRAMES]);
+        for e in map.strings() {
+            step_string_subblock(
+                &mut sub_soa,
+                e.all_vecs(),
+                e.pan_l,
+                e.pan_r,
+                &mut sl,
+                &mut sr_v,
+            );
+        }
+        flush_subnormals_soa(&mut sub_soa);
+        let (mut tl, mut tr) = (vec![0.0_f32; FRAMES], vec![0.0_f32; FRAMES]);
+        step_all_tiles(&mut tile_soa, &map, &mut tl, &mut tr);
+        for f in 0..FRAMES {
+            assert!((sl[f] - tl[f]).abs() < 1e-5 && (sr_v[f] - tr[f]).abs() < 1e-5);
+        }
+        for (a, b) in sub_soa
+            .u
+            .as_mut_slice()
+            .iter()
+            .zip(tile_soa.u.as_mut_slice())
+        {
+            assert!((*a - *b).abs() < 1e-5);
+        }
     }
 }

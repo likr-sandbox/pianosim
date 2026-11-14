@@ -360,7 +360,7 @@ fn populate_string_modes(
 
     let long_base = entry.long_vecs.start * 4;
     for m in 1..=entry.long_modes {
-        let f_init = crate::longitudinal::long_init_freq_hz(spec.f_long_hz, m);
+        let f_init = crate::longitudinal::long_init_freq_hz(k, spec.f_long_hz, m);
         let t60_l = if lossless {
             f64::INFINITY
         } else {

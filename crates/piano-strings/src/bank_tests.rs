@@ -64,44 +64,50 @@ fn gate1_coupled_zoh_frequency_accuracy_under_0_05_cents_across_sample_rates() {
     let mut max_cents_err = 0.0_f64;
 
     for &sr in &GATE1_RATES {
-        let mut bank = StringBank::new(sr, &voicing);
-        let sr64 = f64::from(sr);
-        assert!((25_000..=26_500).contains(&bank.total_modes()));
-        for &key in &GATE1_KEYS {
-            bank.reset();
-            bank.apply_excitation_sample(key, [1.0, 1.0, 1.0], 1.0);
-            bank.render_key_subblock(key, &mut out_l, &mut out_r);
-            for i in 0..N {
-                let m = out_l[i] + out_r[i];
-                assert!(m.is_finite());
-                mono[i] = m;
-                win[i] = f64::from(m) * window[i];
-            }
-            rfft.forward(&mono, &mut spectrum);
+        for &(nl_on, force, cap6) in &[(false, 1.0_f32, false), (true, 0.02_f32, true)] {
+            let mut bank = StringBank::new(sr, &voicing);
+            bank.set_nonlinear_coupling(nl_on, nl_on);
+            let sr64 = f64::from(sr);
+            assert!((25_000..=26_500).contains(&bank.total_modes()));
+            for &key in &GATE1_KEYS {
+                bank.reset();
+                bank.apply_excitation_sample(key, [1.0, 1.0, 1.0], force);
+                bank.render_key_subblock(key, &mut out_l, &mut out_r);
+                for i in 0..N {
+                    let m = out_l[i] + out_r[i];
+                    assert!(m.is_finite());
+                    mono[i] = m;
+                    win[i] = f64::from(m) * window[i];
+                }
+                rfft.forward(&mono, &mut spectrum);
 
-            let f0 = key_tuned_f0_hz(key, &specs, &voicing);
-            let b = specs[key].inharmonicity_b;
-            let n_p = count_transverse_partials(f0, b, MAX_AUDIBLE_FREQ_HZ);
-            let mut partials: Vec<usize> = (1..=n_p.min(8)).collect();
-            if n_p > 8 {
-                let step = ((n_p - 8) / 8).max(1);
-                partials.extend(((8 + step)..n_p).step_by(step));
-                partials.push(n_p);
-            }
-            for j in partials {
-                let f_exp = partial_frequency_hz(f0, b, j);
-                assert!(f_exp < 0.49 * sr64);
-                let bin = ((f_exp * N as f64) / sr64).round() as usize;
-                let energy = (bin.saturating_sub(2)..=(bin + 2).min(spectrum.len() - 1))
-                    .map(|idx| spectrum[idx].norm_sq())
-                    .fold(0.0_f32, f32::max);
-                assert!(energy > 0.0, "missing FFT peak sr={sr} k={key} j={j}");
+                let f0 = key_tuned_f0_hz(key, &specs, &voicing);
+                let b = specs[key].inharmonicity_b;
+                let n_p = count_transverse_partials(f0, b, MAX_AUDIBLE_FREQ_HZ);
+                let mut partials: Vec<usize> = (1..=n_p.min(if cap6 { 6 } else { 8 })).collect();
+                if !cap6 && n_p > 8 {
+                    let step = ((n_p - 8) / 8).max(1);
+                    partials.extend(((8 + step)..n_p).step_by(step));
+                    partials.push(n_p);
+                }
+                for j in partials {
+                    let f_exp = partial_frequency_hz(f0, b, j);
+                    assert!(f_exp < 0.49 * sr64);
+                    let bin = ((f_exp * N as f64) / sr64).round() as usize;
+                    let energy = (bin.saturating_sub(2)..=(bin + 2).min(spectrum.len() - 1))
+                        .map(|idx| spectrum[idx].norm_sq())
+                        .fold(0.0_f32, f32::max);
+                    assert!(energy > 0.0, "missing FFT peak sr={sr} k={key} j={j}");
 
-                let f1 = parabolic_step_hz(&win, f_exp, 0.25, sr64);
-                let f_peak = parabolic_step_hz(&win, f1, 0.03, sr64);
-                let cents = (1200.0 * (f_peak / f_exp).log2()).abs();
-                max_cents_err = max_cents_err.max(cents);
-                assert!(cents < 0.05, "sr={sr} key={key} j={j} err={cents:.5} cents");
+                    let f1 = parabolic_step_hz(&win, f_exp, 0.25, sr64);
+                    let f_peak = parabolic_step_hz(&win, f1, 0.03, sr64);
+                    let cents = (1200.0 * (f_peak / f_exp).log2()).abs();
+                    max_cents_err = max_cents_err.max(cents);
+                    assert!(
+                        cents < 0.05,
+                        "nl={nl_on} sr={sr} key={key} j={j} err={cents:.5} cents"
+                    );
+                }
             }
         }
     }

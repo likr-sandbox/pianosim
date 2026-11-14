@@ -2,15 +2,18 @@
 //! with orthogonal vertical and horizontal damper projections.
 
 use core::f64::consts::{PI, TAU};
+use core::ops::Range;
 
-use piano_simd::AlignedBuf;
+use piano_simd::{AlignedBuf, F32x4};
 use piano_spec::{
     effective_string_f0_hz, partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec,
     NUM_KEYS, TOTAL_STRINGS,
 };
 
 use crate::choir_map::{ChoirMap, StringMapEntry};
-use crate::modal_soa::{exp_f64, sin_cos_f64, sqrt_f64, C_HORIZ, C_VERT, NYQUIST_CUTOFF_RATIO};
+use crate::modal_soa::{
+    exp_f64, sin_cos_f64, sqrt_f64, ModalSoa, C_HORIZ, C_VERT, NYQUIST_CUTOFF_RATIO,
+};
 
 pub(crate) const HORIZ_STRIKE_SCALE: f64 = 0.65;
 pub(crate) const HORIZ_DAMP_SCALE: f64 = 0.85;
@@ -37,6 +40,7 @@ pub(crate) struct ContactPorts {
     pub v_dh: [f32; TOTAL_STRINGS],
     pub may_be_nonzero: [bool; TOTAL_STRINGS],
     pub ports_synced: [bool; TOTAL_STRINGS],
+    pub y_clear_scratch: alloc::vec::Vec<[f32; 128]>,
 }
 
 impl ContactPorts {
@@ -68,6 +72,7 @@ impl ContactPorts {
             v_dh: [0.0; TOTAL_STRINGS],
             may_be_nonzero: [false; TOTAL_STRINGS],
             ports_synced: [true; TOTAL_STRINGS],
+            y_clear_scratch: alloc::vec![[0.0_f32; 128]; NUM_KEYS],
         };
         for (s_idx, entry) in map.strings().iter().enumerate() {
             populate_string_ports(&mut ports, s_idx, entry, sample_rate, voicing, specs);
@@ -99,7 +104,6 @@ impl ContactPorts {
     }
 
     /// Computes physical linear Hamiltonian `0.5 * beta_s * sum(u^2 + v^2)` in Joules over `vec_range`.
-    #[cfg(test)]
     #[inline]
     #[must_use]
     pub fn linear_energy_joules(
@@ -237,4 +241,54 @@ fn populate_string_ports(
     ports.r_port_strike[s_idx] = (alpha64 * sum_bh_sq) as f32;
     ports.r_port_damp_v[s_idx] = (alpha64 * sum_bd_v_sq) as f32;
     ports.r_port_damp_h[s_idx] = (alpha64 * sum_bd_h_sq) as f32;
+}
+
+#[inline]
+fn accum_pol_ports(
+    soa: &ModalSoa,
+    ports: &ContactPorts,
+    vr: Range<usize>,
+    has_damper: bool,
+) -> (f32, f32, f32, f32) {
+    let (u, v) = (soa.u.as_f32x4_slice(), soa.v.as_f32x4_slice());
+    let (bh, ah) = (
+        ports.b_strike.as_f32x4_slice(),
+        ports.a_strike.as_f32x4_slice(),
+    );
+    let (bd, ad) = (ports.b_damp.as_f32x4_slice(), ports.a_damp.as_f32x4_slice());
+    let (mut ayh, mut avh, mut ayd, mut avd) =
+        (F32x4::zero(), F32x4::zero(), F32x4::zero(), F32x4::zero());
+    for i in vr {
+        ayh = v[i].mul_add(ah[i], ayh);
+        avh = u[i].mul_add(bh[i], avh);
+        if has_damper {
+            ayd = v[i].mul_add(ad[i], ayd);
+            avd = u[i].mul_add(bd[i], avd);
+        }
+    }
+    (
+        ayh.reduce_sum(),
+        avh.reduce_sum(),
+        ayd.reduce_sum(),
+        avd.reduce_sum(),
+    )
+}
+
+/// Recomputes cached `(y_h, v_h, y_dv, v_dv, y_dh, v_dh)` from `soa.(u, v)` after fast-tile steps.
+#[inline]
+pub(crate) fn refresh_string_ports(
+    soa: &ModalSoa,
+    ports: &mut ContactPorts,
+    s_idx: usize,
+    entry: &StringMapEntry,
+) {
+    let d = entry.has_damper;
+    let (yh_v, vh_v, ydv, vdv) = accum_pol_ports(soa, ports, entry.vert_vecs.clone(), d);
+    let (yh_h, vh_h, ydh, vdh) = accum_pol_ports(soa, ports, entry.horiz_vecs.clone(), d);
+    let alpha = ports.alpha_vel[s_idx];
+    ports.y_h[s_idx] = yh_v + yh_h;
+    ports.v_h[s_idx] = alpha * (vh_v + vh_h);
+    (ports.y_dv[s_idx], ports.v_dv[s_idx]) = if d { (ydv, alpha * vdv) } else { (0.0, 0.0) };
+    (ports.y_dh[s_idx], ports.v_dh[s_idx]) = if d { (ydh, alpha * vdh) } else { (0.0, 0.0) };
+    ports.ports_synced[s_idx] = true;
 }

@@ -14,16 +14,27 @@ pub(crate) mod contact_ports;
 pub(crate) mod longitudinal;
 pub mod modal_soa;
 pub(crate) mod phantom;
+pub(crate) mod sav_drift;
+pub(crate) mod sav_pair;
+pub(crate) mod sav_spec;
+pub(crate) mod sav_tile;
 pub mod zoh_kernel;
 
 pub use contact::KeyActionDriver;
 
-use piano_spec::{build_scale_design, VoicingSpec};
+use piano_spec::{build_scale_design, VoicingSpec, TOTAL_STRINGS};
 
 use crate::choir_map::ChoirMap;
 use crate::contact_ports::ContactPorts;
+use crate::longitudinal::LongitudinalBank;
 use crate::modal_soa::ModalSoa;
-use crate::zoh_kernel::{flush_subnormals_range, inject_excitation, step_all_strings};
+use crate::sav_drift::{SavBank, C0_SAV};
+use crate::sav_pair::SavPairQueue;
+use crate::sav_tile::step_ringing_string_tile;
+use crate::zoh_kernel::{
+    accum_tile_stereo, flush_subnormals_range, inject_excitation, step_all_strings,
+    step_string_subblock, step_string_tile, TILE,
+};
 
 /// All-88-key, 230-string, ~26k-mode continuous SIMD coupled-form ZOH bank.
 #[derive(Clone, Debug)]
@@ -32,35 +43,132 @@ pub struct StringBank {
     choir_map: ChoirMap,
     soa: ModalSoa,
     ports: ContactPorts,
+    long_bank: LongitudinalBank,
+    sav: SavBank,
+    longitudinal_enabled: bool,
+    sav_phantom_enabled: bool,
 }
 
 impl StringBank {
-    /// Allocates and precomputes permanent undamped SoA mode tables and physical SI
-    /// dual-port projections for `sample_rate` and `voicing`.
-    #[must_use]
-    pub fn new(sample_rate: f32, voicing: &VoicingSpec) -> Self {
+    fn build_internal(sample_rate: f32, voicing: &VoicingSpec, lossless: bool) -> Self {
         let safe_rate = if sample_rate.is_finite() {
             sample_rate.clamp(8_000.0, 384_000.0)
         } else {
             48_000.0
         };
+        let sr64 = f64::from(safe_rate);
         let specs = build_scale_design(voicing);
         let choir_map = ChoirMap::build_with_specs(&specs, voicing);
-        let soa = ModalSoa::build(f64::from(safe_rate), voicing, &specs, &choir_map);
-        let ports = ContactPorts::build(f64::from(safe_rate), voicing, &specs, &choir_map);
+        let soa = ModalSoa::build_with_lossless(sr64, voicing, &specs, &choir_map, lossless);
+        let ports = ContactPorts::build(sr64, voicing, &specs, &choir_map);
+        let long_bank = LongitudinalBank::build(sr64, &specs, &choir_map, &ports.gamma_s);
+        let sav = SavBank::build(
+            sr64,
+            voicing,
+            &specs,
+            &choir_map,
+            &ports.gamma_s,
+            &ports.beta_s,
+        );
 
         Self {
             sample_rate: safe_rate,
             choir_map,
             soa,
             ports,
+            long_bank,
+            sav,
+            longitudinal_enabled: true,
+            sav_phantom_enabled: true,
         }
     }
 
-    /// Resets all modal state buffers and cached contact ports without reallocating.
+    /// Allocates and precomputes permanent undamped SoA mode tables and physical SI
+    /// dual-port projections for `sample_rate` and `voicing`.
+    #[must_use]
+    pub fn new(sample_rate: f32, voicing: &VoicingSpec) -> Self {
+        Self::build_internal(sample_rate, voicing, false)
+    }
+
+    /// Allocates a lossless (`r_hold = 1.0`) bank for SAV symplectic conservation checks.
+    #[must_use]
+    pub fn new_lossless(sample_rate: f32, voicing: &VoicingSpec) -> Self {
+        Self::build_internal(sample_rate, voicing, true)
+    }
+
+    /// Enables or disables Stage 2 longitudinal coupling and Bank-Sujbert SAV phantom coupling.
+    pub fn set_nonlinear_coupling(
+        &mut self,
+        longitudinal_enabled: bool,
+        sav_phantom_enabled: bool,
+    ) {
+        self.longitudinal_enabled = longitudinal_enabled;
+        self.sav_phantom_enabled = sav_phantom_enabled;
+    }
+
+    /// Returns total physical SAV Hamiltonian of string `s_idx` in Joules:
+    /// `0.5 * beta_s * (sum(u^2 + v^2) + r_s^2 - C_0)`.
+    #[must_use]
+    pub fn string_sav_energy_joules(&self, s_idx: usize) -> f64 {
+        let Some(entry) = self.choir_map.strings().get(s_idx) else {
+            return 0.0;
+        };
+        let h_lin = self
+            .ports
+            .linear_energy_joules(s_idx, &self.soa, entry.all_vecs());
+        let r = self.sav.r_sav[s_idx];
+        h_lin + 0.5 * self.ports.beta_s[s_idx] * (r * r - C0_SAV)
+    }
+
+    /// Returns summed physical SAV Hamiltonian of all strings belonging to `key_idx` in Joules.
+    #[must_use]
+    pub fn key_sav_energy_joules(&self, key_idx: usize) -> f64 {
+        let Some(key_entry) = self.choir_map.key(key_idx) else {
+            return 0.0;
+        };
+        key_entry
+            .string_range
+            .clone()
+            .map(|s_idx| self.string_sav_energy_joules(s_idx))
+            .sum()
+    }
+
+    /// Returns summed physical SAV Hamiltonian across all 230 strings in Joules.
+    #[must_use]
+    pub fn total_sav_energy_joules(&self) -> f64 {
+        (0..TOTAL_STRINGS)
+            .map(|s_idx| self.string_sav_energy_joules(s_idx))
+            .sum()
+    }
+
+    /// Returns instantaneous nonlinear strain/phantom potential energy `beta_s * E_nl(v)` of
+    /// `key_idx` in Joules.
+    #[must_use]
+    pub fn key_nonlinear_energy_joules(&self, key_idx: usize) -> f64 {
+        let Some(key_entry) = self.choir_map.key(key_idx) else {
+            return 0.0;
+        };
+        let strings = self.choir_map.strings();
+        key_entry
+            .string_range
+            .clone()
+            .map(|s_idx| {
+                self.sav.string_nonlinear_energy_joules(
+                    s_idx,
+                    &strings[s_idx],
+                    &self.soa,
+                    self.ports.beta_s[s_idx],
+                    self.longitudinal_enabled,
+                )
+            })
+            .sum()
+    }
+
+    /// Resets all modal state buffers, cached contact ports, and `r_sav = 1.0` without reallocating.
     pub fn reset(&mut self) {
         self.soa.reset_resting();
         self.ports.reset_resting();
+        self.sav.reset_all();
     }
 
     /// Returns the configured sample rate in Hz.
@@ -142,13 +250,38 @@ impl StringBank {
     #[must_use]
     #[inline]
     pub fn render_frame(&mut self) -> (f32, f32) {
-        let frame = step_all_strings(&mut self.soa, &self.choir_map);
-        for (s_idx, flag) in self.ports.ports_synced.iter_mut().enumerate() {
+        if !self.sav_phantom_enabled && self.longitudinal_enabled {
+            let frame = step_all_strings(&mut self.soa, &self.choir_map);
+            for (s_idx, flag) in self.ports.ports_synced.iter_mut().enumerate() {
+                if self.ports.may_be_nonzero[s_idx] {
+                    *flag = false;
+                }
+            }
+            return frame;
+        }
+        let (mut l1, mut r1) = ([0.0_f32; 1], [0.0_f32; 1]);
+        for (s_idx, entry) in self.choir_map.strings().iter().enumerate() {
             if self.ports.may_be_nonzero[s_idx] {
-                *flag = false;
+                step_ringing_string_tile(
+                    &mut self.soa,
+                    &mut self.sav,
+                    s_idx,
+                    entry,
+                    self.longitudinal_enabled,
+                    self.sav_phantom_enabled,
+                    &mut l1,
+                    &mut r1,
+                );
+                self.ports.ports_synced[s_idx] = false;
+            } else {
+                let acc = step_string_tile(&mut self.soa, entry.all_vecs(), 1);
+                let (mut tile_l, mut tile_r) = ([0.0_f32; TILE], [0.0_f32; TILE]);
+                accum_tile_stereo(&acc, entry.pan_l, entry.pan_r, 1, &mut tile_l, &mut tile_r);
+                l1[0] += tile_l[0];
+                r1[0] += tile_r[0];
             }
         }
-        frame
+        (l1[0], r1[0])
     }
 
     /// Flushes subnormals (`< 1e-20`) in `u` and `v` and clears dormant string flags.
@@ -157,31 +290,50 @@ impl StringBank {
         for (s_idx, entry) in self.choir_map.strings().iter().enumerate() {
             if !flush_subnormals_range(&mut self.soa, entry.all_vecs()) {
                 self.ports.clear_string_state(s_idx);
+                self.sav.reset_string(s_idx);
             }
         }
     }
 
-    /// Renders an uncoupled stereo subblock across all 230 strings in `TILE = 8` mode
+    /// Renders an uncoupled stereo subblock across all 230 strings in `SUB = 128` mode
     /// and flushes subnormals once at the end of the subblock.
     pub fn render_subblock(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         let frames = out_l.len().min(out_r.len());
-        if out_l.len() > frames {
-            out_l[frames..].fill(0.0);
-        }
-        if out_r.len() > frames {
-            out_r[frames..].fill(0.0);
-        }
-        zoh_kernel::step_all_tiles(
-            &mut self.soa,
-            &self.choir_map,
-            &mut out_l[..frames],
-            &mut out_r[..frames],
-        );
-        for (s_idx, flag) in self.ports.ports_synced.iter_mut().enumerate() {
-            if self.ports.may_be_nonzero[s_idx] {
-                *flag = false;
+        out_l.fill(0.0);
+        out_r.fill(0.0);
+        let strings = self.choir_map.strings();
+        let mut base = 0usize;
+        while base < frames {
+            let sub = (frames - base).min(128);
+            let (sub_l, sub_r) = (&mut out_l[base..base + sub], &mut out_r[base..base + sub]);
+            let mut sav_pairs =
+                SavPairQueue::new(self.longitudinal_enabled, self.sav_phantom_enabled);
+            for (s_idx, entry) in strings.iter().enumerate() {
+                if self.ports.may_be_nonzero[s_idx] {
+                    sav_pairs.push_ringing(
+                        &mut self.soa,
+                        &mut self.sav,
+                        strings,
+                        s_idx,
+                        sub_l,
+                        sub_r,
+                    );
+                    self.ports.ports_synced[s_idx] = false;
+                } else {
+                    step_string_subblock(
+                        &mut self.soa,
+                        entry.all_vecs(),
+                        entry.pan_l,
+                        entry.pan_r,
+                        sub_l,
+                        sub_r,
+                    );
+                }
             }
+            sav_pairs.flush(&mut self.soa, &mut self.sav, strings, sub_l, sub_r);
+            base += sub;
         }
+        self.flush_subnormals();
     }
 
     /// Steps all 88 keys / 230 strings across `out_l`/`out_r` with closed-loop Stage 1
@@ -202,8 +354,12 @@ impl StringBank {
         contact::render_subblock_coupled_core(
             &mut self.soa,
             &mut self.ports,
+            &self.long_bank,
+            &mut self.sav,
             &self.choir_map,
             driver,
+            self.longitudinal_enabled,
+            self.sav_phantom_enabled,
             &mut out_l[..frames],
             &mut out_r[..frames],
         );
@@ -249,17 +405,41 @@ impl StringBank {
         out_r: &mut [f32],
     ) {
         let key_entry = self.choir_map.key(key_idx).expect("valid key");
-        zoh_kernel::step_key_subblock(
-            &mut self.soa,
-            key_entry,
-            self.choir_map.strings(),
-            out_l,
-            out_r,
-        );
-        for s_idx in key_entry.string_range.clone() {
-            if self.ports.may_be_nonzero[s_idx] {
-                self.ports.ports_synced[s_idx] = false;
+        let total = out_l.len().min(out_r.len());
+        let strings = self.choir_map.strings();
+        let mut base = 0usize;
+        while base < total {
+            let t_len = (total - base).min(TILE);
+            let (mut tile_l, mut tile_r) = ([0.0_f32; TILE], [0.0_f32; TILE]);
+            for s_idx in key_entry.string_range.clone() {
+                let entry = &strings[s_idx];
+                if self.ports.may_be_nonzero[s_idx] {
+                    step_ringing_string_tile(
+                        &mut self.soa,
+                        &mut self.sav,
+                        s_idx,
+                        entry,
+                        self.longitudinal_enabled,
+                        self.sav_phantom_enabled,
+                        &mut tile_l[..t_len],
+                        &mut tile_r[..t_len],
+                    );
+                    self.ports.ports_synced[s_idx] = false;
+                } else {
+                    let acc = step_string_tile(&mut self.soa, entry.all_vecs(), t_len);
+                    accum_tile_stereo(
+                        &acc,
+                        entry.pan_l,
+                        entry.pan_r,
+                        t_len,
+                        &mut tile_l,
+                        &mut tile_r,
+                    );
+                }
             }
+            out_l[base..base + t_len].copy_from_slice(&tile_l[..t_len]);
+            out_r[base..base + t_len].copy_from_slice(&tile_r[..t_len]);
+            base += t_len;
         }
     }
 }

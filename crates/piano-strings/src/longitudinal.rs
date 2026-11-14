@@ -1,8 +1,6 @@
 //! Longitudinal bridge inclination readout, smooth ultrasonic anti-aliasing,
 //! SAV stiffness frequency compensation, and local hammer-contact axial precursor.
 
-#![cfg_attr(not(test), allow(dead_code))]
-
 use core::f64::consts::PI;
 
 use piano_simd::{AlignedBuf, F32x4};
@@ -25,9 +23,20 @@ pub(crate) const PREC_T0_CAP_RATIO: f64 = 0.22;
 
 #[inline]
 #[must_use]
+pub(crate) fn nonlinear_register_weight(key_idx: usize) -> f64 {
+    if key_idx >= LONGITUDINAL_MAX_KEY_IDX {
+        return 0.0;
+    }
+    let r = (key_idx as f64) / 30.0;
+    let r2 = r * r;
+    1.0 / (1.0 + r2 * r2)
+}
+
+#[inline]
+#[must_use]
 pub(crate) fn t60_longitudinal(partial_m: usize) -> f64 {
     let idx = partial_m.saturating_sub(1) as f64;
-    (0.26 / (1.0 + 0.18 * idx)).max(0.06)
+    (0.15 / (1.0 + 0.20 * idx)).max(0.045)
 }
 
 #[inline]
@@ -49,11 +58,12 @@ pub(crate) fn w_phantom(freq_hz: f64) -> f64 {
 
 #[inline]
 #[must_use]
-pub(crate) fn long_init_freq_hz(f_long_hz: f64, partial_m: usize) -> f64 {
+pub(crate) fn long_init_freq_hz(key_idx: usize, f_long_hz: f64, partial_m: usize) -> f64 {
     let f_nom = (partial_m as f64) * f_long_hz;
-    if partial_m <= MAX_PHANTOM_LONG_MODES {
+    let w_reg = nonlinear_register_weight(key_idx);
+    if w_reg > 0.0 && partial_m <= MAX_PHANTOM_LONG_MODES {
         let wp = w_phantom(f_nom);
-        f_nom / sqrt_f64(1.0 + wp * wp)
+        f_nom / sqrt_f64(1.0 + w_reg * wp * wp)
     } else {
         f_nom
     }
@@ -70,8 +80,12 @@ pub(crate) fn long_bridge_weight(
     if f0_vert_hz <= 0.0 || f_long_hz <= 0.0 {
         return 0.0;
     }
+    let w_reg = nonlinear_register_weight(key_idx);
+    if w_reg == 0.0 {
+        return 0.0;
+    }
     let f_nom = (partial_m as f64) * f_long_hz;
-    let kappa_db = 0.048 * exp_f64(-0.9 * (key_idx as f64 / ((NUM_KEYS - 1) as f64)));
+    let kappa_db = 0.048 * exp_f64(-0.9 * (key_idx as f64 / ((NUM_KEYS - 1) as f64))) * w_reg;
     let sign = if partial_m % 2 == 1 { -1.0 } else { 1.0 };
     (sign * kappa_db * (f_long_hz / f0_vert_hz) * w_aa(f_nom)) as f32
 }
@@ -129,8 +143,9 @@ impl LongitudinalBank {
             let m_str = spec.linear_density_kg_m * l_k;
             let s_core = PI * spec.core_radius_m * spec.core_radius_m;
             let t0 = spec.tension_n.max(1.0);
+            let w_reg = nonlinear_register_weight(k);
             bank.prec_force_scale[s_idx] =
-                KAPPA_PREC * (STEEL_YOUNGS_MODULUS_PA * s_core / (4.0 * t0 * t0));
+                w_reg * KAPPA_PREC * (STEEL_YOUNGS_MODULUS_PA * s_core / (4.0 * t0 * t0));
             bank.prec_force_cap_n[s_idx] = PREC_T0_CAP_RATIO * t0;
 
             let x = (k as f64) / ((NUM_KEYS - 1) as f64);
@@ -286,6 +301,66 @@ mod tests {
             assert!(
                 peak_l_before_tau_t > peak_l_pre_arrival * 4.0 && peak_l_before_tau_t > 1.0e-3,
                 "key={key} weak causal onset pre={peak_l_pre_arrival} peak={peak_l_before_tau_t}"
+            );
+        }
+    }
+
+    fn blackman_harris_goertzel_db(samples: &[f32], freq_hz: f64, sr: f64) -> f64 {
+        let n = samples.len();
+        let denom = (n - 1) as f64;
+        let coeff = 2.0 * (core::f64::consts::TAU * freq_hz / sr).cos();
+        let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
+        for (i, &x) in samples.iter().enumerate() {
+            let p = core::f64::consts::TAU * (i as f64) / denom;
+            let w =
+                0.35875 - 0.48829 * p.cos() + 0.14128 * (2.0 * p).cos() - 0.01168 * (3.0 * p).cos();
+            let s0 = f64::from(x) * w + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        let power = (s1 * s1 + s2 * s2 - coeff * s1 * s2).max(1.0e-30);
+        10.0 * power.log10()
+    }
+
+    #[test]
+    fn phantom_spectral_peaks_emerge_at_doubled_and_sum_frequencies() {
+        let sr = 48_000.0_f32;
+        let sr64 = f64::from(sr);
+        let voicing = VoicingSpec {
+            unison_detune_scale: 0.0,
+            ..VoicingSpec::default()
+        };
+        let specs = build_scale_design(&voicing);
+        let key = 15usize; // C2: large inharmonic separation between 2*f_n and f_{2n}
+        let f0 = piano_spec::key_tuned_f0_hz(key, &specs, &voicing);
+        let b = specs[key].inharmonicity_b;
+        let f5 = piano_spec::partial_frequency_hz(f0, b, 5);
+        let f6 = piano_spec::partial_frequency_hz(f0, b, 6);
+        let target_freqs = [
+            ("2*f_5", 2.0 * f5),
+            ("2*f_6", 2.0 * f6),
+            ("f_5+f_6", f5 + f6),
+        ];
+
+        const N: usize = 65_536;
+        let run_case = |sav_on: bool| -> Vec<f32> {
+            let mut bank = crate::StringBank::new(sr, &voicing);
+            bank.set_nonlinear_coupling(true, sav_on);
+            bank.apply_excitation_sample(key, [1.0, 1.0, 1.0], 4.0);
+            let (mut l, mut r) = (vec![0.0_f32; N], vec![0.0_f32; N]);
+            bank.render_key_subblock(key, &mut l, &mut r);
+            l.iter().zip(r.iter()).map(|(&a, &b)| a + b).collect()
+        };
+
+        let mono_on = run_case(true);
+        let mono_off = run_case(false);
+        for (label, freq) in target_freqs {
+            let db_on = blackman_harris_goertzel_db(&mono_on, freq, sr64);
+            let db_off = blackman_harris_goertzel_db(&mono_off, freq, sr64);
+            eprintln!("C2 phantom {label} ({freq:.2} Hz): on={db_on:.1} dB off={db_off:.1} dB");
+            assert!(
+                db_on > db_off + 10.0,
+                "{label} ({freq:.2} Hz) phantom peak insufficient: on={db_on:.2} off={db_off:.2}"
             );
         }
     }
