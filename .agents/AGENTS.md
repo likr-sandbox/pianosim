@@ -30,14 +30,20 @@
 
 ## 4. 環境・ツールチェーン固有の知見（蓄積ログ）
 - **RustツールチェーンのPATH**: `rustc` (`1.97.1`), `cargo`, `wasm-pack` (`0.15.0`), `wasm-bindgen`, `rustup`（`wasm32-unknown-unknown` 導入済み）は `$HOME/.cargo/bin` にあり、非ログインシェルのデフォルト `PATH` には含まれない。コマンド実行時は必ず `export PATH="$HOME/.cargo/bin:$PATH"` を先頭に付けること。
-- **ポート `127.0.0.1:5173` のブラックホール問題**: 本実行環境では `127.0.0.1:5173` 宛てのTCP SYNが応答せずハングする。ViteサーバおよびPlaywright `webServer` 設定は `PIANOSIM_PORT`（例: `5188`）と `--strictPort` で5173以外のポートへ逃がせるようにすること。Headless Chromium起動には `--autoplay-policy=no-user-gesture-required` と `--no-sandbox` を付与する。
+- **`rustfmt` 1.97.1 のハング回避**: 10段超の深いネストの右結合Horner多項式式は `rustfmt` がCPU 100%でハングするため、`const` 係数配列ループ（`eval_horner` 等）で評価すること。
+- **ポート `127.0.0.1:5173` / 未バインドLoopbackのブラックホール問題**: 本実行環境では `127.0.0.1:5173` や未バインドポート宛てのTCP SYNが応答せず約130秒ハングする。Viteサーバおよび `apps/web/playwright.config.ts` では `PIANOSIM_PORT`（例: `5188`, `--strictPort`）と `webServer.wait: { stdout: /Local:\\s+http/ }` を併用して起動前プローブを回避すること（E2E約4.5秒完走）。Headless Chromium起動には `--autoplay-policy=no-user-gesture-required` と `--no-sandbox` を付与する。
+- **`AudioWorkletGlobalScope` + Wasm 境界**: インポート0個の素の `wasm32-unknown-unknown` C-ABI `.wasm`（`WebAssembly.instantiate(bytes, {})`）と Vite の `transformWithEsbuild` による `?worklet` Blob URL 化を組み合わせ、`window` / `TextDecoder` / `/@vite/env` クラッシュを回避しつつ `dev`・`preview`・`/pianosim/` で同一動作させる。
+- **CI静的・バイナリ検査ゲート**: CI（`.github/workflows/ci.yml`）では `cargo fmt --check`、`piano-cli check-lines`、`cargo clippy --workspace -- -D warnings`、`cargo clippy --package piano-wasm --target wasm32-unknown-unknown -- -D warnings`、`cargo test --workspace`、`npm run build`、`piano-cli check-wasm-simd apps/web/public/piano_wasm.wasm`、`npm run test:e2e` をすべて必須実行する。
 - **GitHub CLIとPages公開**: 環境に `gh` コマンドは未インストール。リモートは `origin = git@github.com:likr-sandbox/pianosim.git`、GitHub Pages（`https://likr-sandbox.github.io/pianosim/`）は `Settings -> Pages -> Source: GitHub Actions` が有効化済み。Viteの `base` は `/pianosim/` とし、デプロイ確認は `curl` と公開URLへのHeadless Playwrightで行う。
 
 ## 5. 音響DSP・検証上の知見（蓄積ログ）
-- **旧v1実装の保全**: M1で旧TS製DWG実装（`c75cf57`）を一掃する直前に、Gitタグ `v0.1.0-ts-dwg` を付与して比較用に残すこと。
+- **旧v1実装の保全**: 旧TS製DWG実装（`c75cf57`）はGitタグ `v0.1.0-ts-dwg` にアーカイブ済み（定量比較時は `git worktree add /tmp/pianosim-v1 v0.1.0-ts-dwg` で参照可能）。
+- **ゼロアロケーションと `no_std` コア**: `[T]::sort_by` は一時バッファをヒープ確保する可能性があるため、固定長 `[SampleEvent; 512]` キューはインプレース挿入ソートを用いる。`piano-simd` は `#![cfg_attr(not(test), no_std)]` + `extern crate alloc` 構成とし、外部クレート依存なしで下流DSPクレートへSIMD/FFT/ADAA基盤を供給する。
 - **ステレオ出力バッファのエイリアス防止**: テストやWasm/TS境界でモノラルミックスダウンを取得する際、L/Rに同一配列を渡すと信号加算や破壊が起きる。Rustの借用規則に加え、TS側・テストヘルパ側でも必ず別個の `Float32Array` 領域を確保する。
-- **高音域（C7〜C8）の接触時間・減衰落とし穴**: 高音弦の1周期（C8 ≈ `0.24 ms`）に対しハンマー接触パルスが長すぎると基本波がスペクトルヌルに落ち、1次LPF型の単純なループ減衰は高音弦の基本波を数十msで消滅させる。Stage 1の局所384 kHz接触計算とStage 2のZOHレゾネータでは、A0〜C4だけでなく **C6〜C8の攻撃RMS・スペクトル・T60減衰** を必ず自動検証対象に含める。
-- **E2Eテストの誠実性**: Playwright E2Eで合成モック音源を使うとリグレッションを見逃す。必ず実Wasm `AudioWorklet` パイプラインの出力（`AudioContext` 終端タップまたはWorkletテレメトリ）を検証し、空のUIスキップガード（`test.skip`）を入れない。
+- **高音域（C7〜C8）の接触時間・減衰落とし穴**: 高音弦の1周期（C8 ≈ `0.24 ms`）に対しハンマー接触パルスが長すぎると基本波がスペクトルヌルに落ち（鍵長連動パルス `~0.20*T0` 等で回避）、1次LPF型の単純なループ減衰は高音弦の基本波を数十msで消滅させる。Stage 1の局所384 kHz接触計算とStage 2のZOHレゾネータでは、A0〜C4だけでなく **C6〜C8の攻撃RMS・スペクトル・T60減衰** を必ず自動検証対象に含める。
+- **Wasm SIMD128検証**: `check-wasm-simd` はWasm Code section（ID 10）の命令をデコードして実 `0xfd` オペコードを数え、`f32.const`/`v128.const` 即値バイトの誤検知を防ぐ。
+- **E2Eテストの誠実性**: Playwright E2Eで合成モック音源を使うとリグレッションを見逃す。必ず実Wasm `AudioWorklet` パイプラインの出力（`AudioContext` 終端の受動 `AnalyserNode` またはWorkletテレメトリ）を検証し、空のUIスキップガード（`test.skip`）を入れない。
 
 ## 6. 本ファイルの更新履歴（直近マイルストーン要約）
+- **M1 (2026-11-15)**: 旧v1実装を `v0.1.0-ts-dwg` (`c75cf57`) へ保全・撤去し、10クレート純Rustモノレポ + `piano-simd` + C-ABI `piano-wasm` + `piano-cli` + Vanilla TS `AudioWorklet` シェル + CI/Pagesワークフローを確立。`127.0.0.1` 未バインドSYN回避策、`?worklet` Blob URL、ゼロアロケーション挿入ソート、`rustfmt` Hornerループ回避、Wasm SIMD128/CI検査知見を統合。
 - **Pre-M1 (2026-11-14)**: 初版作成。v1実装・`/grill-me` 設計決定（`ARCHITECTURE.md`, `ROADMAP.md`, `DECISIONS_AND_FALLBACKS.md`, `SWARM_WORKFLOW.md`）および環境・DSP知見を登録。
