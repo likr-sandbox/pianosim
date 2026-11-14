@@ -30,6 +30,7 @@ dependencies = [
 name = "piano-engine"
 version = "0.1.0"
 dependencies = [
+ "piano-action",
  "piano-simd",
  "piano-spec",
  "piano-strings",

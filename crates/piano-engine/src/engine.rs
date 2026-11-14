@@ -1,29 +1,94 @@
-//! Real-time 88-key / 230-string / ~26k-mode piano synthesizer engine core.
+//! Real-time 88-key / 230-string / ~26k-mode physical piano engine core.
 
+use piano_action::ActionBank;
 use piano_spec::{
-    midi_to_key, u16_to_unit_f32, EventKind, PedalKind, SampleEvent, VoicingSpec, CHOIR_LAYOUTS,
-    DAMPED_KEYS, NUM_KEYS,
+    midi_to_key, EventKind, PedalKind, SampleEvent, VoicingSpec, DAMPED_KEYS, NUM_KEYS,
 };
-use piano_strings::StringBank;
+use piano_strings::{KeyActionDriver, StringBank};
 
 use crate::event_queue::{is_sorted_by_offset, EventQueue};
 use crate::telemetry::{compute_block_telemetry, EngineTelemetry};
 
 const KEY_SILENCE_RMS_THRESHOLD: f32 = 1.0e-4;
+const DAMPER_ACTIVE_HOLD_CLEARANCE_M: f32 = 0.5e-3;
+
+struct ActionDriver<'a>(&'a mut ActionBank);
+
+impl KeyActionDriver for ActionDriver<'_> {
+    #[inline]
+    fn is_hammer_active(&self, key_idx: usize) -> bool {
+        self.0.is_hammer_active(key_idx)
+    }
+
+    #[inline]
+    fn damper_clearance_m(&self, key_idx: usize) -> f32 {
+        self.0.damper_clearance_m(key_idx)
+    }
+
+    #[inline]
+    fn strike_weights(&self, key_idx: usize) -> [f32; 3] {
+        self.0.strike_weights(key_idx)
+    }
+
+    #[inline]
+    fn step_key_clearance(&mut self, key_idx: usize) -> f32 {
+        self.0.step_key_clearance(key_idx)
+    }
+
+    #[inline]
+    fn step_key_clearance_tile(
+        &mut self,
+        key_idx: usize,
+        t_len: usize,
+        out_clears: &mut [f32; 8],
+    ) -> f32 {
+        self.0.step_key_clearance_tile(key_idx, t_len, out_clears)
+    }
+
+    #[inline]
+    fn step_hammer_sample(
+        &mut self,
+        key_idx: usize,
+        y_str_m: f32,
+        v_str_mps: f32,
+        r_port_strike: f32,
+    ) -> f32 {
+        self.0
+            .step_hammer_sample(key_idx, y_str_m, v_str_mps, r_port_strike)
+    }
+
+    #[inline]
+    fn step_damper_sample(
+        &mut self,
+        key_idx: usize,
+        slot_idx: usize,
+        y_damp_m: f32,
+        v_damp_mps: f32,
+        r_port_damp: f32,
+        y_clear_m: f32,
+    ) -> f32 {
+        self.0.step_damper_sample(
+            key_idx,
+            slot_idx,
+            y_damp_m,
+            v_damp_mps,
+            r_port_damp,
+            y_clear_m,
+        )
+    }
+}
 
 /// Core synthesizer state separated from scratch event queue for clean borrowing.
 #[derive(Clone, Debug)]
 struct EngineCore {
+    action: ActionBank,
     bank: StringBank,
     key_down: [bool; NUM_KEYS],
-    sostenuto_latched: [bool; NUM_KEYS],
     ringing: [bool; NUM_KEYS],
-    sustain: f32,
-    una_corda: f32,
-    sostenuto_down: bool,
 }
 
-/// Zero-allocation 88-key polyphonic piano engine backed by [`StringBank`].
+/// Zero-allocation 88-key polyphonic piano engine coupling Stage 1 [`ActionBank`]
+/// with Stage 2 [`StringBank`].
 #[derive(Clone, Debug)]
 pub struct PianoEngine {
     core: EngineCore,
@@ -32,24 +97,21 @@ pub struct PianoEngine {
 }
 
 impl PianoEngine {
-    /// Allocates and precomputes all 88-key / 230-string tables with default voicing.
+    /// Allocates and precomputes all 88-key action and string tables with default voicing.
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
         Self::new_with_voicing(sample_rate, &VoicingSpec::default())
     }
 
-    /// Allocates and precomputes all 88-key / 230-string tables for `voicing`.
+    /// Allocates and precomputes all 88-key action and string tables for `voicing`.
     #[must_use]
     pub fn new_with_voicing(sample_rate: f32, voicing: &VoicingSpec) -> Self {
         Self {
             core: EngineCore {
+                action: ActionBank::new(sample_rate, voicing),
                 bank: StringBank::new(sample_rate, voicing),
                 key_down: [false; NUM_KEYS],
-                sostenuto_latched: [false; NUM_KEYS],
                 ringing: [false; NUM_KEYS],
-                sustain: 0.0,
-                una_corda: 0.0,
-                sostenuto_down: false,
             },
             scratch_events: EventQueue::new(),
             telemetry: EngineTelemetry::default(),
@@ -83,10 +145,15 @@ impl PianoEngine {
         self.core.active_voice_count()
     }
 
-    /// Resets all 88 keys, pedal states, and modal buffers without reallocating.
+    /// Resets all 88 keys, pedals, hammers, dampers, and modal buffers without reallocating.
     pub fn reset(&mut self) {
         self.core.all_notes_off();
         self.telemetry = EngineTelemetry::default();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_felt_memory_enabled(&mut self, enabled: bool) {
+        self.core.action.set_memory_enabled(enabled);
     }
 
     /// Processes sample-accurate `events` and renders stereo audio into `out_l`/`out_r`
@@ -138,7 +205,9 @@ impl EngineCore {
     }
 
     fn render_subblock(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
-        self.bank.render_subblock(out_l, out_r);
+        let mut driver = ActionDriver(&mut self.action);
+        self.bank.render_subblock_coupled(&mut driver, out_l, out_r);
+        self.action.decay_idle_memory(out_l.len());
         for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
             *l = soft_limit(*l);
             *r = soft_limit(*r);
@@ -152,12 +221,15 @@ impl EngineCore {
                 velocity_u16,
             } => {
                 if velocity_u16 == 0 {
-                    self.note_off(midi_key);
+                    self.note_off(midi_key, 0);
                 } else {
                     self.note_on(midi_key, velocity_u16);
                 }
             }
-            EventKind::NoteOff { midi_key, .. } => self.note_off(midi_key),
+            EventKind::NoteOff {
+                midi_key,
+                release_vel_u16,
+            } => self.note_off(midi_key, release_vel_u16),
             EventKind::Pedal { kind, value_u16 } => self.set_pedal(kind, value_u16),
             EventKind::AllNotesOff => self.all_notes_off(),
         }
@@ -169,86 +241,36 @@ impl EngineCore {
         };
         self.key_down[k] = true;
         self.ringing[k] = true;
-        self.bank.set_key_hold(k, 1.0);
-
-        let u = self.una_corda;
-        let weights = match CHOIR_LAYOUTS[k].strings_per_key {
-            3 => [1.0 - u, 1.0, 1.0],
-            2 => [1.0 - u, 1.0, 0.0],
-            _ => [1.0 - 0.25 * u, 0.0, 0.0],
-        };
-
-        let v = u16_to_unit_f32(velocity_u16).max(1.0 / 65_535.0);
-        let amp = 0.08 + 0.92 * v * v;
-        self.bank.trigger_key_pulse(k, weights, amp);
+        self.action.note_on(k, velocity_u16);
+        self.bank.mark_key_possibly_active(k);
     }
 
-    fn note_off(&mut self, midi_key: u8) {
+    fn note_off(&mut self, midi_key: u8, release_vel_u16: u16) {
         let Some(k) = midi_to_key(midi_key) else {
             return;
         };
         self.key_down[k] = false;
-        let eff_hold = if self.sostenuto_latched[k] {
-            1.0
-        } else {
-            self.sustain
-        };
-        self.bank.set_key_hold(k, eff_hold);
+        self.action.note_off(k, release_vel_u16);
     }
 
     fn set_pedal(&mut self, kind: PedalKind, value_u16: u16) {
-        let unit = u16_to_unit_f32(value_u16);
-        match kind {
-            PedalKind::Sustain => {
-                self.sustain = unit;
-                for k in 0..DAMPED_KEYS {
-                    if !self.key_down[k] && !self.sostenuto_latched[k] {
-                        self.bank.set_key_hold(k, unit);
-                    }
-                }
-            }
-            PedalKind::UnaCorda => {
-                self.una_corda = unit;
-            }
-            PedalKind::Sostenuto => {
-                let down = unit >= 0.5;
-                if down && !self.sostenuto_down {
-                    for k in 0..NUM_KEYS {
-                        if self.key_down[k] {
-                            self.sostenuto_latched[k] = true;
-                        }
-                    }
-                } else if !down && self.sostenuto_down {
-                    for k in 0..NUM_KEYS {
-                        if self.sostenuto_latched[k] {
-                            self.sostenuto_latched[k] = false;
-                            if !self.key_down[k] {
-                                self.bank.set_key_hold(k, self.sustain);
-                            }
-                        }
-                    }
-                }
-                self.sostenuto_down = down;
-            }
-        }
+        self.action.set_pedal(kind, value_u16);
     }
 
     fn all_notes_off(&mut self) {
-        self.sustain = 0.0;
-        self.una_corda = 0.0;
-        self.sostenuto_down = false;
         self.key_down.fill(false);
-        self.sostenuto_latched.fill(false);
         self.ringing.fill(false);
+        self.action.reset();
         self.bank.reset();
     }
 
     fn retire_silent_keys(&mut self) {
         for k in 0..NUM_KEYS {
-            if !self.ringing[k] || self.key_down[k] || self.sostenuto_latched[k] {
+            if !self.ringing[k] || self.key_down[k] || self.action.is_hammer_active(k) {
                 continue;
             }
-            if k < DAMPED_KEYS && self.sustain >= 0.99 {
+            if k < DAMPED_KEYS && self.action.damper_clearance_m(k) > DAMPER_ACTIVE_HOLD_CLEARANCE_M
+            {
                 continue;
             }
             let (v_rms, h_rms) = self.bank.measure_key_polarization_rms(k);
