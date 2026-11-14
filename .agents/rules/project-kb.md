@@ -1,0 +1,1 @@
+@[agents-kb](../AGENTS.md)

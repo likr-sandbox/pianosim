@@ -1,19 +1,23 @@
-# Dependencies
+# Rust & Wasm build artifacts
+target/
+
+# Node / Web dependencies and build outputs
 node_modules/
 .pnpm-store/
-
-# Production Build Output
 dist/
 dist-ssr/
+apps/web/dist/
+apps/web/public/*.wasm
+apps/web/pkg/
 
-# Test & Coverage Outputs
+# Test & coverage outputs
 coverage/
 .nyc_output/
 test-results/
 playwright-report/
 blob-report/
 
-# Local Environment & Logs
+# Local environment & logs
 *.local
 .env
 .env.*.local
@@ -22,7 +26,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# IDE & OS Files
+# IDE & OS files
 .DS_Store
 Thumbs.db
 .idea/
@@ -30,5 +34,8 @@ Thumbs.db
 *.swp
 *.swo
 
-# Agent metadata
-.agents/
+# Track project knowledge base while ignoring ephemeral agent artifacts
+.agents/*
+!.agents/AGENTS.md
+!.agents/rules/
+!.agents/rules/**
