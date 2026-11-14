@@ -133,6 +133,14 @@ fn sostenuto_una_corda_and_bounds_safety() {
     // velocity_u16 == 0 acts as note_off; out-of-range indices never panic.
     bank.note_on(48, 40_000);
     bank.note_on(48, 0);
+    let mut clears = [0.0_f32; 8];
+    let min_c = bank.step_key_clearance_tile(48, 8, &mut clears);
+    assert_eq!(min_c, clears[7]);
+    assert!(bank.step_damper_sample(48, 459, 1.0e-3, 0.5, 0.1, -3e-4) < 0.0);
+    assert_eq!(
+        bank.step_damper_sample(48, 460, 1.0e-3, 0.5, 0.1, -3e-4),
+        0.0
+    );
     bank.note_on(999, 40_000);
     bank.note_off(999, 40_000);
     assert!(!bank.is_hammer_active(999));

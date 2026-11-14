@@ -1,10 +1,13 @@
 //! FTO #3 compliant unilateral geometric-clearance hysteretic damper contact pad
-//! (`230` per-string slots across `0..70` damped keys, passive at `44.1/48/96 kHz`).
+//! (`460` orthogonal V/H per-string slots across `0..70` damped keys, passive at `44.1/48/96 kHz`).
 
 use piano_simd::{AdaaPowerLut, AdaaState};
 use piano_spec::{build_scale_design, VoicingSpec, DAMPED_KEYS, TOTAL_STRINGS};
 
 use crate::math::exp_f64;
+
+/// Total independent unilateral damper pad slots (`2 * s_idx` = V, `2 * s_idx + 1` = H).
+pub const DAMPER_PAD_SLOTS: usize = TOTAL_STRINGS * 2;
 
 const DAMPER_EXPONENT_P: f32 = 2.2;
 const DAMPER_LUT_SIZE: usize = 512;
@@ -35,14 +38,14 @@ impl DamperStringSlot {
     }
 }
 
-/// Unilateral geometric-clearance damper contact bank covering all `230` strings.
+/// Unilateral geometric-clearance damper contact bank covering all `460` orthogonal V/H slots.
 #[derive(Clone, Debug)]
 pub struct DamperPadBank {
     lut: AdaaPowerLut,
     a_damp_felt: f32,
     c_nom_key: [f32; DAMPED_KEYS],
     f_scale_key: [f32; DAMPED_KEYS],
-    slots: [DamperStringSlot; TOTAL_STRINGS],
+    slots: [DamperStringSlot; DAMPER_PAD_SLOTS],
 }
 
 impl DamperPadBank {
@@ -72,31 +75,32 @@ impl DamperPadBank {
             a_damp_felt,
             c_nom_key,
             f_scale_key,
-            slots: [DamperStringSlot::default(); TOTAL_STRINGS],
+            slots: [DamperStringSlot::default(); DAMPER_PAD_SLOTS],
         }
     }
 
-    /// Resets all 230 per-string ADAA and Stulov relaxation slots to zero.
+    /// Resets all 460 V/H per-string ADAA and Stulov relaxation slots to zero.
     pub fn reset(&mut self) {
         for slot in &mut self.slots {
             slot.reset();
         }
     }
 
-    /// Evaluates one host-rate unilateral damper contact step for `(key_idx, str_idx)`,
+    /// Evaluates one host-rate unilateral damper contact step for `(key_idx, slot_idx)`
+    /// (`slot_idx = 2 * s_idx` vertical, `2 * s_idx + 1` horizontal),
     /// returning the passive force `F_damp` (`N`) applied **ON the string**.
     #[inline]
     pub fn step_damper_sample(
         &mut self,
         key_idx: usize,
-        str_idx: usize,
+        slot_idx: usize,
         y_damp_m: f32,
         v_damp_mps: f32,
         r_port_damp: f32,
         y_clear_m: f32,
     ) -> f32 {
         if key_idx >= DAMPED_KEYS
-            || str_idx >= TOTAL_STRINGS
+            || slot_idx >= DAMPER_PAD_SLOTS
             || !y_damp_m.is_finite()
             || !v_damp_mps.is_finite()
             || !r_port_damp.is_finite()
@@ -105,7 +109,7 @@ impl DamperPadBank {
             return 0.0;
         }
 
-        let slot = &mut self.slots[str_idx];
+        let slot = &mut self.slots[slot_idx];
         let inv_scale = 1.0 / DELTA_D_SCALE_M;
 
         if y_damp_m == 0.0 && v_damp_mps == 0.0 {
@@ -165,14 +169,20 @@ mod tests {
         let mut bank = DamperPadBank::new(48_000.0, &VoicingSpec::default());
         for k in [0usize, 15, 39, 48, 69] {
             let str_idx = usize::from(key_choir(k).unwrap().first_string_idx);
-            for _ in 0..32 {
-                let f = bank.step_damper_sample(k, str_idx, 0.0, 0.0, 0.25, -3.0e-4);
-                assert_eq!(f, 0.0);
+            for slot_idx in [str_idx * 2, str_idx * 2 + 1] {
+                for _ in 0..32 {
+                    let f = bank.step_damper_sample(k, slot_idx, 0.0, 0.0, 0.25, -3.0e-4);
+                    assert_eq!(f, 0.0);
+                }
             }
         }
-        // Undamped keys 70..88 always yield 0.0.
+        // Undamped keys 70..88 and out-of-range slot indices always yield 0.0.
         assert_eq!(
-            bank.step_damper_sample(70, 176, 1.0e-3, 1.5, 0.5, -3.0e-4),
+            bank.step_damper_sample(70, 352, 1.0e-3, 1.5, 0.5, -3.0e-4),
+            0.0
+        );
+        assert_eq!(
+            bank.step_damper_sample(48, DAMPER_PAD_SLOTS, 1.0e-3, 1.5, 0.1, -3.0e-4),
             0.0
         );
     }
@@ -187,6 +197,7 @@ mod tests {
             let ts = 1.0 / f64::from(sr);
             for &k in &[0usize, 15, 39, 48, 69] {
                 let str_idx = usize::from(key_choir(k).unwrap().first_string_idx);
+                let slot_v = str_idx * 2;
                 let p = specs[k];
                 let m_wire = p.linear_density_kg_m * p.speaking_length_m;
                 let phi_d = 0.38_f64;
@@ -205,7 +216,7 @@ mod tests {
                 for step in 0..n_steps {
                     let y_d = (phi_d * q) as f32;
                     let v_d = (phi_d * u) as f32;
-                    let f_damp = bank.step_damper_sample(k, str_idx, y_d, v_d, r_port, -3.0e-4);
+                    let f_damp = bank.step_damper_sample(k, slot_v, y_d, v_d, r_port, -3.0e-4);
                     assert!(f_damp.is_finite());
 
                     u += (phi_d * f64::from(f_damp) * ts) / m_mode;
@@ -229,6 +240,29 @@ mod tests {
                     "sr={sr} k={k} damped T60={t60_est:.4}s out of expected band"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn orthogonal_vh_slots_are_isolated_with_zero_cross_contamination() {
+        let voicing = VoicingSpec::default();
+        let mut isolated_h = DamperPadBank::new(48_000.0, &voicing);
+        let mut dual_vh = DamperPadBank::new(48_000.0, &voicing);
+
+        let k = 48;
+        let s_idx = usize::from(key_choir(k).unwrap().first_string_idx);
+        let slot_v = s_idx * 2;
+        let slot_h = s_idx * 2 + 1;
+
+        for step in 0..512 {
+            let phase = (step as f32) * 0.055;
+            let (yv, vv) = (1.6e-3 * phase.sin(), 1.4 * phase.cos());
+            let (yh, vh) = (-7.5e-4 * (phase * 1.13).cos(), 0.85 * (phase * 1.13).sin());
+
+            let _fv = dual_vh.step_damper_sample(k, slot_v, yv, vv, 0.08, -3.0e-4);
+            let fh_dual = dual_vh.step_damper_sample(k, slot_h, yh, vh, 0.08, -3.0e-4);
+            let fh_ref = isolated_h.step_damper_sample(k, slot_h, yh, vh, 0.08, -3.0e-4);
+            assert_eq!(fh_dual.to_bits(), fh_ref.to_bits());
         }
     }
 }

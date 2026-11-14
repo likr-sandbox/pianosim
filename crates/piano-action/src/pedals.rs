@@ -22,6 +22,7 @@ const HALF_PEDAL_HIGH: f32 = 0.65;
 #[cfg(test)]
 const HALF_PEDAL_MID_CLEARANCE_M: f32 = 3.2e-5;
 const HALF_PEDAL_HI_CLEARANCE_M: f32 = 6.4e-5;
+const SETTLE_EPS_M: f32 = 1.0e-7;
 
 /// Continuous 3-pedal controller and per-key damper clearance smoother.
 #[derive(Clone, Debug)]
@@ -31,6 +32,7 @@ pub struct PedalBank {
     sostenuto_down: bool,
     key_down: [bool; NUM_KEYS],
     sostenuto_latched: [bool; DAMPED_KEYS],
+    settling: [bool; DAMPED_KEYS],
     clearance_m: [f32; DAMPED_KEYS],
     release_preload_m: [f32; DAMPED_KEYS],
     alpha_down: [f32; DAMPED_KEYS],
@@ -55,6 +57,7 @@ impl PedalBank {
             sostenuto_down: false,
             key_down: [false; NUM_KEYS],
             sostenuto_latched: [false; DAMPED_KEYS],
+            settling: [false; DAMPED_KEYS],
             clearance_m: [CLEARANCE_PRELOAD_M; DAMPED_KEYS],
             release_preload_m: [CLEARANCE_PRELOAD_M; DAMPED_KEYS],
             alpha_down: [default_alpha_down; DAMPED_KEYS],
@@ -71,6 +74,7 @@ impl PedalBank {
         self.sostenuto_down = false;
         self.key_down.fill(false);
         self.sostenuto_latched.fill(false);
+        self.settling.fill(false);
         self.clearance_m.fill(CLEARANCE_PRELOAD_M);
         self.release_preload_m.fill(CLEARANCE_PRELOAD_M);
         let default_alpha_down = 0.5 * (self.alpha_down_slow + self.alpha_down_fast);
@@ -86,6 +90,7 @@ impl PedalBank {
         self.key_down[key_idx] = true;
         if key_idx < DAMPED_KEYS {
             self.clearance_m[key_idx] = CLEARANCE_OPEN_M;
+            self.settling[key_idx] = false;
         }
     }
 
@@ -101,6 +106,7 @@ impl PedalBank {
             self.release_preload_m[key_idx] = CLEARANCE_PRELOAD_M * (0.80 + 0.20 * rel_u);
             self.alpha_down[key_idx] =
                 self.alpha_down_slow + (self.alpha_down_fast - self.alpha_down_slow) * rel_u;
+            self.settling[key_idx] = true;
         }
     }
 
@@ -110,6 +116,9 @@ impl PedalBank {
         let unit = u16_to_unit_f32(value_u16).clamp(0.0, 1.0);
         match kind {
             PedalKind::Sustain => {
+                if unit != self.sustain {
+                    self.settling.fill(true);
+                }
                 self.sustain = unit;
                 if unit > 0.0 {
                     // Pedal lift uses uniform rail preload as damper springs release.
@@ -128,10 +137,12 @@ impl PedalBank {
                     for k in 0..DAMPED_KEYS {
                         if self.clearance_m[k] > SOSTENUTO_OPEN_MIN_M {
                             self.sostenuto_latched[k] = true;
+                            self.settling[k] = true;
                         }
                     }
                 } else if !now_down && self.sostenuto_down {
                     self.sostenuto_latched.fill(false);
+                    self.settling.fill(true);
                 }
                 self.sostenuto_down = now_down;
             }
@@ -173,26 +184,66 @@ impl PedalBank {
         }
     }
 
-    /// Advances the 1-pole damper rail smoother for `key_idx` by one host sample.
+    /// Advances the 1-pole damper rail smoother across an 8-sample tile (`n = t_len.min(8)`),
+    /// storing per-sample clearances into `out_clears[..n]` and returning the tile minimum.
     #[inline]
-    pub fn step_key_clearance(&mut self, key_idx: usize) -> f32 {
+    pub fn step_key_clearance_tile(
+        &mut self,
+        key_idx: usize,
+        t_len: usize,
+        out_clears: &mut [f32; 8],
+    ) -> f32 {
+        let n = t_len.min(8);
         if key_idx >= DAMPED_KEYS {
+            out_clears[..n].fill(CLEARANCE_OPEN_M);
             return CLEARANCE_OPEN_M;
         }
+        if !self.settling[key_idx] || n == 0 {
+            let cur = self.clearance_m[key_idx];
+            out_clears[..n].fill(cur);
+            return cur;
+        }
+
         let target = if self.key_down[key_idx] || self.sostenuto_latched[key_idx] {
             CLEARANCE_OPEN_M
         } else {
             sustain_clearance_m(self.sustain, self.release_preload_m[key_idx])
         };
-        let cur = self.clearance_m[key_idx];
+        let mut cur = self.clearance_m[key_idx];
         let alpha = if target >= cur {
             self.alpha_lift
         } else {
             self.alpha_down[key_idx]
         };
-        let next = cur + alpha * (target - cur);
-        self.clearance_m[key_idx] = next;
-        next
+
+        let mut min_clear = f32::INFINITY;
+        let mut settled = false;
+        for slot in &mut out_clears[..n] {
+            if settled || (target - cur).abs() < SETTLE_EPS_M {
+                cur = target;
+                settled = true;
+            } else {
+                cur += alpha * (target - cur);
+                if (target - cur).abs() < SETTLE_EPS_M {
+                    cur = target;
+                    settled = true;
+                }
+            }
+            *slot = cur;
+            min_clear = min_clear.min(cur);
+        }
+        self.clearance_m[key_idx] = cur;
+        if settled {
+            self.settling[key_idx] = false;
+        }
+        min_clear
+    }
+
+    /// Advances the 1-pole damper rail smoother for `key_idx` by one host sample.
+    #[inline]
+    pub fn step_key_clearance(&mut self, key_idx: usize) -> f32 {
+        let mut tmp = [0.0_f32; 8];
+        self.step_key_clearance_tile(key_idx, 1, &mut tmp)
     }
 
     /// Returns per-string hammer strike weights `[f32; 3]` under current Una Corda.
@@ -310,5 +361,69 @@ mod tests {
         assert!((p.strike_weights(0)[0] - 0.78).abs() < 1e-6);
         assert_eq!(p.strike_weights(12), [0.0, 1.0, 0.0]);
         assert_eq!(p.strike_weights(48), [0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn clearance_tile_matches_scalar_tracks_settling_and_handles_edges() {
+        let mut p_tile = PedalBank::new(48_000.0);
+        let mut p_scalar = PedalBank::new(48_000.0);
+        assert!(!p_tile.settling.iter().any(|&s| s));
+
+        p_tile.note_on(24);
+        p_scalar.note_on(24);
+        assert!(!p_tile.settling[24]);
+
+        p_tile.note_off(24, 32_768);
+        p_scalar.note_off(24, 32_768);
+        assert!(p_tile.settling[24]);
+
+        let mut clears = [0.0_f32; 8];
+        for _ in 0..150 {
+            let min_tile = p_tile.step_key_clearance_tile(24, 8, &mut clears);
+            let mut min_scalar = f32::INFINITY;
+            for &c_tile in &clears {
+                let c_scalar = p_scalar.step_key_clearance(24);
+                assert_eq!(c_tile.to_bits(), c_scalar.to_bits());
+                min_scalar = min_scalar.min(c_scalar);
+            }
+            assert_eq!(min_tile.to_bits(), min_scalar.to_bits());
+        }
+
+        // Converge until settled and verify O(1) settled path snaps to exact preload.
+        for _ in 0..2_000 {
+            p_tile.step_key_clearance_tile(24, 8, &mut clears);
+        }
+        assert!(!p_tile.settling[24]);
+        let settled_min = p_tile.step_key_clearance_tile(24, 5, &mut clears);
+        assert_eq!(settled_min, p_tile.damper_clearance_m(24));
+        assert!(clears[..5].iter().all(|&c| c == settled_min));
+
+        // Redundant Sustain 0 does not re-enable settling; moving Sustain does.
+        p_tile.set_pedal(PedalKind::Sustain, 0);
+        assert!(!p_tile.settling[24]);
+        p_tile.set_pedal(PedalKind::Sustain, 52_428); // ~0.8
+        assert!(p_tile.settling.iter().all(|&s| s));
+        for _ in 0..2_000 {
+            p_tile.step_key_clearance_tile(24, 8, &mut clears);
+        }
+        assert!(!p_tile.settling[24]);
+
+        // Pressing Sostenuto on a settled sustained key latches and lifts it.
+        p_tile.set_pedal(PedalKind::Sostenuto, 65_535);
+        assert!(p_tile.is_sostenuto_latched(24));
+        assert!(p_tile.settling[24]);
+        for _ in 0..2_000 {
+            p_tile.step_key_clearance_tile(24, 8, &mut clears);
+        }
+        assert!(!p_tile.settling[24]);
+        assert!((p_tile.damper_clearance_m(24) - CLEARANCE_OPEN_M).abs() < 1e-7);
+
+        // Undamped keys and t_len == 0 remain safe.
+        assert_eq!(
+            p_tile.step_key_clearance_tile(75, 4, &mut clears),
+            CLEARANCE_OPEN_M
+        );
+        assert!(clears[..4].iter().all(|&c| c == CLEARANCE_OPEN_M));
+        let _ = p_tile.step_key_clearance_tile(24, 0, &mut clears);
     }
 }

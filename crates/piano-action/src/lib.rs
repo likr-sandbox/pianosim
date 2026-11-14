@@ -209,6 +209,19 @@ impl ActionBank {
         self.pedals.strike_weights(key_idx)
     }
 
+    /// Advances the 1-pole damper rail smoother across an 8-sample tile (`n = t_len.min(8)`),
+    /// storing per-sample clearances into `out_clears[..n]` and returning the tile minimum.
+    #[inline]
+    pub fn step_key_clearance_tile(
+        &mut self,
+        key_idx: usize,
+        t_len: usize,
+        out_clears: &mut [f32; 8],
+    ) -> f32 {
+        self.pedals
+            .step_key_clearance_tile(key_idx, t_len, out_clears)
+    }
+
     /// Advances the 1-pole damper rail smoother by one host sample and returns `y_clear_m`.
     #[inline]
     pub fn step_key_clearance(&mut self, key_idx: usize) -> f32 {
@@ -243,13 +256,14 @@ impl ActionBank {
         )
     }
 
-    /// Steps one host sample of the unilateral hysteretic damper pad for `(key_idx, str_idx)`,
+    /// Steps one host sample of the unilateral hysteretic damper pad for `(key_idx, slot_idx)`
+    /// (`slot_idx = 2 * s_idx` vertical, `2 * s_idx + 1` horizontal),
     /// returning the passive damping force `F_damp` (`N`) applied **ON the string**.
     #[inline]
     pub fn step_damper_sample(
         &mut self,
         key_idx: usize,
-        str_idx: usize,
+        slot_idx: usize,
         y_damp_m: f32,
         v_damp_mps: f32,
         r_port_damp: f32,
@@ -257,7 +271,7 @@ impl ActionBank {
     ) -> f32 {
         self.damper_pad.step_damper_sample(
             key_idx,
-            str_idx,
+            slot_idx,
             y_damp_m,
             v_damp_mps,
             r_port_damp,
