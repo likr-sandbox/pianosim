@@ -68,6 +68,8 @@ impl StringBridgeMeta {
 pub(crate) struct BridgePorts {
     pub beta_br: AlignedBuf,
     pub r0: [f32; TOTAL_STRINGS],
+    pub r_damp_prefix_v: [f32; TOTAL_STRINGS],
+    pub r_damp_prefix_h: [f32; TOTAL_STRINGS],
     pub tail_n_trans: [f32; TOTAL_STRINGS],
     pub tail_n_long: [f32; TOTAL_STRINGS],
     pub meta: [StringBridgeMeta; TOTAL_STRINGS],
@@ -125,6 +127,8 @@ impl BridgePorts {
         let nyquist = NYQUIST_CUTOFF_RATIO * sample_rate;
         let mut meta = [const { StringBridgeMeta::empty() }; TOTAL_STRINGS];
         let mut r0 = [0.0_f32; TOTAL_STRINGS];
+        let mut r_damp_prefix_v = [0.0_f32; TOTAL_STRINGS];
+        let mut r_damp_prefix_h = [0.0_f32; TOTAL_STRINGS];
         let mut tail_n_trans = [0.0_f32; TOTAL_STRINGS];
         let mut tail_n_long = [0.0_f32; TOTAL_STRINGS];
         let mut counts = [(0usize, 0usize, 0usize, 0usize); TOTAL_STRINGS];
@@ -225,6 +229,20 @@ impl BridgePorts {
             meta[s_idx].h_tail = (entry.horiz_vecs.start + nh_vecs)..entry.horiz_vecs.end;
             meta[s_idx].beta_v_off = beta_v_off;
             meta[s_idx].beta_h_off = beta_h_off;
+
+            // Prefix damper port resistances match `r_port_damp_v/h` (`alpha * sum(b_damp^2)`)
+            // so `1 + 0.5 * rp * c` preserves exact discrete passivity on `< 5,500 Hz` prefixes.
+            if entry.has_damper {
+                let bd = ports.b_damp.as_slice();
+                let sum_sq_slice = |vr: &Range<usize>| -> f64 {
+                    bd[(vr.start * 4)..(vr.end * 4)]
+                        .iter()
+                        .map(|&x| f64::from(x) * f64::from(x))
+                        .sum()
+                };
+                r_damp_prefix_v[s_idx] = (alpha64 * sum_sq_slice(&meta[s_idx].v_br)) as f32;
+                r_damp_prefix_h[s_idx] = (alpha64 * sum_sq_slice(&meta[s_idx].h_br)) as f32;
+            }
         }
 
         let mut beta_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
@@ -232,6 +250,8 @@ impl BridgePorts {
         Self {
             beta_br,
             r0,
+            r_damp_prefix_v,
+            r_damp_prefix_h,
             tail_n_trans,
             tail_n_long,
             meta,

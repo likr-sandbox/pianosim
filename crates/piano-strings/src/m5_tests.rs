@@ -68,7 +68,8 @@ impl KeyActionDriver for MockAction {
             return 0.0;
         }
         let c_raw = 300.0 * pen.min(4.0);
-        let c = if rp > 0.0 { c_raw.min(2.0 / rp) } else { c_raw };
+        // Cap well below 2.0/rp (vd_post = 0 node-pinning) so waves absorb rather than reflect.
+        let c = if rp > 0.0 { c_raw.min(0.7 / rp) } else { c_raw };
         (-c * vd) / (1.0 + 0.5 * rp * c)
     }
 }
@@ -270,6 +271,14 @@ fn sympathetic_resonance_prefers_octave_c5_over_offresonant_cs5_and_damper_kills
         "expected finite Newtons in zone_str_audio, got {}",
         bridge.max_zone_audio_n
     );
+    let c4_sr = bank.choir_map.key(39).unwrap().string_range.clone();
+    let c5_sr = bank.choir_map.key(51).unwrap().string_range.clone();
+    let cs5_sr = bank.choir_map.key(52).unwrap().string_range.clone();
+    assert!(c4_sr.clone().all(|s| bank.ports.struck_active[s]));
+    assert!(c5_sr
+        .clone()
+        .chain(cs5_sr)
+        .all(|s| bank.ports.may_be_nonzero[s] && !bank.ports.struck_active[s]));
 
     let key_energy = |b: &StringBank, key: usize| -> f64 {
         b.choir_map
@@ -289,9 +298,17 @@ fn sympathetic_resonance_prefers_octave_c5_over_offresonant_cs5_and_damper_kills
 
     action.clearances[51] = -0.002;
     action.clearances[39] = -0.002;
+    let mut prev_e = bank.total_sav_energy_joules() + bridge.total_energy_joules();
     for _ in 0..32 {
         bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut l, &mut r);
+        let cur_e = bank.total_sav_energy_joules() + bridge.total_energy_joules();
+        assert!(
+            cur_e <= prev_e + 1.0e-7 * prev_e.max(1.0),
+            "DampedSymp/Struck energy grew {prev_e} -> {cur_e}"
+        );
+        prev_e = cur_e;
     }
+    assert!(c5_sr.clone().all(|s| !bank.ports.struck_active[s]));
     let e_c5_damped = key_energy(&bank, 51);
     assert!(
         e_c5_damped < e_c5 * 0.10,

@@ -9,8 +9,8 @@ use crate::bridge_port::{
     step_pol_prefix_wdf, step_pol_prefix_wdf_inj, BridgePortDriver, BridgePorts,
 };
 use crate::bridge_tails::{
-    prepare_sample_tails_and_hammers, sav_long_vecs, step_damped_tile, step_uncoupled_tails,
-    BridgeRun, ChunkPlan, HammerStepForce, KeyCat, SUB,
+    prepare_sample_tails_and_hammers, sav_long_vecs, step_damped_symp_tile, step_damped_tile,
+    step_uncoupled_tails, BridgeRun, ChunkPlan, HammerStepForce, KeyCat, SUB,
 };
 use crate::choir_map::ChoirMap;
 use crate::contact::{step_clearance_subblock, KeyActionDriver};
@@ -39,6 +39,9 @@ fn step_all_strings_prefix_wdf(
         let is_hammer = plan.key_cat[k] == KeyCat::HammerActive;
         let (cv, br_v, ch, br_h, sav_active) = if is_hammer {
             let hf = plan.hammer_forces[s_idx];
+            if hf.fh != 0.0 {
+                r.ports.struck_active[s_idx] = true;
+            }
             let nz_now = r.ports.may_be_nonzero[s_idx]
                 || hf.fh != 0.0
                 || hf.fd_v != 0.0
@@ -67,7 +70,7 @@ fn step_all_strings_prefix_wdf(
                 entry.has_damper,
             );
             r.ports.may_be_nonzero[s_idx] = nz_now;
-            (cv, br_v, ch, br_h, nz_now)
+            (cv, br_v, ch, br_h, r.ports.struck_active[s_idx])
         } else {
             let (cv, br_v) =
                 step_pol_prefix_wdf(r.soa, beta_buf, m.v_br.clone(), m.beta_v_off, neg_vbr);
@@ -77,14 +80,14 @@ fn step_all_strings_prefix_wdf(
                 r.ports.may_be_nonzero[s_idx] = true;
                 r.ports.ports_synced[s_idx] = false;
             }
-            (cv, br_v, ch, br_h, plan.was_nz[s_idx])
+            (cv, br_v, ch, br_h, r.ports.struck_active[s_idx])
         };
         if r.sav_on && sav_active && k < LONGITUDINAL_MAX_KEY_IDX && r.sav.string_n_vh(s_idx) > 0 {
             r.sav.step_string_sav(s_idx, entry, r.soa, r.long_on);
         }
         if is_hammer && r.ports.may_be_nonzero[s_idx] {
             refresh_string_ports(r.soa, r.ports, s_idx, entry);
-        } else if plan.key_cat[k] == KeyCat::DampedRinging {
+        } else if matches!(plan.key_cat[k], KeyCat::DampedStruck | KeyCat::DampedSymp) {
             r.ports.ports_synced[s_idx] = false;
         }
         a_waves[s_idx] = m.a_wave_gain * (br_v + br_h);
@@ -140,11 +143,13 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         was_nz: [false; TOTAL_STRINGS],
         hammer_keys: [0; NUM_KEYS],
         damped_keys: [0; NUM_KEYS],
+        damped_symp_keys: [0; NUM_KEYS],
         sav_long_strings: [0; TOTAL_STRINGS],
         hammer_forces: [HammerStepForce::ZERO; TOTAL_STRINGS],
         zone_tail_n: [[0.0; 8]; SUB],
         n_h: 0,
         n_d: 0,
+        n_ds: 0,
         n_sl: 0,
     };
 
@@ -158,7 +163,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         r.bridge_ports
             .compute_a_waves(r.soa, &plan.was_nz, &mut a_waves);
         plan.key_cat.fill(KeyCat::Uncoupled);
-        (plan.n_h, plan.n_d, plan.n_sl) = (0, 0, 0);
+        (plan.n_h, plan.n_d, plan.n_ds, plan.n_sl) = (0, 0, 0, 0);
         plan.zone_tail_n[..sub].fill([0.0; 8]);
 
         for (k, key) in r.keys.iter().enumerate() {
@@ -186,13 +191,20 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                 plan.hammer_keys[plan.n_h] = k as u8;
                 plan.n_h += 1;
             } else if min_c < DAMPER_CLEAR_THRESHOLD_M {
-                plan.key_cat[k] = KeyCat::DampedRinging;
-                plan.damped_keys[plan.n_d] = k as u8;
-                plan.n_d += 1;
+                let any_struck = r.ports.struck_active[sr.clone()].iter().any(|&b| b);
+                if any_struck {
+                    plan.key_cat[k] = KeyCat::DampedStruck;
+                    plan.damped_keys[plan.n_d] = k as u8;
+                    plan.n_d += 1;
+                } else {
+                    plan.key_cat[k] = KeyCat::DampedSymp;
+                    plan.damped_symp_keys[plan.n_ds] = k as u8;
+                    plan.n_ds += 1;
+                }
             }
             if !hammer {
                 for s_idx in sr {
-                    if sav_long_vecs(&r, s_idx, plan.was_nz[s_idx]) > 0 {
+                    if sav_long_vecs(&r, s_idx) > 0 {
                         plan.sav_long_strings[plan.n_sl] = s_idx as u8;
                         plan.n_sl += 1;
                     }
@@ -206,6 +218,9 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             let t_len = (sub - t).min(TILE);
             if plan.n_d > 0 {
                 step_damped_tile(&mut r, driver, &mut plan, t, t_len, sub_l, sub_r);
+            }
+            if plan.n_ds > 0 {
+                step_damped_symp_tile(&mut r, driver, &plan, t, t_len);
             }
             for off in 0..t_len {
                 let ts = t + off;
