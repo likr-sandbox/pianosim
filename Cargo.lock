@@ -45,6 +45,10 @@ version = "0.1.0"
 [[package]]
 name = "piano-strings"
 version = "0.1.0"
+dependencies = [
+ "piano-simd",
+ "piano-spec",
+]
 
 [[package]]
 name = "piano-wasm"
