@@ -1,0 +1,9 @@
+[package]
+name = "piano-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+piano-engine = { path = "../piano-engine" }
+piano-spec = { path = "../piano-spec" }
