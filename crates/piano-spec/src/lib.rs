@@ -3,9 +3,15 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod events;
+pub mod scale_design;
 pub mod voicing;
 
 pub use events::{u16_to_unit_f32, u7_to_u16, EventKind, PedalKind, SampleEvent};
+pub use scale_design::{
+    build_scale_design, equal_temperament_hz, key_choir, key_to_midi, midi_to_key,
+    string_params_for_key, ChoirLayout, StringPhysicalParams, CHOIR_LAYOUTS, DAMPED_KEYS, MIDI_A0,
+    MIDI_C8, NUM_KEYS, STEEL_DENSITY_KG_M3, STEEL_YOUNGS_MODULUS_PA, TOTAL_STRINGS,
+};
 pub use voicing::{NoteVoicingOffset, VoicingSpec};
 
 /// Pure-Rust `no_std` `f64` mathematical primitives for initialization-time scaling.
