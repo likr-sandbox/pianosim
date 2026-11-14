@@ -1,5 +1,6 @@
 //! Native verification, WAV export, Wasm SIMD inspection, and static check CLI.
 
+mod bench_rt;
 mod check_lines;
 mod wasm_check;
 mod wav_writer;
@@ -19,6 +20,7 @@ use wav_writer::{analyze_stereo, write_stereo_pcm16_wav};
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
+        Some("bench") => bench_rt::run_bench(),
         Some("check-lines") => cmd_check_lines(&args[1..]),
         Some("check-wasm-simd") => cmd_check_wasm_simd(&args[1..]),
         Some("render-wav") => cmd_render_wav(&args[1..]),
@@ -33,7 +35,7 @@ fn main() {
 
 fn usage() -> String {
     String::from(
-        "Usage:\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli render-wav <out.wav>",
+        "Usage:\n  piano-cli bench\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli render-wav <out.wav>",
     )
 }
 
