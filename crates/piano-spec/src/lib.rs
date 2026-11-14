@@ -2,10 +2,19 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod dispersion;
 pub mod events;
 pub mod scale_design;
 pub mod voicing;
 
+pub use dispersion::{
+    analyze_bank_mode_counts, count_longitudinal_partials, count_transverse_partials,
+    effective_string_f0_hz, key_tuned_f0_hz, pad_to_simd4, partial_frequency_hz,
+    polarization_offset_cents, railsback_stretch_cents, railsback_stretch_cents_table,
+    scaled_railsback_stretch_cents, splitmix64, unison_detune_cents, BankModeCounts, Polarization,
+    LONGITUDINAL_MAX_KEY_IDX, MAX_AUDIBLE_FREQ_HZ, MAX_LONGITUDINAL_PARTIALS_PER_STRING,
+    MAX_TRANSVERSE_PARTIALS_PER_STRING,
+};
 pub use events::{u16_to_unit_f32, u7_to_u16, EventKind, PedalKind, SampleEvent};
 pub use scale_design::{
     build_scale_design, equal_temperament_hz, key_choir, key_to_midi, midi_to_key,
@@ -253,6 +262,7 @@ pub(crate) mod math {
 #[cfg(test)]
 mod tests {
     use super::math::*;
+    use super::*;
 
     #[test]
     fn nostd_f64_math_matches_std_to_machine_precision() {
@@ -302,5 +312,57 @@ mod tests {
             }
         }
         assert_eq!(exp2_f64(0.0), 1.0);
+    }
+
+    #[test]
+    fn full_piano_spec_pipeline_satisfies_concert_grand_invariants() {
+        let mut total_strings = 0usize;
+        let mut damped = 0usize;
+        for (k, layout) in CHOIR_LAYOUTS.iter().enumerate() {
+            assert_eq!(layout.first_string_idx as usize, total_strings);
+            total_strings += layout.strings_per_key as usize;
+            if layout.has_damper {
+                damped += 1;
+            }
+            assert_eq!(key_choir(k), Some(*layout));
+        }
+        assert_eq!(total_strings, TOTAL_STRINGS);
+        assert_eq!(damped, DAMPED_KEYS);
+
+        let nominal = VoicingSpec::default();
+        let specs = build_scale_design(&nominal);
+        assert!((0.00030..=0.00042).contains(&specs[0].inharmonicity_b));
+        assert!((0.040..=0.050).contains(&specs[NUM_KEYS - 1].inharmonicity_b));
+        assert_eq!(key_tuned_f0_hz(48, &specs, &nominal), 440.0);
+
+        let counts = analyze_bank_mode_counts(&nominal);
+        assert!(
+            (25_000..=26_500).contains(&counts.total_padded),
+            "{counts:?}"
+        );
+
+        // D4 per-note overrides shift targeted key without perturbing neighbors.
+        let mut voiced = VoicingSpec::default();
+        voiced.note_offsets[48].pitch_cents = 12.0;
+        voiced.note_offsets[48].inharmonicity_scale = 0.5;
+        let voiced_specs = build_scale_design(&voiced);
+        assert!((voiced_specs[48].inharmonicity_b / specs[48].inharmonicity_b - 1.5).abs() < 1e-6);
+        assert!((voiced_specs[49].inharmonicity_b - specs[49].inharmonicity_b).abs() < 1e-12);
+        let a4_sharp = key_tuned_f0_hz(48, &voiced_specs, &voiced);
+        assert!((a4_sharp - 440.0 * 2.0_f64.powf(12.0 / 1200.0)).abs() < 1e-11);
+
+        // Every partial obeys the analytical dispersion law.
+        for &k in &[0usize, 39, 48, 87] {
+            let f0 = effective_string_f0_hz(k, 0, Polarization::Vertical, &specs, &nominal);
+            let n_p = count_transverse_partials(f0, specs[k].inharmonicity_b, MAX_AUDIBLE_FREQ_HZ);
+            assert!(n_p >= 1);
+            for j in 1..=n_p {
+                let f_j = partial_frequency_hz(f0, specs[k].inharmonicity_b, j);
+                let ref_j =
+                    (j as f64) * f0 * (1.0 + specs[k].inharmonicity_b * (j * j) as f64).sqrt();
+                assert!((f_j - ref_j).abs() < 1e-10);
+                assert!(f_j <= MAX_AUDIBLE_FREQ_HZ);
+            }
+        }
     }
 }
