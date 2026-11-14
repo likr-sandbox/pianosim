@@ -26,6 +26,7 @@ dependencies = [
 name = "piano-engine"
 version = "0.1.0"
 dependencies = [
+ "piano-simd",
  "piano-spec",
 ]
 
@@ -50,4 +51,5 @@ name = "piano-wasm"
 version = "0.1.0"
 dependencies = [
  "piano-engine",
+ "piano-spec",
 ]

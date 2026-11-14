@@ -9,3 +9,4 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 piano-engine = { path = "../piano-engine" }
+piano-spec = { path = "../piano-spec" }
