@@ -17,6 +17,10 @@ version = "0.1.0"
 [[package]]
 name = "piano-bridge"
 version = "0.1.0"
+dependencies = [
+ "piano-simd",
+ "piano-spec",
+]
 
 [[package]]
 name = "piano-cli"
