@@ -8,6 +8,9 @@
 
 extern crate alloc;
 
+pub mod bridge_coupled;
+pub(crate) mod bridge_port;
+pub(crate) mod bridge_tails;
 pub mod choir_map;
 pub mod contact;
 pub(crate) mod contact_ports;
@@ -20,10 +23,12 @@ pub(crate) mod sav_spec;
 pub(crate) mod sav_tile;
 pub mod zoh_kernel;
 
+pub use bridge_port::BridgePortDriver;
 pub use contact::KeyActionDriver;
 
 use piano_spec::{build_scale_design, VoicingSpec, TOTAL_STRINGS};
 
+use crate::bridge_port::BridgePorts;
 use crate::choir_map::ChoirMap;
 use crate::contact_ports::ContactPorts;
 use crate::longitudinal::LongitudinalBank;
@@ -43,6 +48,7 @@ pub struct StringBank {
     choir_map: ChoirMap,
     soa: ModalSoa,
     ports: ContactPorts,
+    bridge_ports: BridgePorts,
     long_bank: LongitudinalBank,
     sav: SavBank,
     longitudinal_enabled: bool,
@@ -61,6 +67,7 @@ impl StringBank {
         let choir_map = ChoirMap::build_with_specs(&specs, voicing);
         let soa = ModalSoa::build_with_lossless(sr64, voicing, &specs, &choir_map, lossless);
         let ports = ContactPorts::build(sr64, voicing, &specs, &choir_map);
+        let bridge_ports = BridgePorts::build(sr64, voicing, &specs, &choir_map, &ports);
         let long_bank = LongitudinalBank::build(sr64, &specs, &choir_map, &ports.gamma_s);
         let sav = SavBank::build(
             sr64,
@@ -76,6 +83,7 @@ impl StringBank {
             choir_map,
             soa,
             ports,
+            bridge_ports,
             long_bank,
             sav,
             longitudinal_enabled: true,
@@ -212,6 +220,7 @@ impl StringBank {
         if let Some(key_entry) = self.choir_map.key(key_idx) {
             for s_idx in key_entry.string_range.clone() {
                 self.ports.may_be_nonzero[s_idx] = true;
+                self.ports.struck_active[s_idx] = true;
                 self.ports.ports_synced[s_idx] = false;
             }
         }
@@ -240,6 +249,7 @@ impl StringBank {
                 let range = self.choir_map.strings()[str_idx].all_vecs();
                 inject_excitation(&mut u_vecs[range.clone()], &b_vecs[range], force * w);
                 self.ports.may_be_nonzero[str_idx] = true;
+                self.ports.struck_active[str_idx] = true;
                 self.ports.ports_synced[str_idx] = false;
             }
         }
@@ -365,6 +375,60 @@ impl StringBank {
         );
     }
 
+    /// Per-string WDF mechanical port resistances `R_0,s > 0` (`N*s/m`).
+    #[must_use]
+    pub fn bridge_port_resistances(&self) -> &[f32; TOTAL_STRINGS] {
+        &self.bridge_ports.r0
+    }
+
+    /// Wave-link stored energy (`0.0` for instantaneous memoryless WDF port scattering).
+    #[must_use]
+    pub fn bridge_link_energy_joules(&self, _r0: &[f32; TOTAL_STRINGS]) -> f64 {
+        0.0
+    }
+
+    /// Returns instantaneous linear modal energy `0.5 * beta_s * sum(u^2 + v^2)` for string `s_idx`.
+    #[must_use]
+    pub fn string_linear_energy_joules(&self, s_idx: usize) -> f64 {
+        let Some(entry) = self.choir_map.strings().get(s_idx) else {
+            return 0.0;
+        };
+        self.ports
+            .linear_energy_joules(s_idx, &self.soa, entry.all_vecs())
+    }
+
+    /// Steps all 88 keys / 230 strings unconditionally across `out_l`/`out_r` with
+    /// Stage 1 action coupling and Stage 3 per-sample WDF bridge scattering.
+    pub fn render_subblock_bridge_coupled(
+        &mut self,
+        action: &mut impl KeyActionDriver,
+        bridge: &mut impl BridgePortDriver,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+    ) {
+        let frames = out_l.len().min(out_r.len());
+        if out_l.len() > frames {
+            out_l[frames..].fill(0.0);
+        }
+        if out_r.len() > frames {
+            out_r[frames..].fill(0.0);
+        }
+        bridge_coupled::render_subblock_bridge_coupled_core(
+            &mut self.soa,
+            &mut self.ports,
+            &self.bridge_ports,
+            &self.long_bank,
+            &mut self.sav,
+            &self.choir_map,
+            action,
+            bridge,
+            self.longitudinal_enabled,
+            self.sav_phantom_enabled,
+            &mut out_l[..frames],
+            &mut out_r[..frames],
+        );
+    }
+
     /// Diagnostic helper returning `(vert_rms, horiz_rms)` of modal bridge velocity
     /// `v * c_bridge` across `key_idx`'s strings at the current instant.
     #[must_use]
@@ -396,54 +460,11 @@ impl StringBank {
             calc(|e| e.horiz_vecs.clone()),
         )
     }
-
-    #[cfg(test)]
-    pub(crate) fn render_key_subblock(
-        &mut self,
-        key_idx: usize,
-        out_l: &mut [f32],
-        out_r: &mut [f32],
-    ) {
-        let key_entry = self.choir_map.key(key_idx).expect("valid key");
-        let total = out_l.len().min(out_r.len());
-        let strings = self.choir_map.strings();
-        let mut base = 0usize;
-        while base < total {
-            let t_len = (total - base).min(TILE);
-            let (mut tile_l, mut tile_r) = ([0.0_f32; TILE], [0.0_f32; TILE]);
-            for s_idx in key_entry.string_range.clone() {
-                let entry = &strings[s_idx];
-                if self.ports.may_be_nonzero[s_idx] {
-                    step_ringing_string_tile(
-                        &mut self.soa,
-                        &mut self.sav,
-                        s_idx,
-                        entry,
-                        self.longitudinal_enabled,
-                        self.sav_phantom_enabled,
-                        &mut tile_l[..t_len],
-                        &mut tile_r[..t_len],
-                    );
-                    self.ports.ports_synced[s_idx] = false;
-                } else {
-                    let acc = step_string_tile(&mut self.soa, entry.all_vecs(), t_len);
-                    accum_tile_stereo(
-                        &acc,
-                        entry.pan_l,
-                        entry.pan_r,
-                        t_len,
-                        &mut tile_l,
-                        &mut tile_r,
-                    );
-                }
-            }
-            out_l[base..base + t_len].copy_from_slice(&tile_l[..t_len]);
-            out_r[base..base + t_len].copy_from_slice(&tile_r[..t_len]);
-            base += t_len;
-        }
-    }
 }
 
 #[cfg(test)]
 #[path = "bank_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod m5_tests;

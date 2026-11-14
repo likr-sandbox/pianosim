@@ -57,7 +57,7 @@ pub trait KeyActionDriver {
 }
 
 #[inline]
-fn step_transverse_pol<const HAS_DAMPER: bool>(
+pub(crate) fn step_transverse_pol<const HAS_DAMPER: bool>(
     soa: &mut ModalSoa,
     ports: &ContactPorts,
     vr: Range<usize>,
@@ -176,7 +176,7 @@ fn step_string_coupled<const HAS_DAMPER: bool>(
 }
 
 #[inline]
-fn eval_hammer_choir(
+pub(crate) fn eval_hammer_choir(
     driver: &mut impl KeyActionDriver,
     ports: &ContactPorts,
     key_idx: usize,
@@ -213,7 +213,7 @@ fn eval_hammer_choir(
 }
 
 #[inline]
-fn sample_damper(
+pub(crate) fn sample_damper(
     drv: &mut impl KeyActionDriver,
     p: &ContactPorts,
     k: usize,
@@ -273,7 +273,7 @@ fn step_active_key_tile(
 }
 
 #[inline]
-fn step_clearance_subblock(
+pub(crate) fn step_clearance_subblock(
     driver: &mut impl KeyActionDriver,
     k: usize,
     sub: usize,

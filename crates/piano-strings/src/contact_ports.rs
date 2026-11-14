@@ -39,6 +39,7 @@ pub(crate) struct ContactPorts {
     pub y_dh: [f32; TOTAL_STRINGS],
     pub v_dh: [f32; TOTAL_STRINGS],
     pub may_be_nonzero: [bool; TOTAL_STRINGS],
+    pub struck_active: [bool; TOTAL_STRINGS],
     pub ports_synced: [bool; TOTAL_STRINGS],
     pub y_clear_scratch: alloc::vec::Vec<[f32; 128]>,
 }
@@ -71,6 +72,7 @@ impl ContactPorts {
             y_dh: [0.0; TOTAL_STRINGS],
             v_dh: [0.0; TOTAL_STRINGS],
             may_be_nonzero: [false; TOTAL_STRINGS],
+            struck_active: [false; TOTAL_STRINGS],
             ports_synced: [true; TOTAL_STRINGS],
             y_clear_scratch: alloc::vec![[0.0_f32; 128]; NUM_KEYS],
         };
@@ -88,12 +90,14 @@ impl ContactPorts {
         self.y_dh.fill(0.0);
         self.v_dh.fill(0.0);
         self.may_be_nonzero.fill(false);
+        self.struck_active.fill(false);
         self.ports_synced.fill(true);
     }
 
     #[inline]
     pub fn clear_string_state(&mut self, s_idx: usize) {
         self.may_be_nonzero[s_idx] = false;
+        self.struck_active[s_idx] = false;
         self.y_h[s_idx] = 0.0;
         self.v_h[s_idx] = 0.0;
         self.y_dv[s_idx] = 0.0;
@@ -290,5 +294,36 @@ pub(crate) fn refresh_string_ports(
     ports.v_h[s_idx] = alpha * (vh_v + vh_h);
     (ports.y_dv[s_idx], ports.v_dv[s_idx]) = if d { (ydv, alpha * vdv) } else { (0.0, 0.0) };
     (ports.y_dh[s_idx], ports.v_dh[s_idx]) = if d { (ydh, alpha * vdh) } else { (0.0, 0.0) };
+    ports.ports_synced[s_idx] = true;
+}
+
+#[inline]
+fn accum_pol_damp_ports(soa: &ModalSoa, ports: &ContactPorts, vr: Range<usize>) -> (f32, f32) {
+    let (u, v) = (soa.u.as_f32x4_slice(), soa.v.as_f32x4_slice());
+    let (bd, ad) = (ports.b_damp.as_f32x4_slice(), ports.a_damp.as_f32x4_slice());
+    let (mut ayd, mut avd) = (F32x4::zero(), F32x4::zero());
+    for i in vr {
+        ayd = v[i].mul_add(ad[i], ayd);
+        avd = u[i].mul_add(bd[i], avd);
+    }
+    (ayd.reduce_sum(), avd.reduce_sum())
+}
+
+/// Recomputes cached damper port `(y_dv, v_dv, y_dh, v_dh)` over L1 `< 5,500 Hz` prefixes only.
+#[inline]
+pub(crate) fn refresh_prefix_damp_ports(
+    soa: &ModalSoa,
+    ports: &mut ContactPorts,
+    s_idx: usize,
+    v_br: Range<usize>,
+    h_br: Range<usize>,
+) {
+    let (ydv, vdv) = accum_pol_damp_ports(soa, ports, v_br);
+    let (ydh, vdh) = accum_pol_damp_ports(soa, ports, h_br);
+    let alpha = ports.alpha_vel[s_idx];
+    ports.y_dv[s_idx] = ydv;
+    ports.v_dv[s_idx] = alpha * vdv;
+    ports.y_dh[s_idx] = ydh;
+    ports.v_dh[s_idx] = alpha * vdh;
     ports.ports_synced[s_idx] = true;
 }
