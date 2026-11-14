@@ -156,6 +156,37 @@ impl PianoEngine {
         self.core.action.set_memory_enabled(enabled);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_nonlinear_coupling(
+        &mut self,
+        longitudinal_enabled: bool,
+        sav_phantom_enabled: bool,
+    ) {
+        self.core
+            .bank
+            .set_nonlinear_coupling(longitudinal_enabled, sav_phantom_enabled);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn total_sav_energy_joules(&self) -> f64 {
+        self.core.bank.total_sav_energy_joules()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn key_sav_energy_joules(&self, key_idx: usize) -> f64 {
+        self.core.bank.key_sav_energy_joules(key_idx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn key_nonlinear_energy_joules(&self, key_idx: usize) -> f64 {
+        self.core.bank.key_nonlinear_energy_joules(key_idx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_any_hammer_active(&self) -> bool {
+        (0..NUM_KEYS).any(|k| self.core.action.is_hammer_active(k))
+    }
+
     /// Processes sample-accurate `events` and renders stereo audio into `out_l`/`out_r`
     /// with zero heap allocations.
     pub fn render_block(&mut self, events: &[SampleEvent], out_l: &mut [f32], out_r: &mut [f32]) {

@@ -10,7 +10,7 @@ use crate::{EventQueue, PianoEngine};
 const SR: f32 = 48_000.0;
 const SR64: f64 = 48_000.0;
 
-fn render_chunks(
+pub(crate) fn render_chunks(
     engine: &mut PianoEngine,
     total_frames: usize,
     block_size: usize,
@@ -30,14 +30,14 @@ fn render_chunks(
     (out_l, out_r)
 }
 
-fn mono_mix(l: &[f32], r: &[f32]) -> Vec<f32> {
+pub(crate) fn mono_mix(l: &[f32], r: &[f32]) -> Vec<f32> {
     l.iter()
         .zip(r.iter())
         .map(|(&a, &b)| 0.5 * (a + b))
         .collect()
 }
 
-fn slice_rms(samples: &[f32]) -> f64 {
+pub(crate) fn slice_rms(samples: &[f32]) -> f64 {
     let sum_sq: f64 = samples.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
     (sum_sq / (samples.len().max(1) as f64)).sqrt()
 }
