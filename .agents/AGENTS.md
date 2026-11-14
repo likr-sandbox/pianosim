@@ -29,21 +29,22 @@
 - **知識更新（競合防止）**: 並列 `author` は `.agents/AGENTS.md` を直接編集せず、ボード報告の `Learnings:` 欄に記載する。`integrator` のみが `main` 上で本ファイルを最新化・剪定する。
 
 ## 4. 環境・ツールチェーン固有の知見（蓄積ログ）
-- **RustツールチェーンのPATH**: `rustc` (`1.97.1`), `cargo`, `wasm-pack` (`0.15.0`), `wasm-bindgen`, `rustup`（`wasm32-unknown-unknown` 導入済み）は `$HOME/.cargo/bin` にあり、非ログインシェルのデフォルト `PATH` には含まれない。コマンド実行時は必ず `export PATH="$HOME/.cargo/bin:$PATH"` を先頭に付けること。
-- **`rustfmt` 1.97.1 のハング回避**: 10段超の深いネストの右結合Horner多項式式は `rustfmt` がCPU 100%でハングするため、`const` 係数配列ループ（`eval_horner` 等）で評価すること。
-- **ポート `127.0.0.1:5173` / 未バインドLoopbackのブラックホール問題**: 本実行環境では `127.0.0.1:5173` や未バインドポート宛てのTCP SYNが応答せず約130秒ハングする。Viteサーバおよび `apps/web/playwright.config.ts` では `PIANOSIM_PORT`（例: `5188`, `--strictPort`）と `webServer.wait: { stdout: /Local:\\s+http/ }` を併用して起動前プローブを回避すること（E2E約4.5秒完走）。Headless Chromium起動には `--autoplay-policy=no-user-gesture-required` と `--no-sandbox` を付与する。
-- **`AudioWorkletGlobalScope` + Wasm 境界**: インポート0個の素の `wasm32-unknown-unknown` C-ABI `.wasm`（`WebAssembly.instantiate(bytes, {})`）と Vite の `transformWithEsbuild` による `?worklet` Blob URL 化を組み合わせ、`window` / `TextDecoder` / `/@vite/env` クラッシュを回避しつつ `dev`・`preview`・`/pianosim/` で同一動作させる。
-- **CI静的・バイナリ検査ゲート**: CI（`.github/workflows/ci.yml`）では `cargo fmt --check`、`piano-cli check-lines`、`cargo clippy --workspace -- -D warnings`、`cargo clippy --package piano-wasm --target wasm32-unknown-unknown -- -D warnings`、`cargo test --workspace`、`npm run build`、`piano-cli check-wasm-simd apps/web/public/piano_wasm.wasm`、`npm run test:e2e` をすべて必須実行する。
-- **GitHub CLIとPages公開**: 環境に `gh` コマンドは未インストール。リモートは `origin = git@github.com:likr-sandbox/pianosim.git`、GitHub Pages（`https://likr-sandbox.github.io/pianosim/`）は `Settings -> Pages -> Source: GitHub Actions` が有効化済み。Viteの `base` は `/pianosim/` とし、デプロイ確認は `curl` と公開URLへのHeadless Playwrightで行う。
+- **Rustツールチェーン & CI固定**: ローカル `rustc` (`1.97.1`), `cargo`, `wasm32-unknown-unknown` は `$HOME/.cargo/bin` にあり、実行時は必ず `export PATH="$HOME/.cargo/bin:$PATH"` を先頭に付ける。GitHub Actions（`.github/workflows/{ci,deploy}.yml`）は `@stable` のドリフトを防ぐため `dtolnay/rust-toolchain@master` + `toolchain: "1.97.1"` で固定する（`@1.97.1` タグは不可、ローカル `rust-toolchain.toml` は不使用）。
+- **`rustfmt` 1.97.1 と行数検査**: 10段超の深いネストの右結合Horner多項式式は `rustfmt` がCPU 100%でハングするため `const` 配列ループ（`eval_horner` 等）で評価する。また `cargo fmt` の自動折り返しで行数が増えるため、`piano-cli check-lines` は必ず `cargo fmt` 後に実行する。
+- **ポート `127.0.0.1:5173` 回避 & `share` Worktree Web準備**: 未バインドLoopback TCP SYNが約130秒ハングするため、`apps/web/playwright.config.ts` では `PIANOSIM_PORT`（例: `5188`, `--strictPort`）と `webServer.wait: { stdout: /Local:\\s+http/ }` を併用する（E2E約4.4s完走、Chromiumは `--autoplay-policy=no-user-gesture-required --no-sandbox`）。`workspace:share` worktree には `node_modules/` が無いため、Webビルド/E2E前に `npm ci --prefer-offline` を実行する。
+- **`AudioWorkletGlobalScope` + Wasm 境界**: インポート0個の素の `wasm32-unknown-unknown` C-ABI `.wasm`（`WebAssembly.instantiate(bytes, {})`）と Vite `transformWithEsbuild`（`?worklet` Blob URL）で、`window` / `TextDecoder` / `/@vite/env` クラッシュを回避し `dev`・`preview`・`/pianosim/` で同一動作させる。
+- **CI静的・バイナリ検査ゲート**: `.github/workflows/ci.yml` で `cargo fmt --check`、`piano-cli check-lines`、`cargo clippy --workspace -- -D warnings`、`cargo clippy --package piano-wasm --target wasm32-unknown-unknown -- -D warnings`、`cargo test --workspace`、`npm run build`、`piano-cli check-wasm-simd apps/web/public/piano_wasm.wasm`、`npm run test:e2e` を必須実行する。
+- **GitHub CLIとPages公開**: `gh` コマンドは未インストール。リモート `origin = git@github.com:likr-sandbox/pianosim.git`、GitHub Pages（`https://likr-sandbox.github.io/pianosim/`、`base: /pianosim/`）は GitHub Actions 公開が有効。確認は `curl`・GitHub API・公開URLへのHeadless Playwrightで行う。
 
 ## 5. 音響DSP・検証上の知見（蓄積ログ）
-- **旧v1実装の保全**: 旧TS製DWG実装（`c75cf57`）はGitタグ `v0.1.0-ts-dwg` にアーカイブ済み（定量比較時は `git worktree add /tmp/pianosim-v1 v0.1.0-ts-dwg` で参照可能）。
-- **ゼロアロケーションと `no_std` コア**: `[T]::sort_by` は一時バッファをヒープ確保する可能性があるため、固定長 `[SampleEvent; 512]` キューはインプレース挿入ソートを用いる。`piano-simd` は `#![cfg_attr(not(test), no_std)]` + `extern crate alloc` 構成とし、外部クレート依存なしで下流DSPクレートへSIMD/FFT/ADAA基盤を供給する。
-- **ステレオ出力バッファのエイリアス防止**: テストやWasm/TS境界でモノラルミックスダウンを取得する際、L/Rに同一配列を渡すと信号加算や破壊が起きる。Rustの借用規則に加え、TS側・テストヘルパ側でも必ず別個の `Float32Array` 領域を確保する。
-- **高音域（C7〜C8）の接触時間・減衰落とし穴**: 高音弦の1周期（C8 ≈ `0.24 ms`）に対しハンマー接触パルスが長すぎると基本波がスペクトルヌルに落ち（鍵長連動パルス `~0.20*T0` 等で回避）、1次LPF型の単純なループ減衰は高音弦の基本波を数十msで消滅させる。Stage 1の局所384 kHz接触計算とStage 2のZOHレゾネータでは、A0〜C4だけでなく **C6〜C8の攻撃RMS・スペクトル・T60減衰** を必ず自動検証対象に含める。
-- **Wasm SIMD128検証**: `check-wasm-simd` はWasm Code section（ID 10）の命令をデコードして実 `0xfd` オペコードを数え、`f32.const`/`v128.const` 即値バイトの誤検知を防ぐ。
-- **E2Eテストの誠実性**: Playwright E2Eで合成モック音源を使うとリグレッションを見逃す。必ず実Wasm `AudioWorklet` パイプラインの出力（`AudioContext` 終端の受動 `AnalyserNode` またはWorkletテレメトリ）を検証し、空のUIスキップガード（`test.skip`）を入れない。
+- **旧v1実装の保全**: 旧TS製DWG実装（`c75cf57`）はGitタグ `v0.1.0-ts-dwg` にアーカイブ済み（比較時は `git worktree add /tmp/pianosim-v1 v0.1.0-ts-dwg`）。
+- **ゼロアロケーションと `no_std` コア**: `[T]::sort_by` はヒープ確保の可能性があるため固定長 `[SampleEvent; 512]` キューはインプレース挿入ソートを使う。`piano-simd` / `piano-spec` / `piano-strings` は `#![cfg_attr(not(test), no_std)]`（`alloc` / 純Rust `f64` 初期化数学）とし、外部クレート依存ゼロを維持する。
+- **Exact Coupled-Form Incremental ZOH**: `f32` Direct-form `2*r*cos(theta)` は低音（A0 @ 96 kHz で ~15.8 cents誤差）で `2.0` 近傍のULP劣化により破綻する。`d = 1 - r*cos(Omega*Ts)`, `s = r*sin(Omega*Ts)` を `f64` で算出して `(u, v)` 回転（`du = d*u + s*v`, `dv = s*u - d*v`）で更新すると 44.1/48/96 kHz 全域で `<= 0.00257 cents` を達成できる。ダンパー補間も `damp = 1 - hold_01` を用いて `(d_hold, s_hold)` 起点でアフィン補間し、`hold=1` 時の24bit仮数部を保存する。
+- **8サンプルレジスタタイリング & D1実測ベースライン**: 全約25.5k〜26.2kモードを毎サンプル無条件駆動したまま `TILE=8` レジスタ常駐化により SoA メモリ帯域を8分の1に削減し、ブロック末尾でのみ `< 1e-20` 非正規化数フラッシュを行う（`piano-simd::F32x4` に `Neg` 実装なし）。M2実測: ネイティブ `128 @ 48 kHz` `p50=1002.5 us / p99=1385.9 us (52.0%)`、Chromium Wasm SIMD128 `128 @ 48 kHz` バッチ平均 `1078.0 us (40.4%) / p99=1168.8 us`（0アンダーラン、D1閾値 70% = `1866.7 us` に余裕）。
+- **音域・高域・分散キャリブレーション**: 音域依存打弦ロールオフ（`slope = 0.12 + 1.80*x`）により A4 基音が第2倍音を +5.9 dB 上回る。C8 第1部分音は剛性分散により `partial_frequency_hz(key_tuned_f0_hz, B, 1)`（~4358 Hz）へシフトするため、高音ピッチ検証は分散適用後の理論部分音と比較する。C6〜C8は鍵長連動パルス（`~0.20*T0`）と攻撃RMS・T60を自動検証する。
+- **ステレオ・Wasm SIMD・E2E検査の誠実性**: L/R 出力バッファは絶対にエイリアスさせない。`check-wasm-simd` は Code section（ID 10）の命令をデコードして実 `0xfd` オペコードを数える。Playwright E2E は合成モック・`test.skip` 禁止で実Wasm `AudioWorklet` + 受動 `AnalyserNode` を検証する。
 
 ## 6. 本ファイルの更新履歴（直近マイルストーン要約）
-- **M1 (2026-11-15)**: 旧v1実装を `v0.1.0-ts-dwg` (`c75cf57`) へ保全・撤去し、10クレート純Rustモノレポ + `piano-simd` + C-ABI `piano-wasm` + `piano-cli` + Vanilla TS `AudioWorklet` シェル + CI/Pagesワークフローを確立。`127.0.0.1` 未バインドSYN回避策、`?worklet` Blob URL、ゼロアロケーション挿入ソート、`rustfmt` Hornerループ回避、Wasm SIMD128/CI検査知見を統合。
-- **Pre-M1 (2026-11-14)**: 初版作成。v1実装・`/grill-me` 設計決定（`ARCHITECTURE.md`, `ROADMAP.md`, `DECISIONS_AND_FALLBACKS.md`, `SWARM_WORKFLOW.md`）および環境・DSP知見を登録。
+- **M2 (2026-11-15)**: 88鍵・230弦物理スケーリング／Railsback調律／D4 Voicing枠（`piano-spec`）、約25.5k〜26.2kモード連続SIMD ZOH弦バンク（`piano-strings`）、`PianoEngine` 88鍵統合、`piano-cli bench` を実装。Coupled-form ZOH高精度化、`TILE=8` タイリング、M2ネイティブ/Chromium Wasm D1実測、打弦ロールオフ、CI Rust `1.97.1` 固定知見を統合。
+- **M1 (2026-11-15)**: `v0.1.0-ts-dwg` (`c75cf57`) へ旧v1保全後に10クレート純Rustモノレポ＋`piano-simd`＋C-ABI `piano-wasm`＋`piano-cli`＋Vanilla TS `AudioWorklet`＋CI/Pagesを確立。
+- **Pre-M1 (2026-11-14)**: 初版作成（設計仕様 `ARCHITECTURE.md` / `ROADMAP.md` / `DECISIONS_AND_FALLBACKS.md` / `SWARM_WORKFLOW.md`）。
