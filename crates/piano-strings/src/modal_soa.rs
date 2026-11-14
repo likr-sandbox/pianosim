@@ -360,14 +360,15 @@ fn populate_string_modes(
 
     let long_base = entry.long_vecs.start * 4;
     for m in 1..=entry.long_modes {
-        let f_m = (m as f64) * spec.f_long_hz;
+        let f_init = crate::longitudinal::long_init_freq_hz(spec.f_long_hz, m);
         let t60_l = if lossless {
             f64::INFINITY
         } else {
-            (1.5 / (1.0 + 0.15 * ((m - 1) as f64))).max(0.15)
+            crate::longitudinal::t60_longitudinal(m)
         };
-        if let Some(poles) = coupled_pole_f32(f_m, sample_rate, t60_l) {
-            soa.write_slot(long_base + (m - 1), poles, 0.0, 0.0);
+        if let Some(poles) = coupled_pole_f32(f_init, sample_rate, t60_l) {
+            let c_l = crate::longitudinal::long_bridge_weight(k, f0_vert, spec.f_long_hz, m);
+            soa.write_slot(long_base + (m - 1), poles, c_l, 0.0);
         }
     }
 }

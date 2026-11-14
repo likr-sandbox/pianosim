@@ -11,7 +11,9 @@ extern crate alloc;
 pub mod choir_map;
 pub mod contact;
 pub(crate) mod contact_ports;
+pub(crate) mod longitudinal;
 pub mod modal_soa;
+pub(crate) mod phantom;
 pub mod zoh_kernel;
 
 pub use contact::KeyActionDriver;
