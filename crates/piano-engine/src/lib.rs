@@ -10,6 +10,9 @@ pub use piano_spec;
 pub use telemetry::EngineTelemetry;
 
 #[cfg(test)]
+mod m3_tests;
+
+#[cfg(test)]
 mod tests {
     use core::f64::consts::TAU;
 
