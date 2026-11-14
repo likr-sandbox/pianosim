@@ -1,0 +1,12 @@
+{
+  "name": "@pianosim/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json --noEmit && vite build --config vite.config.ts",
+    "preview": "vite preview --config vite.config.ts"
+  }
+}

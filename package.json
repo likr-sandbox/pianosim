@@ -3,22 +3,23 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Browser-based real-time piano physical simulation audio engine and responsive interactive keyboard Web application",
+  "description": "Pure-Rust modal physical-modeling piano synthesizer and Web AudioWorklet studio",
+  "workspaces": [
+    "apps/*"
+  ],
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
-    "test": "vitest run",
-    "test:e2e": "playwright test",
-    "verify:acoustic": "vitest run tests/acoustic",
-    "deploy": "gh-pages -d dist"
+    "build:wasm": "cargo build --package piano-wasm --target wasm32-unknown-unknown --release && mkdir -p apps/web/public && cp target/wasm32-unknown-unknown/release/piano_wasm.wasm apps/web/public/piano_wasm.wasm",
+    "dev": "vite --config apps/web/vite.config.ts",
+    "typecheck": "tsc -p apps/web/tsconfig.json --noEmit",
+    "build:web": "tsc -p apps/web/tsconfig.json --noEmit && vite build --config apps/web/vite.config.ts",
+    "build": "npm run build:wasm && npm run build:web",
+    "preview": "vite preview --config apps/web/vite.config.ts",
+    "test:e2e": "playwright test -c apps/web/playwright.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
     "@types/node": "^22.13.0",
-    "gh-pages": "^6.3.0",
     "typescript": "^5.7.3",
-    "vite": "^6.4.6",
-    "vitest": "^5.1.0"
+    "vite": "^6.4.6"
   }
 }
