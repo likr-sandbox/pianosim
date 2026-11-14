@@ -213,3 +213,50 @@ fn gate3_two_polarization_decay_and_trichord_beating() {
     }
     assert!(rebounds >= 3 && ratio_var > 0.30);
 }
+
+impl StringBank {
+    pub(crate) fn render_key_subblock(
+        &mut self,
+        key_idx: usize,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+    ) {
+        let key_entry = self.choir_map.key(key_idx).expect("valid key");
+        let total = out_l.len().min(out_r.len());
+        let strings = self.choir_map.strings();
+        let mut base = 0usize;
+        while base < total {
+            let t_len = (total - base).min(TILE);
+            let (mut tile_l, mut tile_r) = ([0.0_f32; TILE], [0.0_f32; TILE]);
+            for s_idx in key_entry.string_range.clone() {
+                let entry = &strings[s_idx];
+                if self.ports.may_be_nonzero[s_idx] {
+                    step_ringing_string_tile(
+                        &mut self.soa,
+                        &mut self.sav,
+                        s_idx,
+                        entry,
+                        self.longitudinal_enabled,
+                        self.sav_phantom_enabled,
+                        &mut tile_l[..t_len],
+                        &mut tile_r[..t_len],
+                    );
+                    self.ports.ports_synced[s_idx] = false;
+                } else {
+                    let acc = step_string_tile(&mut self.soa, entry.all_vecs(), t_len);
+                    accum_tile_stereo(
+                        &acc,
+                        entry.pan_l,
+                        entry.pan_r,
+                        t_len,
+                        &mut tile_l,
+                        &mut tile_r,
+                    );
+                }
+            }
+            out_l[base..base + t_len].copy_from_slice(&tile_l[..t_len]);
+            out_r[base..base + t_len].copy_from_slice(&tile_r[..t_len]);
+            base += t_len;
+        }
+    }
+}
