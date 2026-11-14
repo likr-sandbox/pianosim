@@ -23,6 +23,8 @@ pub(crate) struct ContactPorts {
     pub a_strike: AlignedBuf,
     pub b_damp: AlignedBuf,
     pub a_damp: AlignedBuf,
+    pub gamma_s: [f64; TOTAL_STRINGS],
+    pub beta_s: [f64; TOTAL_STRINGS],
     pub alpha_vel: [f32; TOTAL_STRINGS],
     pub r_port_strike: [f32; TOTAL_STRINGS],
     pub r_port_damp_v: [f32; TOTAL_STRINGS],
@@ -52,6 +54,8 @@ impl ContactPorts {
             a_strike: AlignedBuf::zeroed(len),
             b_damp: AlignedBuf::zeroed(len),
             a_damp: AlignedBuf::zeroed(len),
+            gamma_s: [1.0; TOTAL_STRINGS],
+            beta_s: [0.0; TOTAL_STRINGS],
             alpha_vel: [0.0; TOTAL_STRINGS],
             r_port_strike: [0.0; TOTAL_STRINGS],
             r_port_damp_v: [0.0; TOTAL_STRINGS],
@@ -92,6 +96,31 @@ impl ContactPorts {
         self.y_dh[s_idx] = 0.0;
         self.v_dh[s_idx] = 0.0;
         self.ports_synced[s_idx] = true;
+    }
+
+    /// Computes physical linear Hamiltonian `0.5 * beta_s * sum(u^2 + v^2)` in Joules over `vec_range`.
+    #[cfg(test)]
+    #[inline]
+    #[must_use]
+    pub fn linear_energy_joules(
+        &self,
+        s_idx: usize,
+        soa: &crate::modal_soa::ModalSoa,
+        vec_range: core::ops::Range<usize>,
+    ) -> f64 {
+        let u = &soa.u.as_f32x4_slice()[vec_range.clone()];
+        let v = &soa.v.as_f32x4_slice()[vec_range];
+        let mut sum_sq = 0.0_f64;
+        for (&uv, &vv) in u.iter().zip(v.iter()) {
+            let ua = uv.to_array();
+            let va = vv.to_array();
+            for lane in 0..4 {
+                let u64v = f64::from(ua[lane]);
+                let v64v = f64::from(va[lane]);
+                sum_sq += u64v * u64v + v64v * v64v;
+            }
+        }
+        0.5 * self.beta_s[s_idx] * sum_sq
     }
 }
 
@@ -170,6 +199,8 @@ fn populate_string_ports(
         1.0
     };
     let b_gain = gamma_k * (2.0 * ts / m_str);
+    ports.gamma_s[s_idx] = gamma_k;
+    ports.beta_s[s_idx] = m_str / (2.0 * gamma_k * gamma_k);
     ports.alpha_vel[s_idx] = (m_str / (2.0 * ts * gamma_k * gamma_k)) as f32;
 
     let (mut sum_bh_sq, mut sum_bd_v_sq, mut sum_bd_h_sq) = (0.0_f64, 0.0_f64, 0.0_f64);

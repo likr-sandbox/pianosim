@@ -230,11 +230,19 @@ fn port_duality_conservation_and_damper_profile_invariants() {
         for &k in &[0usize, 39] {
             bank.reset();
             let s_idx = map.keys()[k].string_range.start;
+            let expected_beta = f64::from(bank.ports.alpha_vel[s_idx]) / f64::from(sr);
+            let rel_beta =
+                (bank.ports.beta_s[s_idx] - expected_beta).abs() / bank.ports.beta_s[s_idx];
+            assert!(rel_beta < 1e-5, "sr={sr} k={k} rel_beta={rel_beta}");
             let mut drv = MockAction::new(sr);
             drv.hammer_active[k] = true;
             drv.last_impulse_once = Some((k, 10.0));
             let (mut ol, mut or) = ([0.0_f32; 1], [0.0_f32; 1]);
             bank.render_subblock_coupled(&mut drv, &mut ol, &mut or);
+            let h_lin =
+                bank.ports
+                    .linear_energy_joules(s_idx, &bank.soa, map.strings()[s_idx].all_vecs());
+            assert!(h_lin > 0.0 && h_lin.is_finite());
             let yh = bank.ports.y_h[s_idx];
             let vh = bank.ports.v_h[s_idx];
             assert!(yh > 0.0 && vh > 0.0);

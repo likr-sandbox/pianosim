@@ -186,6 +186,18 @@ impl ModalSoa {
         specs: &[StringPhysicalParams; NUM_KEYS],
         map: &ChoirMap,
     ) -> Self {
+        Self::build_with_lossless(sample_rate, voicing, specs, map, false)
+    }
+
+    /// Allocates and initializes SoA mode tables with optional lossless (`r_hold = 1.0`) poles.
+    #[must_use]
+    pub(crate) fn build_with_lossless(
+        sample_rate: f64,
+        voicing: &VoicingSpec,
+        specs: &[StringPhysicalParams; NUM_KEYS],
+        map: &ChoirMap,
+        lossless: bool,
+    ) -> Self {
         let len = map.total_padded_modes();
         let mut soa = Self {
             u: AlignedBuf::zeroed(len),
@@ -196,7 +208,7 @@ impl ModalSoa {
             b_exc: AlignedBuf::zeroed(len),
         };
         for entry in map.strings() {
-            populate_string_modes(&mut soa, entry, sample_rate, voicing, specs);
+            populate_string_modes(&mut soa, entry, sample_rate, voicing, specs, lossless);
         }
         soa
     }
@@ -227,6 +239,7 @@ struct PolParams {
     hold_mult: f64,
     c_bridge: f32,
     exc_scale: f64,
+    lossless: bool,
 }
 
 #[inline]
@@ -245,20 +258,31 @@ fn strike_mode_shape(key_idx: usize, partial_index: usize) -> f64 {
 }
 
 #[inline]
-fn coupled_pole_f32(freq_hz: f64, sample_rate: f64, t60_hold: f64) -> Option<(f32, f32)> {
+pub(crate) fn coupled_pole_f32(
+    freq_hz: f64,
+    sample_rate: f64,
+    t60_hold: f64,
+) -> Option<(f32, f32)> {
     if !freq_hz.is_finite() || freq_hz <= 0.0 || freq_hz >= NYQUIST_CUTOFF_RATIO * sample_rate {
         return None;
     }
     let theta = TAU * freq_hz / sample_rate;
-    let sin_t = sin_cos_f64(theta).0;
-    let sin_half = sin_cos_f64(0.5 * theta).0;
-    let two_sin_half_sq = 2.0 * sin_half * sin_half;
-
-    let one_minus_rh = one_minus_exp_neg_f64(LN_1000 / (t60_hold * sample_rate));
-    let r_hold = 1.0 - one_minus_rh;
-    let d_hold = (one_minus_rh + r_hold * two_sin_half_sq) as f32;
-    let s_hold = (r_hold * sin_t) as f32;
-    Some((d_hold, s_hold))
+    let (sin_t, cos_t) = sin_cos_f64(theta);
+    let (one_minus_rh, r_hold) = if t60_hold.is_infinite() && t60_hold.is_sign_positive() {
+        (0.0, 1.0)
+    } else {
+        let one_minus = one_minus_exp_neg_f64(LN_1000 / (t60_hold * sample_rate));
+        (one_minus, 1.0 - one_minus)
+    };
+    let s_f32 = (r_hold * sin_t) as f32;
+    let s_ratio = (f64::from(s_f32) / r_hold).clamp(-1.0, 1.0);
+    let cos_mag = sqrt_f64((1.0 - s_ratio * s_ratio).max(0.0));
+    let d_f32 = if cos_t >= 0.0 {
+        (one_minus_rh + r_hold * (s_ratio * s_ratio) / (1.0 + cos_mag)) as f32
+    } else {
+        (1.0 + r_hold * cos_mag) as f32
+    };
+    Some((d_f32, s_f32))
 }
 
 fn populate_string_modes(
@@ -267,6 +291,7 @@ fn populate_string_modes(
     sample_rate: f64,
     voicing: &VoicingSpec,
     specs: &[StringPhysicalParams; NUM_KEYS],
+    lossless: bool,
 ) {
     let k = entry.key_idx as usize;
     let s_choir = entry.string_in_choir as usize;
@@ -313,6 +338,7 @@ fn populate_string_modes(
             hold_mult: 1.0,
             c_bridge: C_VERT,
             exc_scale: norm,
+            lossless,
         },
     );
     populate_transverse_pol(
@@ -328,13 +354,18 @@ fn populate_string_modes(
             hold_mult: 2.8,
             c_bridge: C_HORIZ,
             exc_scale: 0.85 * norm,
+            lossless,
         },
     );
 
     let long_base = entry.long_vecs.start * 4;
     for m in 1..=entry.long_modes {
         let f_m = (m as f64) * spec.f_long_hz;
-        let t60_l = (1.5 / (1.0 + 0.15 * ((m - 1) as f64))).max(0.15);
+        let t60_l = if lossless {
+            f64::INFINITY
+        } else {
+            (1.5 / (1.0 + 0.15 * ((m - 1) as f64))).max(0.15)
+        };
         if let Some(poles) = coupled_pole_f32(f_m, sample_rate, t60_l) {
             soa.write_slot(long_base + (m - 1), poles, 0.0, 0.0);
         }
@@ -344,13 +375,18 @@ fn populate_string_modes(
 fn populate_transverse_pol(soa: &mut ModalSoa, p: &PolParams) {
     for j in 1..=p.mode_count {
         let f_j = partial_frequency_hz(p.f0_hz, p.b_inharm, j);
-        let f_norm = f_j / 20_000.0;
-        let loss_scale = 1.0 + 0.05 * ((j - 1) as f64) + 1.5 * f_norm * f_norm;
-        let t60_h = (p.t60_v_base / loss_scale).max(0.25) * p.hold_mult;
+        let t60_h = if p.lossless {
+            f64::INFINITY
+        } else {
+            let f_norm = f_j / 20_000.0;
+            let loss_scale = 1.0 + 0.05 * ((j - 1) as f64) + 1.5 * f_norm * f_norm;
+            (p.t60_v_base / loss_scale).max(0.25) * p.hold_mult
+        };
 
         if let Some(poles) = coupled_pole_f32(f_j, p.sample_rate, t60_h) {
             let b = (strike_mode_shape(p.key_idx, j) * p.exc_scale) as f32;
-            soa.write_slot(p.base_slot + (j - 1), poles, p.c_bridge, b);
+            let c_signed = if j % 2 == 1 { p.c_bridge } else { -p.c_bridge };
+            soa.write_slot(p.base_slot + (j - 1), poles, c_signed, b);
         }
     }
 }
@@ -396,5 +432,15 @@ mod tests {
         assert!(soa.d_coeff[a0.vert_vecs.start * 4] > 0.0);
         assert!(soa.d_coeff[a0.vert_vecs.start * 4] < 1.0e-3);
         assert!(soa.s_coeff[a0.vert_vecs.start * 4] > 0.0);
+
+        for &sr in &[44_100.0_f64, 48_000.0, 96_000.0] {
+            for &freq in &[27.5_f64, 65.406, 130.813, 200.0, 261.626, 440.0] {
+                let (d, s) =
+                    coupled_pole_f32(freq, sr, f64::INFINITY).expect("valid lossless pole");
+                let err = ((1.0 - f64::from(d)).powi(2) + f64::from(s).powi(2) - 1.0).abs();
+                let limit = if freq <= 262.0 { 1.0e-10 } else { 5.0e-10 };
+                assert!(err <= limit, "sr={sr} freq={freq} err={err:e}");
+            }
+        }
     }
 }
