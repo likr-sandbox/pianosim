@@ -284,7 +284,8 @@ fn strike_mode_shape(key_idx: usize, partial_index: usize) -> f64 {
     let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
     let beta = 0.137 - 0.042 * x;
     let strike_sin = sin_cos_f64((partial_index as f64) * PI * beta).0.abs();
-    (0.25 + 0.75 * strike_sin) / (1.0 + 0.12 * ((partial_index - 1) as f64))
+    let slope = 0.12 + 1.80 * x;
+    (0.35 + 0.65 * strike_sin) / (1.0 + slope * ((partial_index - 1) as f64))
 }
 
 #[inline]
