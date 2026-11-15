@@ -260,6 +260,26 @@ impl PedalBank {
             _ => [1.0 - 0.22 * u, 0.0, 0.0],
         }
     }
+
+    /// Returns `(k_scale, eps_add)` modeling Una Corda virgin shoulder felt compliance
+    /// softening and increased hysteresis for `key_idx`.
+    #[must_use]
+    #[inline]
+    pub fn una_corda_felt_mod(&self, key_idx: usize) -> (f32, f32) {
+        if self.una_corda <= 0.0 {
+            return (1.0, 0.0);
+        }
+        let Some(layout) = CHOIR_LAYOUTS.get(key_idx) else {
+            return (1.0, 0.0);
+        };
+        let u = self.una_corda.clamp(0.0, 1.0);
+        let k_min = match layout.strings_per_key {
+            3 => 0.28_f32,
+            2 => 0.25_f32,
+            _ => 0.52_f32,
+        };
+        (1.0 - (1.0 - k_min) * u, 0.12 * u)
+    }
 }
 
 /// Smooth strictly monotonic sustain-pedal lift curve mapping `s in [0.0, 1.0]`
@@ -425,5 +445,37 @@ mod tests {
         );
         assert!(clears[..4].iter().all(|&c| c == CLEARANCE_OPEN_M));
         let _ = p_tile.step_key_clearance_tile(24, 0, &mut clears);
+    }
+
+    #[test]
+    fn una_corda_felt_mod_softens_stiffness_and_raises_hysteresis() {
+        let mut p = PedalBank::new(48_000.0);
+        for k in [0_usize, 12, 48, 99] {
+            assert_eq!(p.una_corda_felt_mod(k), (1.0, 0.0));
+        }
+
+        let mut prev_k = [1.0_f32; 3];
+        let mut prev_eps = [0.0_f32; 3];
+        for &val in &[16_384_u16, 32_768, 49_152, u16::MAX] {
+            p.set_pedal(PedalKind::UnaCorda, val);
+            for (idx, &k) in [0_usize, 12, 48].iter().enumerate() {
+                let (k_scale, eps_add) = p.una_corda_felt_mod(k);
+                assert!(
+                    k_scale < prev_k[idx],
+                    "k={k} val={val}: {k_scale} >= {}",
+                    prev_k[idx]
+                );
+                assert!(
+                    eps_add > prev_eps[idx],
+                    "k={k} val={val}: {eps_add} <= {}",
+                    prev_eps[idx]
+                );
+                prev_k[idx] = k_scale;
+                prev_eps[idx] = eps_add;
+            }
+        }
+        assert!((prev_k[0] - 0.52).abs() < 1e-6 && (prev_eps[0] - 0.12).abs() < 1e-6);
+        assert!((prev_k[1] - 0.25).abs() < 1e-6 && (prev_eps[1] - 0.12).abs() < 1e-6);
+        assert!((prev_k[2] - 0.28).abs() < 1e-6 && (prev_eps[2] - 0.12).abs() < 1e-6);
     }
 }

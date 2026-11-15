@@ -238,6 +238,7 @@ impl ActionBank {
         v_str_mps: f32,
         r_port_strike: f32,
     ) -> f32 {
+        let uc_mod = self.pedals.una_corda_felt_mod(key_idx);
         let Some(slot) = self.keys.get_mut(key_idx) else {
             return 0.0;
         };
@@ -250,6 +251,7 @@ impl ActionBank {
             &slot.borin_lut,
             &self.decimation_fir,
             self.memory_enabled,
+            uc_mod,
             y_str_m,
             v_str_mps,
             r_port_strike,
@@ -296,9 +298,12 @@ impl ActionBank {
 
 #[cfg(test)]
 mod escapement_tests {
+    use alloc::vec;
+
     use piano_spec::{u7_to_u16, PedalKind, VoicingSpec};
 
     use super::ActionBank;
+    use crate::tests_common::{spectral_centroid_and_band, TestModalString};
 
     #[test]
     fn silent_key_lifts_damper_without_string_contact_and_3_pedals_hold() {
@@ -355,5 +360,54 @@ mod escapement_tests {
             bank.step_key_clearance_tile(e4, 8, &mut tile);
         }
         assert!(bank.damper_clearance_m(e4) >= 4.5e-3);
+    }
+
+    #[test]
+    fn una_corda_felt_softening_extends_contact_and_lowers_centroid() {
+        let voicing = VoicingSpec::default();
+        let measure_pulse =
+            |key_idx: usize, vel_u16: u16, una_corda: bool| -> (f32, f32, Vec<f32>) {
+                let mut bank = ActionBank::new(48_000.0, &voicing);
+                if una_corda {
+                    bank.set_pedal(PedalKind::UnaCorda, u16::MAX);
+                    assert!(bank.pedals.una_corda_felt_mod(key_idx).0 < 0.30);
+                } else {
+                    assert_eq!(bank.pedals.una_corda_felt_mod(key_idx), (1.0, 0.0));
+                }
+                let mut s = TestModalString::new(key_idx, 48_000.0, &voicing);
+                let port_scale = if una_corda { 1.5_f32 } else { 1.0 };
+                bank.note_on(key_idx, vel_u16);
+                let mut pulse = vec![0.0_f32; 512];
+                for out in &mut pulse {
+                    let (y, v) = s.strike_port();
+                    let f = bank.step_hammer_sample(key_idx, y, v, s.r_port_strike * port_scale);
+                    *out = f;
+                    s.step_forces(f * port_scale, 0.0);
+                }
+                let peak = pulse.iter().copied().fold(0.0_f32, f32::max);
+                let dur_ms =
+                    (pulse.iter().filter(|&&f| f > 0.05 * peak).count() as f32) * 1000.0 / 48_000.0;
+                let (centroid, _) = spectral_centroid_and_band(&pulse, 48_000.0, 100.0, 20_000.0);
+                (dur_ms, centroid, pulse)
+            };
+
+        for &key_idx in &[39_usize, 48] {
+            for &vel_u16 in &[48_000_u16, 60_000] {
+                let (dur_off_a, cent_off_a, pulse_a) = measure_pulse(key_idx, vel_u16, false);
+                let (dur_off_b, _, pulse_b) = measure_pulse(key_idx, vel_u16, false);
+                assert_eq!(pulse_a, pulse_b);
+
+                let (dur_uc, cent_uc, _) = measure_pulse(key_idx, vel_u16, true);
+                assert!(
+                    dur_uc > dur_off_a,
+                    "k={key_idx} v={vel_u16}: dur_uc={dur_uc} <= dur_off={dur_off_a}"
+                );
+                assert!(
+                    cent_uc < cent_off_a,
+                    "k={key_idx} v={vel_u16}: cent_uc={cent_uc} >= cent_off={cent_off_a}"
+                );
+                let _ = dur_off_b;
+            }
+        }
     }
 }
