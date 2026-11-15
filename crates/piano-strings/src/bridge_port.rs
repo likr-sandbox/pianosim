@@ -1,5 +1,5 @@
 //! Stage 2 <-> Stage 3 Wave Digital Filter (WDF) displacement-bridge port
-//! precomputation and compact `< 4,500 Hz` prefix table packing (`no_std`).
+//! precomputation, L1d-packed `< 3,800 Hz` prefix tables, and contiguous tail SoA (`no_std`).
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -16,8 +16,10 @@ use crate::contact_ports::ContactPorts;
 use crate::modal_soa::{sqrt_f64, ModalSoa, C_HORIZ, C_VERT, NYQUIST_CUTOFF_RATIO};
 use crate::phantom::MAX_PHANTOM_TRANSVERSE_VECS;
 
-/// Upper frequency cutoff (Hz) for sample-by-sample WDF bridge prefix modes.
-pub const BRIDGE_PREFIX_CUTOFF_HZ: f64 = 4_500.0;
+/// Alternating spatial mode sign `[+C_VERT, -C_VERT, +C_VERT, -C_VERT]` for vertical prefix vectors.
+pub(crate) const C_SIGN_V_ARR: [f32; 4] = [C_VERT, -C_VERT, C_VERT, -C_VERT];
+/// Alternating spatial mode sign `[+C_HORIZ, -C_HORIZ, +C_HORIZ, -C_HORIZ]` for horizontal prefix vectors.
+pub(crate) const C_SIGN_H_ARR: [f32; 4] = [C_HORIZ, -C_HORIZ, C_HORIZ, -C_HORIZ];
 
 /// Stage 3 bidirectional reduced bridge and duplex scale driver (`0` runtime allocs).
 pub trait BridgePortDriver {
@@ -37,11 +39,26 @@ pub trait BridgePortDriver {
     ) -> (f32, f32);
 }
 
-/// Compact per-string prefix metadata for contiguous L1 uncoupled WDF stepping.
+/// 32-byte L1d-packed coupled-form modal state `(u, v)` for one 4-mode prefix vector.
+#[repr(C, align(32))]
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct PrefixState {
+    pub u: F32x4,
+    pub v: F32x4,
+}
+
+/// 48-byte L1d-packed read-only ZOH poles + WDF port vector `(d, s, beta)` (`c` is analytic!).
+#[repr(C, align(16))]
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct PrefixCoef {
+    pub d: F32x4,
+    pub s: F32x4,
+    pub beta: F32x4,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct FastPrefixMeta {
-    pub n_vh: u32,
     pub a_wave_gain: f32,
     pub pan_l: f32,
     pub pan_r: f32,
@@ -49,10 +66,52 @@ pub(crate) struct FastPrefixMeta {
 
 impl FastPrefixMeta {
     pub const ZERO: Self = Self {
-        n_vh: 0,
         a_wave_gain: 0.0,
         pan_l: 0.0,
         pan_r: 0.0,
+    };
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct PrefixRun {
+    pub start_s: u8,
+    pub count: u8,
+    pub n_pol: u8,
+    pub p_off: u16,
+}
+
+impl PrefixRun {
+    pub const ZERO: Self = Self {
+        start_s: 0,
+        count: 0,
+        n_pol: 0,
+        p_off: 0,
+    };
+}
+
+pub(crate) const MAX_PREFIX_RUNS: usize = 16;
+
+/// Per-key contiguous ranges in `BridgePorts::tl_soa` across all unison strings of key `k`.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct KeyTailRanges {
+    pub th_start: u16,
+    pub th_end: u16,
+    pub l_end: u16,
+    pub pan_l: f32,
+    pub pan_r: f32,
+    pub tail_n_trans: f32,
+    pub tail_n_long: f32,
+}
+
+impl KeyTailRanges {
+    pub const ZERO: Self = Self {
+        th_start: 0,
+        th_end: 0,
+        l_end: 0,
+        pan_l: 0.0,
+        pan_r: 0.0,
+        tail_n_trans: 0.0,
+        tail_n_long: 0.0,
     };
 }
 
@@ -63,6 +122,9 @@ pub(crate) struct StringBridgeMeta {
     pub h_br: Range<usize>,
     pub v_tail: Range<usize>,
     pub h_tail: Range<usize>,
+    pub tl_v: Range<usize>,
+    pub tl_h: Range<usize>,
+    pub tl_l: Range<usize>,
     pub beta_v_off: usize,
     pub beta_h_off: usize,
     pub n_vh: usize,
@@ -76,6 +138,9 @@ impl StringBridgeMeta {
             h_br: 0..0,
             v_tail: 0..0,
             h_tail: 0..0,
+            tl_v: 0..0,
+            tl_h: 0..0,
+            tl_l: 0..0,
             beta_v_off: 0,
             beta_h_off: 0,
             n_vh: 0,
@@ -84,20 +149,17 @@ impl StringBridgeMeta {
     }
 }
 
-/// Precomputed compact WDF bridge port couplings and L1-packed ZOH state/tables.
+/// Precomputed L1d-resident WDF prefix state/coefficients and key-contiguous tail `ModalSoa`.
 #[derive(Clone, Debug)]
 pub(crate) struct BridgePorts {
-    pub total_prefix_vecs: usize,
-    pub beta_br: AlignedBuf,
-    pub d_br: AlignedBuf,
-    pub s_br: AlignedBuf,
-    pub c_br: AlignedBuf,
-    pub u_br: AlignedBuf,
-    pub v_br: AlignedBuf,
-    pub c_tail_l: AlignedBuf,
-    pub c_tail_r: AlignedBuf,
-    pub tail_idx_scratch: Box<[u16]>,
+    pub state: Box<[PrefixState]>,
+    pub coef: Box<[PrefixCoef]>,
+    pub tl_soa: ModalSoa,
     pub fast_meta: [FastPrefixMeta; TOTAL_STRINGS],
+    pub a_wave_gains: [f32; TOTAL_STRINGS],
+    pub prefix_runs: [PrefixRun; MAX_PREFIX_RUNS],
+    pub n_prefix_runs: usize,
+    pub key_tails: [KeyTailRanges; NUM_KEYS],
     pub r0: [f32; TOTAL_STRINGS],
     pub r_damp_prefix_v: [f32; TOTAL_STRINGS],
     pub r_damp_prefix_h: [f32; TOTAL_STRINGS],
@@ -107,17 +169,24 @@ pub(crate) struct BridgePorts {
 }
 
 fn count_prefix_modes(
+    key_idx: usize,
     modes: usize,
     f0: f64,
     inharmonicity_b: f64,
-    cutoff_hz: f64,
     nyquist_hz: f64,
 ) -> usize {
+    let (cutoff_hz, max_j) = if key_idx < 16 {
+        (1_250.0_f64, 12usize)
+    } else if key_idx < 28 {
+        (2_500.0_f64, 12usize)
+    } else {
+        (3_800.0_f64, 12usize)
+    };
     let lim = cutoff_hz.min(nyquist_hz);
     let mut n = 0usize;
-    for j in 1..=modes {
+    for j in 1..=modes.min(max_j) {
         let f_j = partial_frequency_hz(f0, inharmonicity_b, j);
-        if f_j > 0.0 && f_j < lim && (f_j < 1_800.0 || j <= 24) {
+        if f_j > 0.0 && f_j < lim {
             n = j;
         } else {
             break;
@@ -145,7 +214,7 @@ fn fill_pol_beta(
 }
 
 impl BridgePorts {
-    /// Precomputes masked per-prefix-vec `beta_br` and packed prefix ZOH arrays `(d_br, s_br, c_br)`.
+    /// Precomputes L1d-packed `state`/`coef` and key-grouped contiguous `tl_soa`.
     #[must_use]
     pub fn build(
         sample_rate: f64,
@@ -165,6 +234,7 @@ impl BridgePorts {
         let mut tail_n_long = [0.0_f32; TOTAL_STRINGS];
         let mut counts = [(0usize, 0usize, 0usize, 0usize); TOTAL_STRINGS];
         let mut total_prefix_vecs = 0usize;
+        let mut total_tail_vecs = 0usize;
 
         for (s_idx, entry) in map.strings().iter().enumerate() {
             let k = usize::from(entry.key_idx);
@@ -172,259 +242,244 @@ impl BridgePorts {
             let spec = specs[k];
             let f0_v = effective_string_f0_hz(k, s_choir, Polarization::Vertical, specs, voicing);
             let f0_h = effective_string_f0_hz(k, s_choir, Polarization::Horizontal, specs, voicing);
-            let nv_cut = count_prefix_modes(
-                entry.vert_modes,
-                f0_v,
-                spec.inharmonicity_b,
-                BRIDGE_PREFIX_CUTOFF_HZ,
-                nyquist,
-            );
-            let nh_cut = count_prefix_modes(
-                entry.horiz_modes,
-                f0_h,
-                spec.inharmonicity_b,
-                BRIDGE_PREFIX_CUTOFF_HZ,
-                nyquist,
-            );
+            let nv_cut =
+                count_prefix_modes(k, entry.vert_modes, f0_v, spec.inharmonicity_b, nyquist);
+            let nh_cut =
+                count_prefix_modes(k, entry.horiz_modes, f0_h, spec.inharmonicity_b, nyquist);
             let sav_min = if k < LONGITUDINAL_MAX_KEY_IDX {
                 MAX_PHANTOM_TRANSVERSE_VECS
             } else {
                 0
             };
-            let nv_vecs = nv_cut.div_ceil(4).max(sav_min).min(entry.vert_vecs.len());
-            let nh_vecs = nh_cut.div_ceil(4).max(sav_min).min(entry.horiz_vecs.len());
+            let n_pol = nv_cut
+                .max(nh_cut)
+                .div_ceil(4)
+                .max(sav_min)
+                .min(entry.vert_vecs.len())
+                .min(entry.horiz_vecs.len());
+            let (nv_vecs, nh_vecs) = (n_pol, n_pol);
             counts[s_idx] = (nv_cut, nv_vecs, nh_cut, nh_vecs);
             total_prefix_vecs += nv_vecs + nh_vecs;
+            total_tail_vecs += (entry.vert_vecs.len() - nv_vecs)
+                + (entry.horiz_vecs.len() - nh_vecs)
+                + entry.long_vecs.len();
         }
 
-        assert!(map.total_vecs() <= usize::from(u16::MAX));
-        let mut beta_vals: Vec<f32> = Vec::with_capacity(total_prefix_vecs * 4);
-        beta_vals.resize(total_prefix_vecs * 4, 0.0);
-        let mut d_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
-        let mut s_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
-        let mut c_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
-        let u_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
-        let v_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
-        let mut c_tail_l = AlignedBuf::zeroed(map.total_vecs().max(1) * 4);
-        let mut c_tail_r = AlignedBuf::zeroed(map.total_vecs().max(1) * 4);
-        let tail_idx_scratch = alloc::vec![0_u16; map.total_vecs()].into_boxed_slice();
+        assert!(total_tail_vecs <= usize::from(u16::MAX));
+        let cap_p = total_prefix_vecs.max(1);
+        let z = F32x4::zero();
+        let state = alloc::vec![PrefixState { u: z, v: z }; cap_p].into_boxed_slice();
+        let mut coef = alloc::vec![
+            PrefixCoef {
+                d: F32x4::splat(1.0),
+                s: z,
+                beta: z,
+            };
+            cap_p
+        ]
+        .into_boxed_slice();
+
+        let tl_slots = total_tail_vecs.max(1) * 4;
+        let mut tl_soa = ModalSoa {
+            u: AlignedBuf::zeroed(tl_slots),
+            v: AlignedBuf::zeroed(tl_slots),
+            d_coeff: AlignedBuf::filled(tl_slots, 1.0),
+            s_coeff: AlignedBuf::zeroed(tl_slots),
+            c_bridge: AlignedBuf::zeroed(tl_slots),
+            b_exc: AlignedBuf::zeroed(4),
+        };
+
         let mut fast_meta = [FastPrefixMeta::ZERO; TOTAL_STRINGS];
+        let mut a_wave_gains = [0.0_f32; TOTAL_STRINGS];
+        let mut key_tails = [KeyTailRanges::ZERO; NUM_KEYS];
         let d_src = soa.d_coeff.as_f32x4_slice();
         let s_src = soa.s_coeff.as_f32x4_slice();
         let c_src = soa.c_bridge.as_f32x4_slice();
-        let mut vec_cursor = 0usize;
 
-        for (s_idx, entry) in map.strings().iter().enumerate() {
-            let k = usize::from(entry.key_idx);
-            let s_choir = usize::from(entry.string_in_choir);
+        let mut p_cur = 0usize;
+        let mut tl_cur = 0usize;
+
+        for (k, key) in map.keys().iter().enumerate() {
             let spec = specs[k];
-            let (nv_cut, nv_vecs, nh_cut, nh_vecs) = counts[s_idx];
-
-            let f0_v = effective_string_f0_hz(k, s_choir, Polarization::Vertical, specs, voicing);
-            let f0_h = effective_string_f0_hz(k, s_choir, Polarization::Horizontal, specs, voicing);
             let l_m = spec.speaking_length_m;
-            let gamma = ports.gamma_s[s_idx];
-            let gain_v = gamma * (2.0 * (2.0 * l_m * f0_v) * ts / l_m) * f64::from(C_VERT);
-            let gain_h = gamma * (2.0 * (2.0 * l_m * f0_h) * ts / l_m) * f64::from(C_HORIZ);
+            let th_start = tl_cur;
 
-            let beta_v_off = vec_cursor;
-            let v_slot_off = beta_v_off * 4;
-            let sum_sq_v = fill_pol_beta(
-                &mut beta_vals[v_slot_off..v_slot_off + nv_vecs * 4],
-                nv_cut,
-                gain_v,
-                spec.inharmonicity_b,
-            );
-            vec_cursor += nv_vecs;
+            for s_idx in key.string_range.clone() {
+                let entry = &map.strings()[s_idx];
+                let s_choir = usize::from(entry.string_in_choir);
+                let (nv_cut, nv_vecs, nh_cut, nh_vecs) = counts[s_idx];
+                let f0_v =
+                    effective_string_f0_hz(k, s_choir, Polarization::Vertical, specs, voicing);
+                let f0_h =
+                    effective_string_f0_hz(k, s_choir, Polarization::Horizontal, specs, voicing);
+                let gamma = ports.gamma_s[s_idx];
+                let gain_v = gamma * (2.0 * (2.0 * l_m * f0_v) * ts / l_m) * f64::from(C_VERT);
+                let gain_h = gamma * (2.0 * (2.0 * l_m * f0_h) * ts / l_m) * f64::from(C_HORIZ);
 
-            let beta_h_off = vec_cursor;
-            let h_slot_off = beta_h_off * 4;
-            let sum_sq_h = fill_pol_beta(
-                &mut beta_vals[h_slot_off..h_slot_off + nh_vecs * 4],
-                nh_cut,
-                gain_h,
-                spec.inharmonicity_b,
-            );
-            vec_cursor += nh_vecs;
+                let beta_v_off = p_cur;
+                let mut bv_tmp = Vec::new();
+                bv_tmp.resize(nv_vecs * 4, 0.0_f32);
+                let sum_sq_v = fill_pol_beta(&mut bv_tmp, nv_cut, gain_v, spec.inharmonicity_b);
+                for vi in 0..nv_vecs {
+                    let src_i = entry.vert_vecs.start + vi;
+                    coef[p_cur + vi] = PrefixCoef {
+                        d: d_src[src_i],
+                        s: s_src[src_i],
+                        beta: F32x4::from_slice(&bv_tmp[vi * 4..vi * 4 + 4]),
+                    };
+                }
+                p_cur += nv_vecs;
 
-            let sum_sq = sum_sq_v + sum_sq_h;
-            let alpha64 = f64::from(ports.alpha_vel[s_idx]);
-            let r0_val = (0.5 * alpha64 * sum_sq) as f32;
-            if r0_val > 0.0 && r0_val.is_finite() {
-                r0[s_idx] = r0_val;
-                meta[s_idx].a_wave_gain = (alpha64 / f64::from(r0_val)) as f32;
-            } else {
-                r0[s_idx] = 1.0e-9;
-                meta[s_idx].a_wave_gain = 0.0;
-            }
+                let beta_h_off = p_cur;
+                let mut bh_tmp = Vec::new();
+                bh_tmp.resize(nh_vecs * 4, 0.0_f32);
+                let sum_sq_h = fill_pol_beta(&mut bh_tmp, nh_cut, gain_h, spec.inharmonicity_b);
+                for vi in 0..nh_vecs {
+                    let src_i = entry.horiz_vecs.start + vi;
+                    coef[p_cur + vi] = PrefixCoef {
+                        d: d_src[src_i],
+                        s: s_src[src_i],
+                        beta: F32x4::from_slice(&bh_tmp[vi * 4..vi * 4 + 4]),
+                    };
+                }
+                p_cur += nh_vecs;
 
-            let base_n = if gamma > 0.0 {
-                2.0 * spec.linear_density_kg_m * l_m * f0_v / gamma
-            } else {
-                0.0
-            };
-            let cut_j = (nv_cut + 1) as f64;
-            tail_n_trans[s_idx] =
-                (base_n * sqrt_f64(1.0 + spec.inharmonicity_b * cut_j * cut_j)) as f32;
-            tail_n_long[s_idx] = base_n as f32;
+                let sum_sq = sum_sq_v + sum_sq_h;
+                let alpha64 = f64::from(ports.alpha_vel[s_idx]);
+                let r0_val = (0.5 * alpha64 * sum_sq) as f32;
+                if r0_val > 0.0 && r0_val.is_finite() {
+                    r0[s_idx] = r0_val;
+                    meta[s_idx].a_wave_gain = (alpha64 / f64::from(r0_val)) as f32;
+                } else {
+                    r0[s_idx] = 1.0e-9;
+                    meta[s_idx].a_wave_gain = 0.0;
+                }
 
-            meta[s_idx].v_br = entry.vert_vecs.start..(entry.vert_vecs.start + nv_vecs);
-            meta[s_idx].v_tail = (entry.vert_vecs.start + nv_vecs)..entry.vert_vecs.end;
-            meta[s_idx].h_br = entry.horiz_vecs.start..(entry.horiz_vecs.start + nh_vecs);
-            meta[s_idx].h_tail = (entry.horiz_vecs.start + nh_vecs)..entry.horiz_vecs.end;
-            meta[s_idx].beta_v_off = beta_v_off;
-            meta[s_idx].beta_h_off = beta_h_off;
-            meta[s_idx].n_vh = nv_vecs + nh_vecs;
-
-            fast_meta[s_idx] = FastPrefixMeta {
-                n_vh: (nv_vecs + nh_vecs) as u32,
-                a_wave_gain: meta[s_idx].a_wave_gain,
-                pan_l: entry.pan_l,
-                pan_r: entry.pan_r,
-            };
-
-            let (v_br_r, h_br_r) = (meta[s_idx].v_br.clone(), meta[s_idx].h_br.clone());
-            d_br.as_f32x4_slice_mut()[beta_v_off..beta_v_off + nv_vecs]
-                .copy_from_slice(&d_src[v_br_r.clone()]);
-            s_br.as_f32x4_slice_mut()[beta_v_off..beta_v_off + nv_vecs]
-                .copy_from_slice(&s_src[v_br_r.clone()]);
-            c_br.as_f32x4_slice_mut()[beta_v_off..beta_v_off + nv_vecs]
-                .copy_from_slice(&c_src[v_br_r]);
-            d_br.as_f32x4_slice_mut()[beta_h_off..beta_h_off + nh_vecs]
-                .copy_from_slice(&d_src[h_br_r.clone()]);
-            s_br.as_f32x4_slice_mut()[beta_h_off..beta_h_off + nh_vecs]
-                .copy_from_slice(&s_src[h_br_r.clone()]);
-            c_br.as_f32x4_slice_mut()[beta_h_off..beta_h_off + nh_vecs]
-                .copy_from_slice(&c_src[h_br_r]);
-
-            let (pl, pr) = (F32x4::splat(entry.pan_l), F32x4::splat(entry.pan_r));
-            let (cl_sl, cr_sl) = (c_tail_l.as_f32x4_slice_mut(), c_tail_r.as_f32x4_slice_mut());
-            for i in entry.all_vecs() {
-                cl_sl[i] = c_src[i] * pl;
-                cr_sl[i] = c_src[i] * pr;
-            }
-
-            // Prefix damper port resistances match `r_port_damp_v/h` (`alpha * sum(b_damp^2)`)
-            // so `1 + 0.5 * rp * c` preserves exact discrete passivity on `< 4,500 Hz` prefixes.
-            if entry.has_damper {
-                let bd = ports.b_damp.as_slice();
-                let sum_sq_slice = |vr: &Range<usize>| -> f64 {
-                    bd[(vr.start * 4)..(vr.end * 4)]
-                        .iter()
-                        .map(|&x| f64::from(x) * f64::from(x))
-                        .sum()
+                let base_n = if gamma > 0.0 {
+                    2.0 * spec.linear_density_kg_m * l_m * f0_v / gamma
+                } else {
+                    0.0
                 };
-                r_damp_prefix_v[s_idx] = (alpha64 * sum_sq_slice(&meta[s_idx].v_br)) as f32;
-                r_damp_prefix_h[s_idx] = (alpha64 * sum_sq_slice(&meta[s_idx].h_br)) as f32;
+                let cut_j = (nv_cut + 1) as f64;
+                tail_n_trans[s_idx] =
+                    (base_n * sqrt_f64(1.0 + spec.inharmonicity_b * cut_j * cut_j)) as f32;
+                tail_n_long[s_idx] = base_n as f32;
+
+                let v_br = entry.vert_vecs.start..(entry.vert_vecs.start + nv_vecs);
+                let v_tail = (entry.vert_vecs.start + nv_vecs)..entry.vert_vecs.end;
+                let h_br = entry.horiz_vecs.start..(entry.horiz_vecs.start + nh_vecs);
+                let h_tail = (entry.horiz_vecs.start + nh_vecs)..entry.horiz_vecs.end;
+
+                let tl_v = tl_cur..(tl_cur + v_tail.len());
+                tl_cur = tl_v.end;
+                let tl_h = tl_cur..(tl_cur + h_tail.len());
+                tl_cur = tl_h.end;
+
+                tl_soa.d_coeff.as_f32x4_slice_mut()[tl_v.clone()]
+                    .copy_from_slice(&d_src[v_tail.clone()]);
+                tl_soa.s_coeff.as_f32x4_slice_mut()[tl_v.clone()]
+                    .copy_from_slice(&s_src[v_tail.clone()]);
+                tl_soa.c_bridge.as_f32x4_slice_mut()[tl_v.clone()]
+                    .copy_from_slice(&c_src[v_tail.clone()]);
+                tl_soa.d_coeff.as_f32x4_slice_mut()[tl_h.clone()]
+                    .copy_from_slice(&d_src[h_tail.clone()]);
+                tl_soa.s_coeff.as_f32x4_slice_mut()[tl_h.clone()]
+                    .copy_from_slice(&s_src[h_tail.clone()]);
+                tl_soa.c_bridge.as_f32x4_slice_mut()[tl_h.clone()]
+                    .copy_from_slice(&c_src[h_tail.clone()]);
+
+                meta[s_idx] = StringBridgeMeta {
+                    v_br: v_br.clone(),
+                    h_br: h_br.clone(),
+                    v_tail,
+                    h_tail,
+                    tl_v,
+                    tl_h,
+                    tl_l: 0..0,
+                    beta_v_off,
+                    beta_h_off,
+                    n_vh: nv_vecs + nh_vecs,
+                    a_wave_gain: meta[s_idx].a_wave_gain,
+                };
+                a_wave_gains[s_idx] = meta[s_idx].a_wave_gain;
+                fast_meta[s_idx] = FastPrefixMeta {
+                    a_wave_gain: meta[s_idx].a_wave_gain,
+                    pan_l: entry.pan_l,
+                    pan_r: entry.pan_r,
+                };
+
+                if entry.has_damper {
+                    let bd = ports.b_damp.as_slice();
+                    let sum_sq_slice = |vr: &Range<usize>| -> f64 {
+                        bd[(vr.start * 4)..(vr.end * 4)]
+                            .iter()
+                            .map(|&x| f64::from(x) * f64::from(x))
+                            .sum()
+                    };
+                    r_damp_prefix_v[s_idx] = (alpha64 * sum_sq_slice(&v_br)) as f32;
+                    r_damp_prefix_h[s_idx] = (alpha64 * sum_sq_slice(&h_br)) as f32;
+                }
             }
+            let th_end = tl_cur;
+
+            for s_idx in key.string_range.clone() {
+                let entry = &map.strings()[s_idx];
+                let l_src = entry.long_vecs.clone();
+                let tl_l = tl_cur..(tl_cur + l_src.len());
+                tl_cur = tl_l.end;
+                tl_soa.d_coeff.as_f32x4_slice_mut()[tl_l.clone()]
+                    .copy_from_slice(&d_src[l_src.clone()]);
+                tl_soa.s_coeff.as_f32x4_slice_mut()[tl_l.clone()]
+                    .copy_from_slice(&s_src[l_src.clone()]);
+                tl_soa.c_bridge.as_f32x4_slice_mut()[tl_l.clone()].copy_from_slice(&c_src[l_src]);
+                meta[s_idx].tl_l = tl_l;
+            }
+            let s0 = key.string_range.start;
+            let e0 = &map.strings()[s0];
+            key_tails[k] = KeyTailRanges {
+                th_start: th_start as u16,
+                th_end: th_end as u16,
+                l_end: tl_cur as u16,
+                pan_l: e0.pan_l,
+                pan_r: e0.pan_r,
+                tail_n_trans: tail_n_trans[s0],
+                tail_n_long: tail_n_long[s0],
+            };
         }
 
-        let mut beta_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
-        beta_br.as_mut_slice()[..beta_vals.len()].copy_from_slice(&beta_vals);
+        let (mut prefix_runs, mut n_prefix_runs, mut s_run) =
+            ([PrefixRun::ZERO; MAX_PREFIX_RUNS], 0usize, 0usize);
+        while s_run < TOTAL_STRINGS {
+            let (n_pol, p_off) = (counts[s_run].1, meta[s_run].beta_v_off as u16);
+            let mut end_s = s_run + 1;
+            while end_s < TOTAL_STRINGS && counts[end_s].1 == n_pol {
+                end_s += 1;
+            }
+            assert!(n_prefix_runs < MAX_PREFIX_RUNS && n_pol <= 3);
+            prefix_runs[n_prefix_runs] = PrefixRun {
+                start_s: s_run as u8,
+                count: (end_s - s_run) as u8,
+                n_pol: n_pol as u8,
+                p_off,
+            };
+            n_prefix_runs += 1;
+            s_run = end_s;
+        }
         Self {
-            total_prefix_vecs,
-            beta_br,
-            d_br,
-            s_br,
-            c_br,
-            u_br,
-            v_br,
-            c_tail_l,
-            c_tail_r,
-            tail_idx_scratch,
+            state,
+            coef,
+            tl_soa,
             fast_meta,
+            a_wave_gains,
+            prefix_runs,
+            n_prefix_runs,
+            key_tails,
             r0,
             r_damp_prefix_v,
             r_damp_prefix_h,
             tail_n_trans,
             tail_n_long,
             meta,
-        }
-    }
-
-    /// Zeroes packed L1 prefix state buffers without reallocating.
-    #[inline]
-    pub fn reset_resting(&mut self) {
-        self.u_br.as_mut_slice().fill(0.0);
-        self.v_br.as_mut_slice().fill(0.0);
-    }
-
-    /// Copies all 230 strings' prefix `(u, v)` state from `soa` into L1-packed buffers.
-    pub fn pack_from_soa(&mut self, soa: &ModalSoa) {
-        let (u_src, v_src) = (soa.u.as_f32x4_slice(), soa.v.as_f32x4_slice());
-        let (u_dst, v_dst) = (
-            self.u_br.as_f32x4_slice_mut(),
-            self.v_br.as_f32x4_slice_mut(),
-        );
-        for m in &self.meta {
-            let (nv, nh) = (m.v_br.len(), m.h_br.len());
-            u_dst[m.beta_v_off..m.beta_v_off + nv].copy_from_slice(&u_src[m.v_br.clone()]);
-            v_dst[m.beta_v_off..m.beta_v_off + nv].copy_from_slice(&v_src[m.v_br.clone()]);
-            u_dst[m.beta_h_off..m.beta_h_off + nh].copy_from_slice(&u_src[m.h_br.clone()]);
-            v_dst[m.beta_h_off..m.beta_h_off + nh].copy_from_slice(&v_src[m.h_br.clone()]);
-        }
-    }
-
-    /// Copies all 230 strings' prefix `(u, v)` state from L1-packed buffers back to `soa`.
-    pub fn unpack_to_soa(&self, soa: &mut ModalSoa) {
-        let (u_dst, v_dst) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
-        let (u_src, v_src) = (self.u_br.as_f32x4_slice(), self.v_br.as_f32x4_slice());
-        for m in &self.meta {
-            let (nv, nh) = (m.v_br.len(), m.h_br.len());
-            u_dst[m.v_br.clone()].copy_from_slice(&u_src[m.beta_v_off..m.beta_v_off + nv]);
-            v_dst[m.v_br.clone()].copy_from_slice(&v_src[m.beta_v_off..m.beta_v_off + nv]);
-            u_dst[m.h_br.clone()].copy_from_slice(&u_src[m.beta_h_off..m.beta_h_off + nh]);
-            v_dst[m.h_br.clone()].copy_from_slice(&v_src[m.beta_h_off..m.beta_h_off + nh]);
-        }
-    }
-
-    /// Syncs a single string's packed prefix `(u, v)` out to `soa`.
-    #[inline(always)]
-    pub fn sync_string_to_soa(&self, soa: &mut ModalSoa, s_idx: usize) {
-        let m = &self.meta[s_idx];
-        let (u_dst, v_dst) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
-        let (u_src, v_src) = (self.u_br.as_f32x4_slice(), self.v_br.as_f32x4_slice());
-        let (nv, nh) = (m.v_br.len(), m.h_br.len());
-        u_dst[m.v_br.clone()].copy_from_slice(&u_src[m.beta_v_off..m.beta_v_off + nv]);
-        v_dst[m.v_br.clone()].copy_from_slice(&v_src[m.beta_v_off..m.beta_v_off + nv]);
-        u_dst[m.h_br.clone()].copy_from_slice(&u_src[m.beta_h_off..m.beta_h_off + nh]);
-        v_dst[m.h_br.clone()].copy_from_slice(&v_src[m.beta_h_off..m.beta_h_off + nh]);
-    }
-
-    /// Syncs a single string's prefix `(u, v)` from `soa` into L1-packed buffers.
-    #[inline(always)]
-    pub fn sync_string_from_soa(&mut self, soa: &ModalSoa, s_idx: usize) {
-        let m = &self.meta[s_idx];
-        let (u_src, v_src) = (soa.u.as_f32x4_slice(), soa.v.as_f32x4_slice());
-        let (u_dst, v_dst) = (
-            self.u_br.as_f32x4_slice_mut(),
-            self.v_br.as_f32x4_slice_mut(),
-        );
-        let (nv, nh) = (m.v_br.len(), m.h_br.len());
-        u_dst[m.beta_v_off..m.beta_v_off + nv].copy_from_slice(&u_src[m.v_br.clone()]);
-        v_dst[m.beta_v_off..m.beta_v_off + nv].copy_from_slice(&v_src[m.v_br.clone()]);
-        u_dst[m.beta_h_off..m.beta_h_off + nh].copy_from_slice(&u_src[m.h_br.clone()]);
-        v_dst[m.beta_h_off..m.beta_h_off + nh].copy_from_slice(&v_src[m.h_br.clone()]);
-    }
-
-    /// Computes incident velocity waves `a_waves[s]` from L1-packed `v_br`.
-    pub fn compute_a_waves(
-        &self,
-        may_be_nonzero: &[bool; TOTAL_STRINGS],
-        a_waves: &mut [f32; TOTAL_STRINGS],
-    ) {
-        let v = self.v_br.as_f32x4_slice();
-        let beta = self.beta_br.as_f32x4_slice();
-        for (s_idx, m) in self.meta.iter().enumerate() {
-            if !may_be_nonzero[s_idx] {
-                a_waves[s_idx] = 0.0;
-                continue;
-            }
-            let mut acc = F32x4::zero();
-            for i in m.beta_v_off..(m.beta_v_off + m.n_vh) {
-                acc = v[i].mul_add(beta[i], acc);
-            }
-            a_waves[s_idx] = m.a_wave_gain * acc.reduce_sum();
         }
     }
 }

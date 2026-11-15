@@ -23,8 +23,8 @@ pub(crate) const DELTA_U_SAV: f64 = 1.0e-10;
 /// Risse-Helie-Bilbao drift-regulated SAV solver across all 230 strings (`0` runtime allocs).
 #[derive(Clone, Debug)]
 pub(crate) struct SavBank {
-    specs: Vec<SavStringSpec>,
-    slopes: Vec<SavEnergySlopes>,
+    pub(crate) specs: Vec<SavStringSpec>,
+    pub(crate) slopes: Vec<SavEnergySlopes>,
     pub r_sav: [f64; TOTAL_STRINGS],
     ts: f64,
 }

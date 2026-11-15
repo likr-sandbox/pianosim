@@ -35,6 +35,16 @@ pub trait KeyActionDriver {
         t_len: usize,
         out_clears: &mut [f32; TILE],
     ) -> f32;
+    /// Returns `true` if `key_idx` has a sample-accurate NoteOn/NoteOff inside `[chunk_base, chunk_base + sub)`.
+    #[inline]
+    fn has_mid_block_event(&self, _key_idx: usize, _chunk_base: usize, _sub: usize) -> bool {
+        false
+    }
+    /// Applies queued NoteOn/NoteOff events at `sample_idx`, returning a bitmask of NoteOn keys.
+    #[inline]
+    fn apply_sample_events_at(&mut self, _sample_idx: usize) -> u128 {
+        0
+    }
     /// Evaluates hammer force `F_strike` (N, `+` up) from `(y_str_m, v_str_mps, r_port_strike)`.
     fn step_hammer_sample(
         &mut self,
