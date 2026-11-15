@@ -8,7 +8,8 @@
 use core::f64::consts::{FRAC_2_PI, LN_10, LOG2_E, PI, TAU};
 use piano_simd::AlignedBuf;
 use piano_spec::{
-    effective_string_f0_hz, partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec,
+    count_longitudinal_partials, count_transverse_partials, effective_string_f0_hz,
+    partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec, MAX_AUDIBLE_FREQ_HZ,
     NUM_KEYS,
 };
 
@@ -231,6 +232,7 @@ impl ModalSoa {
 struct PolParams {
     base_slot: usize,
     mode_count: usize,
+    slot_cap: usize,
     key_idx: usize,
     f0_hz: f64,
     b_inharm: f64,
@@ -285,7 +287,7 @@ pub(crate) fn coupled_pole_f32(
     Some((d_f32, s_f32))
 }
 
-fn populate_string_modes(
+pub(crate) fn populate_string_modes(
     soa: &mut ModalSoa,
     entry: &StringMapEntry,
     sample_rate: f64,
@@ -303,16 +305,24 @@ fn populate_string_modes(
     let f0_horiz = effective_string_f0_hz(k, s_choir, Polarization::Horizontal, specs, voicing);
     let level_gain = exp_f64(f64::from(voicing.effective_level_db_offset(k)) * (LN_10 / 20.0));
     let nyquist = NYQUIST_CUTOFF_RATIO * sample_rate;
+    let (v_cap, h_cap, l_cap) = (
+        entry.vert_vecs.len() * 4,
+        entry.horiz_vecs.len() * 4,
+        entry.long_vecs.len() * 4,
+    );
+    let v_modes = count_transverse_partials(f0_vert, b_inharm, MAX_AUDIBLE_FREQ_HZ).min(v_cap);
+    let h_modes = count_transverse_partials(f0_horiz, b_inharm, MAX_AUDIBLE_FREQ_HZ).min(h_cap);
+    let l_modes = count_longitudinal_partials(k, spec.f_long_hz, MAX_AUDIBLE_FREQ_HZ).min(l_cap);
 
     let mut energy_sq = 0.0_f64;
-    for j in 1..=entry.vert_modes {
+    for j in 1..=v_modes {
         let f_j = partial_frequency_hz(f0_vert, b_inharm, j);
         if f_j > 0.0 && f_j < nyquist {
             let w = strike_mode_shape(k, j) * f64::from(C_VERT);
             energy_sq += w * w;
         }
     }
-    for j in 1..=entry.horiz_modes {
+    for j in 1..=h_modes {
         let f_j = partial_frequency_hz(f0_horiz, b_inharm, j);
         if f_j > 0.0 && f_j < nyquist {
             let w = 0.85 * strike_mode_shape(k, j) * f64::from(C_HORIZ);
@@ -329,7 +339,8 @@ fn populate_string_modes(
         soa,
         &PolParams {
             base_slot: entry.vert_vecs.start * 4,
-            mode_count: entry.vert_modes,
+            mode_count: v_modes,
+            slot_cap: v_cap,
             key_idx: k,
             f0_hz: f0_vert,
             b_inharm,
@@ -345,7 +356,8 @@ fn populate_string_modes(
         soa,
         &PolParams {
             base_slot: entry.horiz_vecs.start * 4,
-            mode_count: entry.horiz_modes,
+            mode_count: h_modes,
+            slot_cap: h_cap,
             key_idx: k,
             f0_hz: f0_horiz,
             b_inharm,
@@ -359,7 +371,7 @@ fn populate_string_modes(
     );
 
     let long_base = entry.long_vecs.start * 4;
-    for m in 1..=entry.long_modes {
+    for m in 1..=l_modes {
         let f_init = crate::longitudinal::long_init_freq_hz(k, spec.f_long_hz, m);
         let t60_l = if lossless {
             f64::INFINITY
@@ -369,7 +381,12 @@ fn populate_string_modes(
         if let Some(poles) = coupled_pole_f32(f_init, sample_rate, t60_l) {
             let c_l = crate::longitudinal::long_bridge_weight(k, f0_vert, spec.f_long_hz, m);
             soa.write_slot(long_base + (m - 1), poles, c_l, 0.0);
+        } else {
+            soa.write_slot(long_base + (m - 1), (1.0, 0.0), 0.0, 0.0);
         }
+    }
+    for slot_off in l_modes..l_cap {
+        soa.write_slot(long_base + slot_off, (1.0, 0.0), 0.0, 0.0);
     }
 }
 
@@ -388,7 +405,12 @@ fn populate_transverse_pol(soa: &mut ModalSoa, p: &PolParams) {
             let b = (strike_mode_shape(p.key_idx, j) * p.exc_scale) as f32;
             let c_signed = if j % 2 == 1 { p.c_bridge } else { -p.c_bridge };
             soa.write_slot(p.base_slot + (j - 1), poles, c_signed, b);
+        } else {
+            soa.write_slot(p.base_slot + (j - 1), (1.0, 0.0), 0.0, 0.0);
         }
+    }
+    for slot_off in p.mode_count..p.slot_cap {
+        soa.write_slot(p.base_slot + slot_off, (1.0, 0.0), 0.0, 0.0);
     }
 }
 

@@ -5,11 +5,11 @@ use core::f64::consts::PI;
 
 use piano_simd::{AlignedBuf, F32x4};
 use piano_spec::{
-    StringPhysicalParams, LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, STEEL_YOUNGS_MODULUS_PA,
-    TOTAL_STRINGS,
+    count_longitudinal_partials, StringPhysicalParams, LONGITUDINAL_MAX_KEY_IDX,
+    MAX_AUDIBLE_FREQ_HZ, NUM_KEYS, STEEL_YOUNGS_MODULUS_PA, TOTAL_STRINGS,
 };
 
-use crate::choir_map::ChoirMap;
+use crate::choir_map::{ChoirMap, StringMapEntry};
 use crate::modal_soa::{exp_f64, sin_cos_f64, sqrt_f64};
 use crate::phantom::MAX_PHANTOM_LONG_MODES;
 use crate::zoh_kernel::inject_excitation;
@@ -125,47 +125,60 @@ impl LongitudinalBank {
             prec_force_cap_n: [0.0; TOTAL_STRINGS],
         };
 
-        let ts = 1.0 / sample_rate;
         let mut cursor_vec = 0_usize;
-        let b_mut = bank.b_long_prec.as_mut_slice();
-
         for (s_idx, entry) in map.strings().iter().enumerate() {
             bank.vec_offset[s_idx] = cursor_vec;
-            let k = usize::from(entry.key_idx);
-            let n_l_vecs = entry.long_vecs.len();
-            if k >= LONGITUDINAL_MAX_KEY_IDX || n_l_vecs == 0 {
-                cursor_vec += n_l_vecs;
-                continue;
-            }
-
-            let spec = specs[k];
-            let l_k = spec.speaking_length_m;
-            let m_str = spec.linear_density_kg_m * l_k;
-            let s_core = PI * spec.core_radius_m * spec.core_radius_m;
-            let t0 = spec.tension_n.max(1.0);
-            let w_reg = nonlinear_register_weight(k);
-            bank.prec_force_scale[s_idx] =
-                w_reg * KAPPA_PREC * (STEEL_YOUNGS_MODULUS_PA * s_core / (4.0 * t0 * t0));
-            bank.prec_force_cap_n[s_idx] = PREC_T0_CAP_RATIO * t0;
-
-            let x = (k as f64) / ((NUM_KEYS - 1) as f64);
-            let beta_k = 0.137 - 0.042 * x;
-            let gain = gamma_s[s_idx] * (2.0 * ts / m_str);
-            let base = cursor_vec * 4;
-
-            for m in 1..=entry.long_modes {
-                let f_nom = (m as f64) * spec.f_long_hz;
-                let aa = w_aa(f_nom);
-                if aa > 0.0 && f_nom < 0.49 * sample_rate {
-                    let mf = m as f64;
-                    let cos_contact = sin_cos_f64(mf * PI * beta_k).1;
-                    let width_sinc = sinc_rad(mf * PI * HAMMER_WIDTH_M / l_k);
-                    b_mut[base + (m - 1)] = (gain * cos_contact * width_sinc * aa) as f32;
-                }
-            }
-            cursor_vec += n_l_vecs;
+            bank.populate_string(s_idx, entry, sample_rate, specs, gamma_s[s_idx]);
+            cursor_vec += entry.long_vecs.len();
         }
         bank
+    }
+
+    pub(crate) fn populate_string(
+        &mut self,
+        s_idx: usize,
+        entry: &StringMapEntry,
+        sample_rate: f64,
+        specs: &[StringPhysicalParams; NUM_KEYS],
+        gamma_s: f64,
+    ) {
+        let k = usize::from(entry.key_idx);
+        let n_l_vecs = entry.long_vecs.len();
+        if k >= LONGITUDINAL_MAX_KEY_IDX || n_l_vecs == 0 {
+            self.prec_force_scale[s_idx] = 0.0;
+            self.prec_force_cap_n[s_idx] = 0.0;
+            return;
+        }
+
+        let spec = specs[k];
+        let l_k = spec.speaking_length_m;
+        let m_str = spec.linear_density_kg_m * l_k;
+        let s_core = PI * spec.core_radius_m * spec.core_radius_m;
+        let t0 = spec.tension_n.max(1.0);
+        let w_reg = nonlinear_register_weight(k);
+        self.prec_force_scale[s_idx] =
+            w_reg * KAPPA_PREC * (STEEL_YOUNGS_MODULUS_PA * s_core / (4.0 * t0 * t0));
+        self.prec_force_cap_n[s_idx] = PREC_T0_CAP_RATIO * t0;
+
+        let ts = 1.0 / sample_rate;
+        let x = (k as f64) / ((NUM_KEYS - 1) as f64);
+        let beta_k = 0.137 - 0.042 * x;
+        let gain = gamma_s * (2.0 * ts / m_str);
+        let base = self.vec_offset[s_idx] * 4;
+        let b_mut = self.b_long_prec.as_mut_slice();
+        b_mut[base..base + n_l_vecs * 4].fill(0.0);
+        let l_modes =
+            count_longitudinal_partials(k, spec.f_long_hz, MAX_AUDIBLE_FREQ_HZ).min(n_l_vecs * 4);
+        for m in 1..=l_modes {
+            let f_nom = (m as f64) * spec.f_long_hz;
+            let aa = w_aa(f_nom);
+            if aa > 0.0 && f_nom < 0.49 * sample_rate {
+                let mf = m as f64;
+                let cos_contact = sin_cos_f64(mf * PI * beta_k).1;
+                let width_sinc = sinc_rad(mf * PI * HAMMER_WIDTH_M / l_k);
+                b_mut[base + (m - 1)] = (gain * cos_contact * width_sinc * aa) as f32;
+            }
+        }
     }
 
     /// Injects smooth-clamped local axial hammer-contact precursor into `u_long`.

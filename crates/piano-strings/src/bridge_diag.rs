@@ -340,6 +340,7 @@ impl StringBank {
             false,
             &mut out_l[..frames],
             &mut out_r[..frames],
+            None,
         );
     }
 

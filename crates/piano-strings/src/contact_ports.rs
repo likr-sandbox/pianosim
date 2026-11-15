@@ -6,8 +6,8 @@ use core::ops::Range;
 
 use piano_simd::{AlignedBuf, F32x4};
 use piano_spec::{
-    effective_string_f0_hz, partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec,
-    NUM_KEYS, TOTAL_STRINGS,
+    count_transverse_partials, effective_string_f0_hz, partial_frequency_hz, Polarization,
+    StringPhysicalParams, VoicingSpec, MAX_AUDIBLE_FREQ_HZ, NUM_KEYS, TOTAL_STRINGS,
 };
 
 use crate::choir_map::{ChoirMap, StringMapEntry};
@@ -155,7 +155,7 @@ pub(crate) fn damper_phi(partial_index: usize) -> f64 {
     env_rms * (1.0 + 0.44 * (1.0 - exp_f64(-0.48 * ((partial_index - 1) as f64))))
 }
 
-fn populate_string_ports(
+pub(crate) fn populate_string_ports(
     ports: &mut ContactPorts,
     s_idx: usize,
     entry: &StringMapEntry,
@@ -179,8 +179,16 @@ fn populate_string_ports(
     let i_mf = (1.55 * m_h * 1.8).min(1.45 * z_choir * tau_c * 1.8);
 
     let mut s_eff_sq = 0.0_f64;
-    let (vb, vm) = (entry.vert_vecs.start * 4, entry.vert_modes);
-    let (hb, hm) = (entry.horiz_vecs.start * 4, entry.horiz_modes);
+    let (vb, vm) = (
+        entry.vert_vecs.start * 4,
+        count_transverse_partials(f0_v, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ)
+            .min(entry.vert_vecs.len() * 4),
+    );
+    let (hb, hm) = (
+        entry.horiz_vecs.start * 4,
+        count_transverse_partials(f0_h, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ)
+            .min(entry.horiz_vecs.len() * 4),
+    );
     let pols = [
         (vb, vm, f0_v, 1.0, 1.0, f64::from(C_VERT), false),
         (
@@ -214,6 +222,12 @@ fn populate_string_ports(
     ports.gamma_s[s_idx] = gamma_k;
     ports.beta_s[s_idx] = m_str / (2.0 * gamma_k * gamma_k);
     ports.alpha_vel[s_idx] = (m_str / (2.0 * ts * gamma_k * gamma_k)) as f32;
+
+    let full_slots = (entry.vert_vecs.start * 4)..(entry.long_vecs.end * 4);
+    ports.b_strike.as_mut_slice()[full_slots.clone()].fill(0.0);
+    ports.a_strike.as_mut_slice()[full_slots.clone()].fill(0.0);
+    ports.b_damp.as_mut_slice()[full_slots.clone()].fill(0.0);
+    ports.a_damp.as_mut_slice()[full_slots].fill(0.0);
 
     let (mut sum_bh_sq, mut sum_bd_v_sq, mut sum_bd_h_sq) = (0.0_f64, 0.0_f64, 0.0_f64);
     let (bh_s, ah_s) = (ports.b_strike.as_mut_slice(), ports.a_strike.as_mut_slice());

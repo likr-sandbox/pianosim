@@ -195,10 +195,8 @@ pub(crate) fn accum_tile_stereo(
     }
 }
 
-/// Branchlessly flushes `< 1e-20` and non-finite entries to zero within `vec_range`,
-/// returning `true` if any remaining state slot is non-zero.
-#[inline]
-pub(crate) fn flush_subnormals_range(soa: &mut ModalSoa, vec_range: Range<usize>) -> bool {
+#[inline(always)]
+fn flush_f32_slice(slice: &mut [f32]) -> u32 {
     const RANGE: u32 = FINITE_EXP_BITS - SUBNORMAL_FLUSH_BITS;
     #[inline(always)]
     fn flush_f32(x: &mut f32, nz: &mut u32) {
@@ -209,24 +207,27 @@ pub(crate) fn flush_subnormals_range(soa: &mut ModalSoa, vec_range: Range<usize>
         *x = f32::from_bits(kept);
         *nz |= kept;
     }
-    #[inline(always)]
-    fn flush_slice_4x(slice: &mut [f32]) -> u32 {
-        let (mut nz0, mut nz1, mut nz2, mut nz3) = (0_u32, 0_u32, 0_u32, 0_u32);
-        let mut chunks = slice.chunks_exact_mut(4);
-        for c in chunks.by_ref() {
-            flush_f32(&mut c[0], &mut nz0);
-            flush_f32(&mut c[1], &mut nz1);
-            flush_f32(&mut c[2], &mut nz2);
-            flush_f32(&mut c[3], &mut nz3);
-        }
-        for x in chunks.into_remainder() {
-            flush_f32(x, &mut nz0);
-        }
-        nz0 | nz1 | nz2 | nz3
+    let (mut nz0, mut nz1, mut nz2, mut nz3) = (0_u32, 0_u32, 0_u32, 0_u32);
+    let mut chunks = slice.chunks_exact_mut(4);
+    for c in chunks.by_ref() {
+        flush_f32(&mut c[0], &mut nz0);
+        flush_f32(&mut c[1], &mut nz1);
+        flush_f32(&mut c[2], &mut nz2);
+        flush_f32(&mut c[3], &mut nz3);
     }
+    for x in chunks.into_remainder() {
+        flush_f32(x, &mut nz0);
+    }
+    nz0 | nz1 | nz2 | nz3
+}
+
+/// Branchlessly flushes `< 1e-20` and non-finite entries to zero within `vec_range`,
+/// returning `true` if any remaining state slot is non-zero.
+#[inline]
+pub(crate) fn flush_subnormals_range(soa: &mut ModalSoa, vec_range: Range<usize>) -> bool {
     let slot_range = (vec_range.start * 4)..(vec_range.end * 4);
-    let nz_u = flush_slice_4x(&mut soa.u.as_mut_slice()[slot_range.clone()]);
-    let nz_v = flush_slice_4x(&mut soa.v.as_mut_slice()[slot_range]);
+    let nz_u = flush_f32_slice(&mut soa.u.as_mut_slice()[slot_range.clone()]);
+    let nz_v = flush_f32_slice(&mut soa.v.as_mut_slice()[slot_range]);
     ((nz_u | nz_v) & 0x7fff_ffff) != 0
 }
 
@@ -367,32 +368,7 @@ pub(crate) fn step_string_subblock_3(
 /// Branchlessly flushes `< 1e-20` and non-finite entries across raw `(u, v)` slices.
 #[inline]
 pub(crate) fn flush_subnormals_slices(u: &mut [f32], v: &mut [f32]) -> bool {
-    const RANGE: u32 = FINITE_EXP_BITS - SUBNORMAL_FLUSH_BITS;
-    #[inline(always)]
-    fn flush_f32(x: &mut f32, nz: &mut u32) {
-        let bits = x.to_bits();
-        let abs_bits = bits & 0x7fff_ffff;
-        let keep = abs_bits.wrapping_sub(SUBNORMAL_FLUSH_BITS) < RANGE;
-        let kept = bits & 0_u32.wrapping_sub(u32::from(keep));
-        *x = f32::from_bits(kept);
-        *nz |= kept;
-    }
-    #[inline(always)]
-    fn flush_4x(slice: &mut [f32]) -> u32 {
-        let (mut nz0, mut nz1, mut nz2, mut nz3) = (0_u32, 0_u32, 0_u32, 0_u32);
-        let mut chunks = slice.chunks_exact_mut(4);
-        for c in chunks.by_ref() {
-            flush_f32(&mut c[0], &mut nz0);
-            flush_f32(&mut c[1], &mut nz1);
-            flush_f32(&mut c[2], &mut nz2);
-            flush_f32(&mut c[3], &mut nz3);
-        }
-        for x in chunks.into_remainder() {
-            flush_f32(x, &mut nz0);
-        }
-        nz0 | nz1 | nz2 | nz3
-    }
-    ((flush_4x(u) | flush_4x(v)) & 0x7fff_ffff) != 0
+    ((flush_f32_slice(u) | flush_f32_slice(v)) & 0x7fff_ffff) != 0
 }
 
 /// Accumulates ZOH-stepped `v_next * c` of `vr` into caller-provided `acc[..c_len]` (`<= 128`).
@@ -411,6 +387,7 @@ pub(crate) fn accum_soa_range_in(soa: &mut ModalSoa, vr: Range<usize>, acc: &mut
     );
     let n = u.len();
     assert!(v.len() == n && d.len() == n && s.len() == n && c.len() == n);
+    let full4 = c_len & !3;
     let mut idx = 0usize;
     while idx + 2 < n {
         let (mut u0, mut v0, d0, s0, c0) = (u[idx], v[idx], d[idx], s[idx], c[idx]);
@@ -418,7 +395,27 @@ pub(crate) fn accum_soa_range_in(soa: &mut ModalSoa, vr: Range<usize>, acc: &mut
             (u[idx + 1], v[idx + 1], d[idx + 1], s[idx + 1], c[idx + 1]);
         let (mut u2, mut v2, d2, s2, c2) =
             (u[idx + 2], v[idx + 2], d[idx + 2], s[idx + 2], c[idx + 2]);
-        for slot in &mut acc[..c_len] {
+        for chunk in acc[..full4].chunks_exact_mut(4) {
+            let (mut a0, mut a1, mut a2, mut a3) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+            (u2, v2) = zoh_rotate(u2, v2, d2, s2);
+            a0 = v0.mul_add(c0, v1.mul_add(c1, v2.mul_add(c2, a0)));
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+            (u2, v2) = zoh_rotate(u2, v2, d2, s2);
+            a1 = v0.mul_add(c0, v1.mul_add(c1, v2.mul_add(c2, a1)));
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+            (u2, v2) = zoh_rotate(u2, v2, d2, s2);
+            a2 = v0.mul_add(c0, v1.mul_add(c1, v2.mul_add(c2, a2)));
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+            (u2, v2) = zoh_rotate(u2, v2, d2, s2);
+            a3 = v0.mul_add(c0, v1.mul_add(c1, v2.mul_add(c2, a3)));
+            (chunk[0], chunk[1], chunk[2], chunk[3]) = (a0, a1, a2, a3);
+        }
+        for slot in &mut acc[full4..c_len] {
             (u0, v0) = zoh_rotate(u0, v0, d0, s0);
             (u1, v1) = zoh_rotate(u1, v1, d1, s1);
             (u2, v2) = zoh_rotate(u2, v2, d2, s2);
@@ -436,7 +433,19 @@ pub(crate) fn accum_soa_range_in(soa: &mut ModalSoa, vr: Range<usize>, acc: &mut
     }
     while idx < n {
         let (mut u0, mut v0, d0, s0, c0) = (u[idx], v[idx], d[idx], s[idx], c[idx]);
-        for slot in &mut acc[..c_len] {
+        for chunk in acc[..full4].chunks_exact_mut(4) {
+            let (mut a0, mut a1, mut a2, mut a3) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            a0 = v0.mul_add(c0, a0);
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            a1 = v0.mul_add(c0, a1);
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            a2 = v0.mul_add(c0, a2);
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            a3 = v0.mul_add(c0, a3);
+            (chunk[0], chunk[1], chunk[2], chunk[3]) = (a0, a1, a2, a3);
+        }
+        for slot in &mut acc[full4..c_len] {
             (u0, v0) = zoh_rotate(u0, v0, d0, s0);
             *slot = v0.mul_add(c0, *slot);
         }

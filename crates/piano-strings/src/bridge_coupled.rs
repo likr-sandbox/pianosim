@@ -274,8 +274,12 @@ pub(crate) fn render_subblock_bridge_coupled_core(
     flush_end: bool,
     out_l: &mut [f32],
     out_r: &mut [f32],
+    mut zone_frames: Option<&mut [[f32; 8]]>,
 ) {
-    let total = out_l.len().min(out_r.len());
+    let total = out_l
+        .len()
+        .min(out_r.len())
+        .min(zone_frames.as_deref().map_or(usize::MAX, <[[f32; 8]]>::len));
     out_l.fill(0.0);
     out_r.fill(0.0);
     if total == 0 {
@@ -424,6 +428,9 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                 &mut b_waves,
                 &mut zone_out,
             );
+            if let Some(zf) = zone_frames.as_deref_mut() {
+                zf[chunk_base + ts] = zone_out;
+            }
             if dup_l.is_finite() {
                 sub_l[ts] += dup_l;
             }
