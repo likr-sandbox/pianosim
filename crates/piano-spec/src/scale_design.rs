@@ -326,7 +326,7 @@ mod tests {
 
         assert_eq!(equal_temperament_hz(48), 440.0);
         assert!((equal_temperament_hz(0) - 27.5).abs() < 1e-12);
-        assert!((equal_temperament_hz(87) - 4186.009_044_809_578).abs() < 1e-9);
+        assert!((equal_temperament_hz(87) - 4_186.009_044_809_578).abs() < 1e-9);
     }
 
     #[test]
