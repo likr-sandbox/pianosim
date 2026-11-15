@@ -118,3 +118,139 @@ pub fn zone_stereo_pan(zone_idx: usize) -> (f32, f32) {
     let (sin_a, cos_a) = sin_cos_f64(angle);
     (cos_a as f32, sin_a as f32)
 }
+
+const MAX_ZONE_RUNS: usize = 16;
+const _: () = assert!(TOTAL_STRINGS <= u8::MAX as usize);
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ZoneRun(u8, u8, u8, u8);
+
+impl ZoneRun {
+    #[inline]
+    pub(crate) fn bounds(self) -> (usize, usize, usize, usize) {
+        let (end, mask) = (usize::from(self.1).min(TOTAL_STRINGS), NUM_BRIDGE_ZONES - 1);
+        (
+            usize::from(self.0).min(end),
+            end,
+            usize::from(self.2) & mask,
+            usize::from(self.3) & mask,
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ZoneRunCache {
+    pub(crate) runs: [ZoneRun; MAX_ZONE_RUNS],
+    pub(crate) run_count: usize,
+    pub(crate) rw0_f32: [f32; TOTAL_STRINGS],
+    pub(crate) rw1_f32: [f32; TOTAL_STRINGS],
+    pub(crate) rw0: [f64; TOTAL_STRINGS],
+    pub(crate) rw1: [f64; TOTAL_STRINGS],
+    pub(crate) w0_f32: [f32; TOTAL_STRINGS],
+    pub(crate) w1_f32: [f32; TOTAL_STRINGS],
+    pub(crate) w0_f64: [f64; TOTAL_STRINGS],
+    pub(crate) w1_f64: [f64; TOTAL_STRINGS],
+}
+
+impl ZoneRunCache {
+    pub(crate) fn build(
+        zone_weights: &[ZoneWeight; TOTAL_STRINGS],
+        r0: &[f32; TOTAL_STRINGS],
+    ) -> Self {
+        let mut runs = [ZoneRun::default(); MAX_ZONE_RUNS];
+        let mut run_count = 0_usize;
+        let mut rw0 = [0.0_f64; TOTAL_STRINGS];
+        let mut rw1 = [0.0_f64; TOTAL_STRINGS];
+        let (mut rw0_f32, mut rw1_f32) = ([0.0_f32; TOTAL_STRINGS], [0.0_f32; TOTAL_STRINGS]);
+        let (mut w0_f32, mut w1_f32) = ([0.0_f32; TOTAL_STRINGS], [0.0_f32; TOTAL_STRINGS]);
+        let (mut w0_f64, mut w1_f64) = ([0.0_f64; TOTAL_STRINGS], [0.0_f64; TOTAL_STRINGS]);
+
+        for (s, (&(raw_z0, w0, raw_z1, w1), &r_s)) in zone_weights.iter().zip(r0).enumerate() {
+            let z0 = raw_z0 & ((NUM_BRIDGE_ZONES - 1) as u8);
+            let z1 = raw_z1 & ((NUM_BRIDGE_ZONES - 1) as u8);
+            let (fw0, fw1, fr) = (f64::from(w0), f64::from(w1), f64::from(r_s));
+            (w0_f32[s], w1_f32[s], w0_f64[s], w1_f64[s]) = (w0, w1, fw0, fw1);
+            rw0[s] = fr * fw0;
+            rw1[s] = fr * fw1;
+            rw0_f32[s] = rw0[s] as f32;
+            rw1_f32[s] = rw1[s] as f32;
+
+            let end = (s + 1) as u8;
+            if run_count > 0 && runs[run_count - 1].2 == z0 && runs[run_count - 1].3 == z1 {
+                runs[run_count - 1].1 = end;
+            } else if run_count < MAX_ZONE_RUNS {
+                runs[run_count] = ZoneRun(s as u8, end, z0, z1);
+                run_count += 1;
+            }
+        }
+
+        Self {
+            runs,
+            run_count,
+            rw0_f32,
+            rw1_f32,
+            rw0,
+            rw1,
+            w0_f32,
+            w1_f32,
+            w0_f64,
+            w1_f64,
+        }
+    }
+
+    pub(crate) fn update_resistances(&mut self, r0: &[f32; TOTAL_STRINGS]) {
+        for (s, &r_s) in r0.iter().enumerate() {
+            let fr = f64::from(r_s);
+            self.rw0[s] = fr * self.w0_f64[s];
+            self.rw1[s] = fr * self.w1_f64[s];
+            self.rw0_f32[s] = self.rw0[s] as f32;
+            self.rw1_f32[s] = self.rw1[s] as f32;
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn scatter_sanitized_run(
+    cache: &ZoneRunCache,
+    run: ZoneRun,
+    a_waves: &[f32; TOTAL_STRINGS],
+) -> (f64, f64) {
+    let (start, end, _, _) = run.bounds();
+    let (mut acc0, mut acc1) = (0.0_f64, 0.0_f64);
+    for ((&a_s, &c0), &c1) in a_waves[start..end]
+        .iter()
+        .zip(&cache.rw0[start..end])
+        .zip(&cache.rw1[start..end])
+    {
+        let safe_a = if a_s.is_finite() { f64::from(a_s) } else { 0.0 };
+        acc0 += c0 * safe_a;
+        acc1 += c1 * safe_a;
+    }
+    (acc0, acc1)
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn gather_sanitized_run(
+    cache: &ZoneRunCache,
+    run: ZoneRun,
+    b_waves: &mut [f32; TOTAL_STRINGS],
+    a_waves: &[f32; TOTAL_STRINGS],
+    two_vz0: f64,
+    two_vz1: f64,
+) {
+    let (start, end, _, _) = run.bounds();
+    for (((b_out, &a_s), &w0), &w1) in b_waves[start..end]
+        .iter_mut()
+        .zip(&a_waves[start..end])
+        .zip(&cache.w0_f64[start..end])
+        .zip(&cache.w1_f64[start..end])
+    {
+        if !b_out.is_finite() {
+            let safe_a = if a_s.is_finite() { f64::from(a_s) } else { 0.0 };
+            let fb = (w0 * two_vz0 + w1 * two_vz1 - safe_a) as f32;
+            *b_out = if fb.is_finite() { fb } else { 0.0 };
+        }
+    }
+}

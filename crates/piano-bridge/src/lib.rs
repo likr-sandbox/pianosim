@@ -33,143 +33,15 @@ pub use zone_proj::{
 };
 
 #[inline]
-const fn sanitize_sample_rate(sample_rate: f32) -> f32 {
+fn sanitize_sample_rate(sample_rate: f32) -> f32 {
     if sample_rate.is_finite() {
-        if sample_rate < 8_000.0 {
-            8_000.0
-        } else if sample_rate > 384_000.0 {
-            384_000.0
-        } else {
-            sample_rate
-        }
+        sample_rate.clamp(8_000.0, 384_000.0)
     } else {
         48_000.0
     }
 }
 
-const MAX_ZONE_RUNS: usize = 16;
-const _: () = assert!(TOTAL_STRINGS <= u8::MAX as usize);
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-struct ZoneRun(u8, u8, u8, u8);
-
-impl ZoneRun {
-    #[inline]
-    fn bounds(self) -> (usize, usize, usize, usize) {
-        let end = usize::from(self.1).min(TOTAL_STRINGS);
-        let mask = NUM_BRIDGE_ZONES - 1;
-        (
-            usize::from(self.0).min(end),
-            end,
-            usize::from(self.2) & mask,
-            usize::from(self.3) & mask,
-        )
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ZoneRunCache {
-    runs: [ZoneRun; MAX_ZONE_RUNS],
-    run_count: usize,
-    rw0: [f64; TOTAL_STRINGS],
-    rw1: [f64; TOTAL_STRINGS],
-    w0_f64: [f64; TOTAL_STRINGS],
-    w1_f64: [f64; TOTAL_STRINGS],
-}
-
-impl ZoneRunCache {
-    fn build(zone_weights: &[ZoneWeight; TOTAL_STRINGS], r0: &[f32; TOTAL_STRINGS]) -> Self {
-        let mut runs = [ZoneRun::default(); MAX_ZONE_RUNS];
-        let mut run_count = 0_usize;
-        let mut rw0 = [0.0_f64; TOTAL_STRINGS];
-        let mut rw1 = [0.0_f64; TOTAL_STRINGS];
-        let mut w0_f64 = [0.0_f64; TOTAL_STRINGS];
-        let mut w1_f64 = [0.0_f64; TOTAL_STRINGS];
-
-        for (s, (&(raw_z0, w0, raw_z1, w1), &r_s)) in zone_weights.iter().zip(r0).enumerate() {
-            let z0 = raw_z0 & ((NUM_BRIDGE_ZONES - 1) as u8);
-            let z1 = raw_z1 & ((NUM_BRIDGE_ZONES - 1) as u8);
-            let fw0 = f64::from(w0);
-            let fw1 = f64::from(w1);
-            let fr = f64::from(r_s);
-            w0_f64[s] = fw0;
-            w1_f64[s] = fw1;
-            rw0[s] = fr * fw0;
-            rw1[s] = fr * fw1;
-
-            let end = (s + 1) as u8;
-            if run_count > 0 && runs[run_count - 1].2 == z0 && runs[run_count - 1].3 == z1 {
-                runs[run_count - 1].1 = end;
-            } else if run_count < MAX_ZONE_RUNS {
-                runs[run_count] = ZoneRun(s as u8, end, z0, z1);
-                run_count += 1;
-            }
-        }
-
-        Self {
-            runs,
-            run_count,
-            rw0,
-            rw1,
-            w0_f64,
-            w1_f64,
-        }
-    }
-
-    fn update_resistances(&mut self, r0: &[f32; TOTAL_STRINGS]) {
-        for (s, &r_s) in r0.iter().enumerate() {
-            let fr = f64::from(r_s);
-            self.rw0[s] = fr * self.w0_f64[s];
-            self.rw1[s] = fr * self.w1_f64[s];
-        }
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn scatter_sanitized_run(
-    cache: &ZoneRunCache,
-    run: ZoneRun,
-    a_waves: &[f32; TOTAL_STRINGS],
-) -> (f64, f64) {
-    let (start, end, _, _) = run.bounds();
-    let (mut acc0, mut acc1) = (0.0_f64, 0.0_f64);
-    for ((&a_s, &c0), &c1) in a_waves[start..end]
-        .iter()
-        .zip(&cache.rw0[start..end])
-        .zip(&cache.rw1[start..end])
-    {
-        let safe_a = if a_s.is_finite() { f64::from(a_s) } else { 0.0 };
-        acc0 += c0 * safe_a;
-        acc1 += c1 * safe_a;
-    }
-    (acc0, acc1)
-}
-
-#[cold]
-#[inline(never)]
-fn gather_sanitized_run(
-    cache: &ZoneRunCache,
-    run: ZoneRun,
-    b_waves: &mut [f32; TOTAL_STRINGS],
-    a_waves: &[f32; TOTAL_STRINGS],
-    two_vz0: f64,
-    two_vz1: f64,
-) {
-    let (start, end, _, _) = run.bounds();
-    for (((b_out, &a_s), &w0), &w1) in b_waves[start..end]
-        .iter_mut()
-        .zip(&a_waves[start..end])
-        .zip(&cache.w0_f64[start..end])
-        .zip(&cache.w1_f64[start..end])
-    {
-        if !b_out.is_finite() {
-            let safe_a = if a_s.is_finite() { f64::from(a_s) } else { 0.0 };
-            let fb = (w0 * two_vz0 + w1 * two_vz1 - safe_a) as f32;
-            *b_out = if fb.is_finite() { fb } else { 0.0 };
-        }
-    }
-}
+use zone_proj::{gather_sanitized_run, scatter_sanitized_run, ZoneRunCache};
 
 #[inline]
 fn mat8_vec(
@@ -377,19 +249,27 @@ impl BridgeBank {
         let mut f_inc_str = [0.0_f64; NUM_BRIDGE_ZONES];
         for &run in &cache.runs[..cache.run_count] {
             let (start, end, z0, z1) = run.bounds();
-            let (mut acc0, mut acc1) = (0.0_f64, 0.0_f64);
-            for ((&a_s, &rw0), &rw1) in a_waves[start..end]
-                .iter()
-                .zip(&cache.rw0[start..end])
-                .zip(&cache.rw1[start..end])
-            {
-                let a = f64::from(a_s);
-                acc0 += rw0 * a;
-                acc1 += rw1 * a;
+            let (mut v0_acc, mut v1_acc) = (piano_simd::F32x4::zero(), piano_simd::F32x4::zero());
+            let mut i = start;
+            while i + 4 <= end {
+                let aw = piano_simd::F32x4::from_slice(&a_waves[i..i + 4]);
+                v0_acc =
+                    piano_simd::F32x4::from_slice(&cache.rw0_f32[i..i + 4]).mul_add(aw, v0_acc);
+                v1_acc =
+                    piano_simd::F32x4::from_slice(&cache.rw1_f32[i..i + 4]).mul_add(aw, v1_acc);
+                i += 4;
             }
-            if !(acc0.is_finite() && acc1.is_finite()) {
-                (acc0, acc1) = scatter_sanitized_run(cache, run, a_waves);
+            let (mut s0, mut s1) = (v0_acc.reduce_sum(), v1_acc.reduce_sum());
+            while i < end {
+                s0 += cache.rw0_f32[i] * a_waves[i];
+                s1 += cache.rw1_f32[i] * a_waves[i];
+                i += 1;
             }
+            let (acc0, acc1) = if s0.is_finite() && s1.is_finite() {
+                (f64::from(s0), f64::from(s1))
+            } else {
+                scatter_sanitized_run(cache, run, a_waves)
+            };
             f_inc_str[z0] += acc0;
             f_inc_str[z1] += acc1;
         }
@@ -454,18 +334,23 @@ impl BridgeBank {
             let (vz0, vz1) = (v_zone_f64[z0], v_zone_f64[z1]);
             let two_vz0 = if vz0.is_finite() { 2.0 * vz0 } else { 0.0 };
             let two_vz1 = if vz1.is_finite() { 2.0 * vz1 } else { 0.0 };
-            let mut all_finite = true;
-            for (((b_out, &a_s), &w0), &w1) in b_waves_out[start..end]
-                .iter_mut()
-                .zip(&a_waves[start..end])
-                .zip(&cache.w0_f64[start..end])
-                .zip(&cache.w1_f64[start..end])
-            {
-                let b = (w0 * two_vz0 + w1 * two_vz1 - f64::from(a_s)) as f32;
-                *b_out = b;
-                all_finite &= b.is_finite();
+            let tv0 = piano_simd::F32x4::splat(two_vz0 as f32);
+            let tv1 = piano_simd::F32x4::splat(two_vz1 as f32);
+            let mut i = start;
+            while i + 4 <= end {
+                let w0 = piano_simd::F32x4::from_slice(&cache.w0_f32[i..i + 4]);
+                let w1 = piano_simd::F32x4::from_slice(&cache.w1_f32[i..i + 4]);
+                let aw = piano_simd::F32x4::from_slice(&a_waves[i..i + 4]);
+                (w0.mul_add(tv0, w1 * tv1) - aw).write_to_slice(&mut b_waves_out[i..i + 4]);
+                i += 4;
             }
-            if !all_finite {
+            while i < end {
+                b_waves_out[i] = (cache.w0_f32[i] * (two_vz0 as f32)
+                    + cache.w1_f32[i] * (two_vz1 as f32))
+                    - a_waves[i];
+                i += 1;
+            }
+            if !b_waves_out[start..end].iter().all(|x| x.is_finite()) {
                 gather_sanitized_run(cache, run, b_waves_out, a_waves, two_vz0, two_vz1);
             }
         }
