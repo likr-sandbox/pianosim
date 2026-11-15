@@ -7,6 +7,8 @@ use alloc::vec::Vec;
 use core::f64::consts::TAU;
 use core::ops::{Add, Mul, Sub};
 
+use crate::aligned_buf::AlignedBuf;
+use crate::f32x4::F32x4;
 use crate::math::sin_cos_f64;
 
 /// Single-precision complex number with C-compatible `[re, im]` layout.
@@ -108,13 +110,15 @@ impl Mul for Complex {
 /// Precomputed in-place Cooley-Tukey Radix-2 complex FFT / IFFT plan.
 ///
 /// All heap allocations (bit-reversal swap pairs and `f64`-computed twiddle tables)
-/// occur once inside [`Radix2Fft::new`] / [`Radix2Fft::try_new`].
+/// occur once inside [`Radix2Fft::new`] / [`Radix2Fft::try_new`]. Stages with
+/// `half >= 4` execute 4 butterflies per [`F32x4`] SIMD iteration.
 #[derive(Clone, Debug)]
 pub struct Radix2Fft {
     len: usize,
     inv_len: f32,
     swap_pairs: Box<[(u32, u32)]>,
-    twiddles: Box<[Complex]>,
+    tw_re: AlignedBuf,
+    tw_im: AlignedBuf,
 }
 
 impl Radix2Fft {
@@ -143,14 +147,18 @@ impl Radix2Fft {
             }
         }
 
-        let mut twiddles = Vec::with_capacity(len.saturating_sub(1));
-        let mut half = 1usize;
+        // Stages `half = 1, 2` use exact trivial twiddles (`1` and `-i`); store `half >= 4`.
+        let simd_tw_len = len.saturating_sub(4);
+        let mut tw_re = Vec::with_capacity(simd_tw_len);
+        let mut tw_im = Vec::with_capacity(simd_tw_len);
+        let mut half = 4usize;
         while half < len {
             let step = half << 1;
             let base_angle = -TAU / (step as f64);
             for k in 0..half {
                 let (s, c) = sin_cos_f64(base_angle * (k as f64));
-                twiddles.push(Complex::new(c as f32, s as f32));
+                tw_re.push(c as f32);
+                tw_im.push(s as f32);
             }
             half = step;
         }
@@ -159,7 +167,8 @@ impl Radix2Fft {
             len,
             inv_len: 1.0 / (len as f32),
             swap_pairs: swap_pairs.into_boxed_slice(),
-            twiddles: twiddles.into_boxed_slice(),
+            tw_re: AlignedBuf::from_slice(&tw_re),
+            tw_im: AlignedBuf::from_slice(&tw_im),
         })
     }
 
@@ -190,20 +199,22 @@ impl Radix2Fft {
             buf.swap(i as usize, j as usize);
         }
 
-        let mut half = 1usize;
+        if self.len >= 2 {
+            stage_half1(buf);
+        }
+        if self.len >= 4 {
+            stage_half2(buf);
+        }
+
+        let tw_re = self.tw_re.as_slice();
+        let tw_im = self.tw_im.as_slice();
+        let mut half = 4usize;
         let mut tw_offset = 0usize;
         while half < self.len {
             let step = half << 1;
-            let stage_tw = &self.twiddles[tw_offset..tw_offset + half];
-            for chunk in buf.chunks_exact_mut(step) {
-                let (left, right) = chunk.split_at_mut(half);
-                for ((a, b), &w) in left.iter_mut().zip(right.iter_mut()).zip(stage_tw.iter()) {
-                    let t = w * *b;
-                    let u = *a;
-                    *a = u + t;
-                    *b = u - t;
-                }
-            }
+            let stage_re = &tw_re[tw_offset..tw_offset + half];
+            let stage_im = &tw_im[tw_offset..tw_offset + half];
+            stage_simd_half_ge_4(buf, half, step, stage_re, stage_im);
             tw_offset += half;
             half = step;
         }
@@ -229,6 +240,84 @@ impl Radix2Fft {
             c.re *= inv;
             c.im = -c.im * inv;
         }
+    }
+}
+
+#[inline]
+fn stage_half1(buf: &mut [Complex]) {
+    for pair in buf.chunks_exact_mut(2) {
+        let u = pair[0];
+        let v = pair[1];
+        pair[0] = u + v;
+        pair[1] = u - v;
+    }
+}
+
+#[inline]
+fn stage_half2(buf: &mut [Complex]) {
+    for quad in buf.chunks_exact_mut(4) {
+        let u0 = quad[0];
+        let v0 = quad[2];
+        quad[0] = u0 + v0;
+        quad[2] = u0 - v0;
+
+        let u1 = quad[1];
+        // Multiply `quad[3]` by `W_4^1 = -i`: `(re + i im) * (-i) = im - i re`.
+        let v1 = Complex::new(quad[3].im, -quad[3].re);
+        quad[1] = u1 + v1;
+        quad[3] = u1 - v1;
+    }
+}
+
+#[inline]
+fn stage_simd_half_ge_4(
+    buf: &mut [Complex],
+    half: usize,
+    step: usize,
+    tw_re: &[f32],
+    tw_im: &[f32],
+) {
+    debug_assert!(half >= 4 && half.is_multiple_of(4));
+    for chunk in buf.chunks_exact_mut(step) {
+        let (left, right) = chunk.split_at_mut(half);
+        let mut k = 0;
+        while k < half {
+            // SAFETY: `k + 4 <= half` (`half` is a multiple of 4), `tw_*` offsets are 16B aligned.
+            unsafe {
+                let wr = F32x4::load_aligned(tw_re.as_ptr().add(k));
+                let wi = F32x4::load_aligned(tw_im.as_ptr().add(k));
+
+                let l_ptr = left.as_mut_ptr().add(k).cast::<f32>();
+                let r_ptr = right.as_mut_ptr().add(k).cast::<f32>();
+
+                let (ar, ai) = load_complex4(l_ptr);
+                let (br, bi) = load_complex4(r_ptr);
+
+                let tr = wr * br - wi * bi;
+                let ti = wr.mul_add(bi, wi * br);
+
+                store_complex4(l_ptr, ar + tr, ai + ti);
+                store_complex4(r_ptr, ar - tr, ai - ti);
+            }
+            k += 4;
+        }
+    }
+}
+
+#[inline(always)]
+pub(crate) unsafe fn load_complex4(ptr: *const f32) -> (F32x4, F32x4) {
+    let c01 = unsafe { F32x4::load_unaligned(ptr) };
+    let c23 = unsafe { F32x4::load_unaligned(ptr.add(4)) };
+    let t0 = c01.unpack_lo(c23);
+    let t1 = c01.unpack_hi(c23);
+    (t0.unpack_lo(t1), t0.unpack_hi(t1))
+}
+
+#[inline(always)]
+pub(crate) unsafe fn store_complex4(ptr: *mut f32, re: F32x4, im: F32x4) {
+    unsafe {
+        re.unpack_lo(im).store_unaligned(ptr);
+        re.unpack_hi(im).store_unaligned(ptr.add(4));
     }
 }
 
