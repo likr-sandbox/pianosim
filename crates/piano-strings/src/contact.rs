@@ -459,12 +459,16 @@ pub(crate) fn render_subblock_coupled_core(
             step_coupled_tiles(&mut run, driver, &coupled_keys[..n_coupled], sub_l, sub_r);
         }
         for &k_u8 in &flush_keys[..n_flush] {
+            let key_damped = driver.damper_clearance_m(usize::from(k_u8)) <= 0.0;
             for s_idx in keys[usize::from(k_u8)].string_range.clone() {
-                if run.ports.may_be_nonzero[s_idx]
-                    && !flush_subnormals_range(run.soa, strings[s_idx].all_vecs())
-                {
-                    run.ports.clear_string_state(s_idx);
-                    run.sav.reset_string(s_idx);
+                if run.ports.may_be_nonzero[s_idx] {
+                    if !flush_subnormals_range(run.soa, strings[s_idx].all_vecs()) {
+                        run.ports.clear_string_state(s_idx);
+                        run.sav.reset_string(s_idx);
+                    } else if key_damped && run.ports.y_h[s_idx].abs() < 1e-6 {
+                        run.ports.struck_active[s_idx] = false;
+                        run.sav.reset_string(s_idx);
+                    }
                 }
             }
         }
