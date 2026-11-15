@@ -27,8 +27,8 @@ const ZONE_FREQ_BANDS_HZ: [(f64, f64); 6] = [
     (6_800.0, 12_000.0), // Zone 7 (12 modes)
 ];
 
-const DUPLEX_TARGET_R_PER_ZONE: f64 = 0.08;
-const DUPLEX_AUDIO_GAIN: f32 = 0.15;
+const DUPLEX_TARGET_R_PER_ZONE: f64 = 0.018;
+const DUPLEX_AUDIO_GAIN: f32 = 0.025;
 
 /// 64-mode SIMD coupled-form ZOH duplex scale resonator bank (`Zones 2..7`).
 #[derive(Clone, Debug)]
@@ -121,7 +121,7 @@ impl DuplexBank {
                 let t60 = if lossless {
                     f64::INFINITY
                 } else {
-                    2.6 / (1.0 + 0.08 * (f_hz * 1.0e-3))
+                    0.55 / (1.0 + 0.12 * (f_hz * 1.0e-3))
                 };
                 if let Some((df, sf)) = coupled_pole_f32(f_hz, safe_sr, t60) {
                     d_arr[lane] = df;
