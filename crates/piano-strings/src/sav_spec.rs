@@ -4,7 +4,8 @@ use core::f64::consts::{PI, TAU};
 
 use piano_simd::F32x4;
 use piano_spec::{
-    effective_string_f0_hz, partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec,
+    count_longitudinal_partials, count_transverse_partials, effective_string_f0_hz,
+    partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec, MAX_AUDIBLE_FREQ_HZ,
     NUM_KEYS, STEEL_YOUNGS_MODULUS_PA,
 };
 
@@ -176,10 +177,14 @@ impl SavStringSpec {
             0.0
         };
 
+        let v_modes = count_transverse_partials(f0_v, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ)
+            .min(entry.vert_vecs.len() * 4);
+        let h_modes = count_transverse_partials(f0_h, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ)
+            .min(entry.horiz_vecs.len() * 4);
         let (sigma_v, omega_sigma_v, nv_c) =
-            fill_pol_slopes(entry.vert_modes, f0_v, nyquist, &spec, gamma_s);
+            fill_pol_slopes(v_modes, f0_v, nyquist, &spec, gamma_s);
         let (sigma_h, omega_sigma_h, nh_c) =
-            fill_pol_slopes(entry.horiz_modes, f0_h, nyquist, &spec, gamma_s);
+            fill_pol_slopes(h_modes, f0_h, nyquist, &spec, gamma_s);
 
         let quarter_l = 0.25 * length_m;
         let inv_q = if quarter_l > 0.0 {
@@ -196,7 +201,10 @@ impl SavStringSpec {
         } else {
             0.0
         };
-        for m in 1..=entry.long_modes.min(MAX_PHANTOM_LONG_MODES) {
+        let l_modes = count_longitudinal_partials(k, spec.f_long_hz, MAX_AUDIBLE_FREQ_HZ)
+            .min(entry.long_vecs.len() * 4)
+            .min(MAX_PHANTOM_LONG_MODES);
+        for m in 1..=l_modes {
             let f_nom = (m as f64) * spec.f_long_hz;
             let f_init = long_init_freq_hz(k, spec.f_long_hz, m);
             if f_init > 0.0 && f_init < nyquist && f_nom < LONG_AA_CUTOFF_HZ {

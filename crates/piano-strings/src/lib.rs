@@ -14,6 +14,7 @@ pub(crate) mod bridge_kernels;
 pub(crate) mod bridge_port;
 pub(crate) mod bridge_sav;
 pub(crate) mod bridge_tails;
+mod bridge_zones;
 pub mod choir_map;
 pub mod contact;
 pub(crate) mod contact_ports;
@@ -24,6 +25,7 @@ pub(crate) mod sav_drift;
 pub(crate) mod sav_pair;
 pub(crate) mod sav_spec;
 pub(crate) mod sav_tile;
+mod voicing_update;
 pub mod zoh_kernel;
 
 pub use bridge_port::BridgePortDriver;
@@ -58,6 +60,7 @@ pub struct StringBank {
     sav_phantom_enabled: bool,
     soa_dirty: bool,
     bp_dirty: bool,
+    lossless: bool,
 }
 
 impl StringBank {
@@ -95,6 +98,7 @@ impl StringBank {
             sav_phantom_enabled: true,
             soa_dirty: false,
             bp_dirty: false,
+            lossless,
         }
     }
 
@@ -437,6 +441,7 @@ impl StringBank {
             true,
             &mut out_l[..frames],
             &mut out_r[..frames],
+            None,
         );
     }
 }

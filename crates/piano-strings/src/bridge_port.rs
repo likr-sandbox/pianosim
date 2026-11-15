@@ -168,7 +168,7 @@ pub(crate) struct BridgePorts {
     pub meta: [StringBridgeMeta; TOTAL_STRINGS],
 }
 
-fn count_prefix_modes(
+pub(crate) fn count_prefix_modes(
     key_idx: usize,
     modes: usize,
     f0: f64,
@@ -195,7 +195,7 @@ fn count_prefix_modes(
     n
 }
 
-fn fill_pol_beta(
+pub(crate) fn fill_pol_beta(
     out: &mut [f32],
     modes_in_prefix: usize,
     gain_64: f64,

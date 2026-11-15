@@ -117,3 +117,48 @@ fn subblock_kernel_matches_tiled_128_frames() {
         assert!((*a - *b).abs() < 1e-5);
     }
 }
+
+#[test]
+fn accum_soa_range_matches_single_sample_parity() {
+    let voicing = VoicingSpec::default();
+    let specs = build_scale_design(&voicing);
+    let map = ChoirMap::build_with_specs(&specs, &voicing);
+    let base_soa = ModalSoa::build(48_000.0, &voicing, &specs, &map);
+
+    for (s_idx, c_len) in [(0usize, 1usize), (10, 3), (48, 7), (120, 127), (229, 128)] {
+        let mut soa_fast = base_soa.clone();
+        let mut soa_ref = base_soa.clone();
+        let vr = map.strings()[s_idx].vert_vecs.clone();
+        inject_excitation(
+            &mut soa_fast.u.as_f32x4_slice_mut()[vr.clone()],
+            &soa_fast.b_exc.as_f32x4_slice()[vr.clone()],
+            2.25,
+        );
+        inject_excitation(
+            &mut soa_ref.u.as_f32x4_slice_mut()[vr.clone()],
+            &soa_ref.b_exc.as_f32x4_slice()[vr.clone()],
+            2.25,
+        );
+
+        let mut acc_fast = vec![F32x4::zero(); c_len];
+        accum_soa_range_in(&mut soa_fast, vr.clone(), &mut acc_fast);
+
+        let (u, v, d, s, c) = (
+            &mut soa_ref.u.as_f32x4_slice_mut()[vr.clone()],
+            &mut soa_ref.v.as_f32x4_slice_mut()[vr.clone()],
+            &soa_ref.d_coeff.as_f32x4_slice()[vr.clone()],
+            &soa_ref.s_coeff.as_f32x4_slice()[vr.clone()],
+            &soa_ref.c_bridge.as_f32x4_slice()[vr],
+        );
+        for acc_slot in &mut acc_fast {
+            let mut sum_ref = F32x4::zero();
+            for i in 0..u.len() {
+                (u[i], v[i]) = zoh_rotate(u[i], v[i], d[i], s[i]);
+                sum_ref = v[i].mul_add(c[i], sum_ref);
+            }
+            for (a, b) in acc_slot.to_array().iter().zip(sum_ref.to_array().iter()) {
+                assert!((*a - *b).abs() < 1e-6, "diff={} vs {}", a, b);
+            }
+        }
+    }
+}
