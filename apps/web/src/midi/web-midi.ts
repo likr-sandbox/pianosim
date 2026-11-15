@@ -38,6 +38,7 @@ export class WebMidiManager {
   private selectedInputId: string | null = null;
   private highResVelocityPrefix: number | null = null;
   private isInitialized = false;
+  private runningStatus: number = 0;
 
   constructor(host: WasmAudioHost, callbacks: WebMidiCallbacks = {}) {
     this.host = host;
@@ -134,34 +135,84 @@ export class WebMidiManager {
     let offset = 0;
 
     while (offset < bytes.length) {
-      const status = bytes[offset];
-      if ((status & 0x80) === 0) {
+      const b = bytes[offset];
+
+      // 1. System Real-Time messages (0xF8..0xFF) can appear anywhere and MUST NOT alter running status
+      if (b >= 0xf8) {
         offset++;
-        continue;
-      }
-      if (status >= 0xf8) {
-        offset += 1;
-        continue;
-      }
-      if (status === 0xf0) {
-        offset++;
-        while (offset < bytes.length && bytes[offset] !== 0xf7) {
-          offset++;
-        }
-        if (offset < bytes.length && bytes[offset] === 0xf7) {
-          offset++;
-        }
         continue;
       }
 
+      // 2. Determine status byte vs data byte under active running status
+      let status: number;
+      if ((b & 0x80) !== 0) {
+        // High bit is set: new status byte
+        status = b;
+        offset++;
+
+        // System Common messages (0xF0..0xF7) reset running status
+        if (status >= 0xf0) {
+          this.runningStatus = 0;
+          if (status === 0xf0) {
+            // SysEx: skip data bytes until EOX (0xF7) or end of buffer
+            while (offset < bytes.length && bytes[offset] !== 0xf7) {
+              offset++;
+            }
+            if (offset < bytes.length && bytes[offset] === 0xf7) {
+              offset++;
+            }
+          } else if (status === 0xf1 || status === 0xf3) {
+            // MTC Quarter Frame or Song Select: 1 data byte
+            if (offset < bytes.length && (bytes[offset] & 0x80) === 0) {
+              offset++;
+            }
+          } else if (status === 0xf2) {
+            // Song Position Pointer: 2 data bytes
+            if (offset < bytes.length && (bytes[offset] & 0x80) === 0) {
+              offset++;
+            }
+            if (offset < bytes.length && (bytes[offset] & 0x80) === 0) {
+              offset++;
+            }
+          }
+          // 0xF4..0xF7 have 0 data bytes
+          continue;
+        }
+
+        // Channel voice message (0x80..0xEF): update active running status
+        this.runningStatus = status;
+      } else {
+        // High bit is clear: data byte using running status
+        if (this.runningStatus === 0) {
+          // No active running status: discard orphan data byte
+          offset++;
+          continue;
+        }
+        status = this.runningStatus;
+        // Do NOT increment offset; offset already points to data byte 1
+      }
+
+      // 3. Process channel voice message (offset points to first data byte)
       const cmd = status & 0xf0;
 
       if (cmd === 0xb0) {
-        if (offset + 2 >= bytes.length) break;
-        const cc = bytes[offset + 1];
-        const val = bytes[offset + 2];
+        // Control Change: 2 data bytes
+        if (
+          offset + 1 >= bytes.length ||
+          (bytes[offset] & 0x80) !== 0 ||
+          (bytes[offset + 1] & 0x80) !== 0
+        ) {
+          if (offset < bytes.length && (bytes[offset] & 0x80) === 0) {
+            offset++;
+          }
+          continue;
+        }
+        const cc = bytes[offset] & 0x7f;
+        const val = bytes[offset + 1] & 0x7f;
+        offset += 2;
+
         if (cc === 88) {
-          this.highResVelocityPrefix = val & 0x7f;
+          this.highResVelocityPrefix = val;
         } else if (cc === 64) {
           const valU16 = u7ToU16(val);
           this.host.pedal(PEDAL_SUSTAIN, valU16, 0);
@@ -175,18 +226,34 @@ export class WebMidiManager {
           this.host.pedal(PEDAL_UNA_CORDA, valU16, 0);
           this.callbacks.onPedalChange?.(PEDAL_UNA_CORDA, val);
         }
-        offset += 3;
       } else if (cmd === 0x80) {
-        if (offset + 1 >= bytes.length) break;
-        const key = bytes[offset + 1] & 0x7f;
+        // Note Off: 2 data bytes (key, release vel) or 1 data byte (key)
+        if (offset >= bytes.length || (bytes[offset] & 0x80) !== 0) {
+          continue;
+        }
+        const key = bytes[offset] & 0x7f;
+        offset++;
+        if (offset < bytes.length && (bytes[offset] & 0x80) === 0) {
+          offset++; // Consume release velocity if present
+        }
         this.host.noteOff(key, 0, 0);
         this.highResVelocityPrefix = null;
         this.callbacks.onNoteRelease?.(key);
-        offset += offset + 2 < bytes.length && (bytes[offset + 2] & 0x80) === 0 ? 3 : 2;
       } else if (cmd === 0x90) {
-        if (offset + 2 >= bytes.length) break;
-        const key = bytes[offset + 1] & 0x7f;
-        const val7 = bytes[offset + 2] & 0x7f;
+        // Note On: 2 data bytes (key, velocity)
+        if (
+          offset + 1 >= bytes.length ||
+          (bytes[offset] & 0x80) !== 0 ||
+          (bytes[offset + 1] & 0x80) !== 0
+        ) {
+          if (offset < bytes.length && (bytes[offset] & 0x80) === 0) {
+            offset++;
+          }
+          continue;
+        }
+        const key = bytes[offset] & 0x7f;
+        const val7 = bytes[offset + 1] & 0x7f;
+        offset += 2;
 
         if (val7 === 0) {
           this.host.noteOff(key, 0, 0);
@@ -204,13 +271,21 @@ export class WebMidiManager {
           this.host.noteOn(key, velU16, 0);
           this.callbacks.onNotePress?.(key, val7);
         }
-        offset += 3;
       } else if (cmd === 0xc0 || cmd === 0xd0) {
-        offset += 2;
+        // Program Change / Channel Pressure: 1 data byte
+        if (offset < bytes.length && (bytes[offset] & 0x80) === 0) {
+          offset++;
+        }
       } else if (cmd === 0xa0 || cmd === 0xe0) {
-        offset += 3;
+        // Poly Pressure / Pitch Bend: 2 data bytes
+        if (offset < bytes.length && (bytes[offset] & 0x80) === 0) {
+          offset++;
+        }
+        if (offset < bytes.length && (bytes[offset] & 0x80) === 0) {
+          offset++;
+        }
       } else {
-        offset += 1;
+        offset++;
       }
     }
   }
@@ -219,5 +294,6 @@ export class WebMidiManager {
     this.midiAccess = null;
     this.selectedInputId = null;
     this.highResVelocityPrefix = null;
+    this.runningStatus = 0;
   }
 }

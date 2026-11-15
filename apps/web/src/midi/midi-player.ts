@@ -88,14 +88,17 @@ export class MidiPlayer {
 
       this.startAudioTime = audioNow;
       this.startScoreTime = this.playheadSeconds;
-      if (this.score) {
-        let idx = 0;
-        const events = this.score.events;
-        while (idx < events.length && events[idx].timeSeconds < this.playheadSeconds) {
-          idx++;
-        }
-        this.nextEventIndex = idx;
+
+      // If already at or beyond end of score, restart from beginning
+      if (
+        this.score &&
+        this.nextEventIndex >= this.score.events.length &&
+        this.playheadSeconds >= this.score.durationSeconds
+      ) {
+        this.seek(0);
+        this.startScoreTime = 0;
       }
+
       this.isPlayingState = true;
       this.callbacks.onStateChange?.(true);
 
