@@ -90,24 +90,41 @@ impl RealFft {
             return;
         }
 
-        for (dst, pair) in self.scratch.iter_mut().zip(input.chunks_exact(2)) {
-            *dst = Complex::new(pair[0], pair[1]);
-        }
-
-        self.cfft.forward(&mut self.scratch);
+        self.pack_forward(input);
 
         let z0 = self.scratch[0];
         spectrum[0] = Complex::new(z0.re + z0.im, 0.0);
         spectrum[half] = Complex::new(z0.re - z0.im, 0.0);
 
         for (k, slot) in spectrum.iter_mut().enumerate().take(half).skip(1) {
-            let a = self.scratch[k];
-            let b = self.scratch[half - k].conj();
-            let ze = (a + b).scale(0.5);
-            let diff = a - b;
-            // Z_o[k] = -i / 2 * (Z[k] - conj(Z[M - k]))
-            let zo = Complex::new(0.5 * diff.im, -0.5 * diff.re);
-            *slot = ze + self.half_twiddles[k] * zo;
+            *slot = unpack_fwd_bin(&self.scratch, &self.half_twiddles, k, half);
+        }
+    }
+
+    /// Computes the forward real-to-split-complex DFT (`input.len() == N`,
+    /// `out_re.len() >= N/2 + 1`, `out_im.len() >= N/2 + 1`).
+    ///
+    /// Zero allocations and panic-free in release builds.
+    pub fn forward_split(&mut self, input: &[f32], out_re: &mut [f32], out_im: &mut [f32]) {
+        let half = self.len / 2;
+        if input.len() != self.len || out_re.len() <= half || out_im.len() <= half {
+            debug_assert_eq!(input.len(), self.len);
+            debug_assert!(out_re.len() > half && out_im.len() > half);
+            return;
+        }
+
+        self.pack_forward(input);
+
+        let z0 = self.scratch[0];
+        out_re[0] = z0.re + z0.im;
+        out_im[0] = 0.0;
+        out_re[half] = z0.re - z0.im;
+        out_im[half] = 0.0;
+
+        for k in 1..half {
+            let bin = unpack_fwd_bin(&self.scratch, &self.half_twiddles, k, half);
+            out_re[k] = bin.re;
+            out_im[k] = bin.im;
         }
     }
 
@@ -128,21 +145,80 @@ impl RealFft {
         self.scratch[0] = Complex::new(0.5 * (dc + nyq), 0.5 * (dc - nyq));
 
         for k in 1..half {
-            let a = spectrum[k];
-            let b = spectrum[half - k].conj();
-            let ze = (a + b).scale(0.5);
-            let diff = a - b;
-            // i * Z_o[k] = conj(W_N^k) * (i / 2) * (X[k] - conj(X[M - k]))
-            let i_half_diff = Complex::new(-0.5 * diff.im, 0.5 * diff.re);
-            let i_zo = self.half_twiddles[k].conj() * i_half_diff;
-            self.scratch[k] = ze + i_zo;
+            self.scratch[k] = pack_inv_bin(
+                spectrum[k],
+                spectrum[half - k].conj(),
+                self.half_twiddles[k],
+            );
         }
 
-        self.cfft.inverse(&mut self.scratch);
+        self.unpack_inverse(output);
+    }
 
+    /// Computes the `1 / N`-normalized inverse split-complex-to-real DFT
+    /// (`in_re.len() >= N/2 + 1`, `in_im.len() >= N/2 + 1`, `output.len() == N`).
+    ///
+    /// Zero allocations and panic-free in release builds.
+    pub fn inverse_split(&mut self, in_re: &[f32], in_im: &[f32], output: &mut [f32]) {
+        let half = self.len / 2;
+        if in_re.len() <= half || in_im.len() <= half || output.len() != self.len {
+            debug_assert!(in_re.len() > half && in_im.len() > half);
+            debug_assert_eq!(output.len(), self.len);
+            return;
+        }
+
+        let dc = in_re[0];
+        let nyq = in_re[half];
+        self.scratch[0] = Complex::new(0.5 * (dc + nyq), 0.5 * (dc - nyq));
+
+        for k in 1..half {
+            let a = Complex::new(in_re[k], in_im[k]);
+            let b = Complex::new(in_re[half - k], -in_im[half - k]);
+            self.scratch[k] = pack_inv_bin(a, b, self.half_twiddles[k]);
+        }
+
+        self.unpack_inverse(output);
+    }
+
+    #[inline]
+    fn pack_forward(&mut self, input: &[f32]) {
+        for (dst, pair) in self.scratch.iter_mut().zip(input.chunks_exact(2)) {
+            *dst = Complex::new(pair[0], pair[1]);
+        }
+        self.cfft.forward(&mut self.scratch);
+    }
+
+    #[inline]
+    fn unpack_inverse(&mut self, output: &mut [f32]) {
+        self.cfft.inverse(&mut self.scratch);
         for (src, pair) in self.scratch.iter().zip(output.chunks_exact_mut(2)) {
             pair[0] = src.re;
             pair[1] = src.im;
         }
     }
+}
+
+#[inline(always)]
+fn unpack_fwd_bin(
+    scratch: &[Complex],
+    half_twiddles: &[Complex],
+    k: usize,
+    half: usize,
+) -> Complex {
+    let a = scratch[k];
+    let b = scratch[half - k].conj();
+    let ze = (a + b).scale(0.5);
+    let diff = a - b;
+    // Z_o[k] = -i / 2 * (Z[k] - conj(Z[M - k]))
+    let zo = Complex::new(0.5 * diff.im, -0.5 * diff.re);
+    ze + half_twiddles[k] * zo
+}
+
+#[inline(always)]
+fn pack_inv_bin(a: Complex, b_conj: Complex, tw: Complex) -> Complex {
+    let ze = (a + b_conj).scale(0.5);
+    let diff = a - b_conj;
+    // i * Z_o[k] = conj(W_N^k) * (i / 2) * (X[k] - conj(X[M - k]))
+    let i_half_diff = Complex::new(-0.5 * diff.im, 0.5 * diff.re);
+    ze + tw.conj() * i_half_diff
 }
