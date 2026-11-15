@@ -23,6 +23,7 @@ pub(crate) fn path_index(zone: usize, ch: usize) -> usize {
     zone * 2 + ch
 }
 
+#[derive(Clone)]
 pub(crate) struct ModalWorkspace {
     pub(crate) low_modes: Vec<PreparedMode>,
     pub(crate) high_modes: Vec<PreparedMode>,

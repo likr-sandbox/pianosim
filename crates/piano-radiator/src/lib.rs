@@ -13,6 +13,7 @@ mod math;
 mod mic_perspectives;
 mod modal_prepare;
 mod modal_synth;
+mod nupols_tier;
 mod partitioned_fft;
 mod subrate_upsample;
 
@@ -22,6 +23,7 @@ mod nupols_tests;
 mod tests;
 
 use alloc::vec::Vec;
+use core::fmt;
 use fir_head::{FirHead, HEAD_TAPS};
 use ir_synth::{ir_len_for_sample_rate, synthesize_irs, IrSynthScratch};
 use limiter::limit_stereo_buffers;
@@ -30,9 +32,14 @@ use partitioned_fft::NupolsTail;
 pub use piano_spec::{
     BodyPreset, LidState, ListenerPerspective, PresetDecodeError, PRESET_RADIATOR_ZONES,
 };
+use piano_spec::{PresetReducedPole, PRESET_BRIDGE_ZONES, PRESET_REDUCED_POLES};
+
+/// Deterministic physics-baked 9-zone concert-grand `PIANOBOD` asset.
+pub const CONCERT_GRAND_PRESET_BYTES: &[u8] = include_bytes!("../assets/concert_grand_v1.pbdy");
 
 /// Stage 4 acoustic radiator combining a 64-tap zero-latency `F32x4` direct FIR
 /// head with a zero-allocation Staggered MIMO NUPOLS convolution tail.
+#[derive(Clone)]
 pub struct RadiatorBank {
     preset: BodyPreset,
     sample_rate: f64,
@@ -43,7 +50,52 @@ pub struct RadiatorBank {
     tail: NupolsTail,
 }
 
+impl fmt::Debug for RadiatorBank {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RadiatorBank")
+            .field("sample_rate", &self.sample_rate)
+            .field("perspective", &self.perspective)
+            .field("lid_state", &self.lid_state)
+            .field("ir_len", &self.scratch.ir_len)
+            .field("modes", &self.preset.modes.len())
+            .finish()
+    }
+}
+
+fn empty_fallback_preset() -> BodyPreset {
+    BodyPreset {
+        y_inf: [1.8e-4; PRESET_BRIDGE_ZONES],
+        direct_zone_gain: [0.0; PRESET_RADIATOR_ZONES],
+        zone_pos_m: [[0.0; 3]; PRESET_RADIATOR_ZONES],
+        reduced_poles: [PresetReducedPole {
+            freq_hz: 100.0,
+            zeta: 0.02,
+            modal_mass_kg: 0.0,
+            zone_gains: [0.0; PRESET_BRIDGE_ZONES],
+        }; PRESET_REDUCED_POLES],
+        modes: Vec::new(),
+    }
+}
+
 impl RadiatorBank {
+    /// Construct a radiator bank from the embedded `concert_grand_v1.pbdy` preset
+    /// with default `Player` perspective and `Open` lid state.
+    pub fn new_concert_grand(sample_rate: f64) -> Self {
+        Self::new_concert_grand_with_space(sample_rate, ListenerPerspective::Player, LidState::Open)
+    }
+
+    /// Construct a radiator bank from the embedded `concert_grand_v1.pbdy` preset
+    /// with explicit listener perspective and lid state (panic-free decode).
+    pub fn new_concert_grand_with_space(
+        sample_rate: f64,
+        perspective: ListenerPerspective,
+        lid_state: LidState,
+    ) -> Self {
+        let preset = BodyPreset::decode(CONCERT_GRAND_PRESET_BYTES)
+            .unwrap_or_else(|_| empty_fallback_preset());
+        Self::from_preset_with_space(&preset, sample_rate, perspective, lid_state)
+    }
+
     /// Construct a radiator bank from a decoded `BodyPreset` using default
     /// `Player` perspective and `Open` lid state.
     pub fn from_preset(preset: &BodyPreset, sample_rate: f64) -> Self {
