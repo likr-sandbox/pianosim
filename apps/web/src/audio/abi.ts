@@ -14,6 +14,43 @@ export type PedalKind =
   | typeof PEDAL_UNA_CORDA
   | typeof PEDAL_SOSTENUTO;
 
+export const PERSPECTIVE_PLAYER = 0 as const;
+export const PERSPECTIVE_CLOSE = 1 as const;
+export const PERSPECTIVE_HALL = 2 as const;
+export const PERSPECTIVE_BINAURAL = 3 as const;
+
+export type ListenerPerspective =
+  | typeof PERSPECTIVE_PLAYER
+  | typeof PERSPECTIVE_CLOSE
+  | typeof PERSPECTIVE_HALL
+  | typeof PERSPECTIVE_BINAURAL;
+
+export const LID_CLOSED = 0 as const;
+export const LID_HALF = 1 as const;
+export const LID_OPEN = 2 as const;
+
+export type LidState =
+  | typeof LID_CLOSED
+  | typeof LID_HALF
+  | typeof LID_OPEN;
+
+// Voicing parameter limits and nominal defaults (from piano_spec::voicing)
+export const HAMMER_HARDNESS_MIN = 0.0;
+export const HAMMER_HARDNESS_MAX = 1.0;
+export const HAMMER_HARDNESS_DEFAULT = 0.5;
+
+export const UNISON_DETUNE_MIN = 0.0;
+export const UNISON_DETUNE_MAX = 4.0;
+export const UNISON_DETUNE_DEFAULT = 1.0;
+
+export const STRETCH_TUNING_MIN = 0.0;
+export const STRETCH_TUNING_MAX = 2.0;
+export const STRETCH_TUNING_DEFAULT = 1.0;
+
+export const STRING_SCALE_MIN = 0.5;
+export const STRING_SCALE_MAX = 2.0;
+export const STRING_SCALE_DEFAULT = 1.0;
+
 export type EngineStatus = 'locked' | 'initializing' | 'ready' | 'error';
 
 export interface PianoWasmExports extends WebAssembly.Exports {
@@ -24,6 +61,14 @@ export interface PianoWasmExports extends WebAssembly.Exports {
   piano_note_off(ctx: number, midiKey: number, releaseVelU16: number, sampleOffset: number): void;
   piano_pedal(ctx: number, pedalKind: number, valueU16: number, sampleOffset: number): void;
   piano_all_notes_off(ctx: number): void;
+  piano_set_voicing(
+    ctx: number,
+    hammerHardness: number,
+    unisonDetune: number,
+    stretch: number,
+    lengthScale: number,
+  ): number;
+  piano_set_space(ctx: number, perspective: number, lid: number): number;
   piano_render(ctx: number, frames: number): void;
   piano_out_l_ptr(ctx: number): number;
   piano_out_r_ptr(ctx: number): number;
@@ -36,6 +81,14 @@ export type WorkletInboundMessage =
   | { type: 'noteOff'; midiKey: number; releaseVelU16: number; sampleOffset: number }
   | { type: 'pedal'; pedalKind: PedalKind; valueU16: number; sampleOffset: number }
   | { type: 'allNotesOff' }
+  | {
+      type: 'setVoicing';
+      hammerHardness: number;
+      unisonDetune: number;
+      stretchTuning: number;
+      stringLengthScale: number;
+    }
+  | { type: 'setSpace'; perspective: ListenerPerspective; lidState: LidState }
   | { type: 'destroy' };
 
 export interface TelemetrySnapshot {
@@ -45,6 +98,8 @@ export interface TelemetrySnapshot {
   readonly rmsMono: number;
   readonly callbackUs: number;
   readonly maxCallbackUs: number;
+  readonly p50Us: number;
+  readonly p99Us: number;
   readonly blockCount: number;
 }
 
@@ -62,6 +117,8 @@ export interface PianoDiagnostics {
   readonly workletNode: AudioWorkletNode | null;
   readonly telemetry: TelemetrySnapshot;
   readonly telemetryBlocksReceived: number;
+  readonly p50Us: number;
+  readonly p99Us: number;
   readonly error: string | null;
 }
 

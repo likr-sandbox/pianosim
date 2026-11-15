@@ -7,6 +7,8 @@ const EMPTY_TELEMETRY: TelemetrySnapshot = {
   rmsMono: 0,
   callbackUs: 0,
   maxCallbackUs: 0,
+  p50Us: 0,
+  p99Us: 0,
   blockCount: 0,
 };
 
@@ -20,6 +22,14 @@ declare global {
 
 /** Tracks live AudioWorklet telemetry and updates `window.__PIANO_DIAG__`. */
 export class TelemetryClient {
+  private static readonly HISTORY_CAPACITY = 64;
+  private readonly callbackHistory = new Float32Array(TelemetryClient.HISTORY_CAPACITY);
+  private readonly sortScratch = new Float32Array(TelemetryClient.HISTORY_CAPACITY);
+  private historyCount = 0;
+  private historyIndex = 0;
+  private p50Us = 0;
+  private p99Us = 0;
+
   private status: EngineStatus = 'locked';
   private sampleRate = 0;
   private contextState: AudioContextState | 'none' = 'none';
@@ -53,6 +63,8 @@ export class TelemetryClient {
       workletNode: this.workletNode,
       telemetry: this.telemetry,
       telemetryBlocksReceived: this.telemetryBlocksReceived,
+      p50Us: this.p50Us,
+      p99Us: this.p99Us,
       error: this.error,
     };
   }
@@ -83,7 +95,26 @@ export class TelemetryClient {
   }
 
   updateTelemetry(snapshot: TelemetrySnapshot): void {
-    this.telemetry = snapshot;
+    const us = snapshot.callbackUs;
+    this.callbackHistory[this.historyIndex] = us;
+    this.historyIndex = (this.historyIndex + 1) % TelemetryClient.HISTORY_CAPACITY;
+    if (this.historyCount < TelemetryClient.HISTORY_CAPACITY) {
+      this.historyCount += 1;
+    }
+
+    const n = this.historyCount;
+    this.sortScratch.set(this.callbackHistory.subarray(0, n));
+    const sorted = this.sortScratch.subarray(0, n);
+    sorted.sort();
+
+    this.p50Us = sorted[Math.floor(n * 0.5)];
+    this.p99Us = sorted[Math.min(n - 1, Math.floor(n * 0.99))];
+
+    this.telemetry = {
+      ...snapshot,
+      p50Us: this.p50Us,
+      p99Us: this.p99Us,
+    };
     this.telemetryBlocksReceived += 1;
     this.emit();
   }
@@ -97,6 +128,10 @@ export class TelemetryClient {
     this.workletNode = null;
     this.telemetry = EMPTY_TELEMETRY;
     this.telemetryBlocksReceived = 0;
+    this.historyCount = 0;
+    this.historyIndex = 0;
+    this.p50Us = 0;
+    this.p99Us = 0;
     this.error = null;
     this.emit();
   }

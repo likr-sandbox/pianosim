@@ -1,5 +1,7 @@
 import {
   WORKLET_PROCESSOR_NAME,
+  type LidState,
+  type ListenerPerspective,
   type PedalKind,
   type WorkletInboundMessage,
   type WorkletOutboundMessage,
@@ -52,6 +54,14 @@ export class WasmAudioHost {
     return this.workletNode !== null && this.telemetry.getDiagnostics().status === 'ready';
   }
 
+  getAudioContext(): AudioContext | null {
+    return this.audioContext;
+  }
+
+  getAnalyser(): AnalyserNode | null {
+    return this.analyser;
+  }
+
   async unlock(): Promise<void> {
     if (this.isReady() && this.audioContext) {
       if (this.audioContext.state === 'suspended') {
@@ -83,6 +93,29 @@ export class WasmAudioHost {
 
   allNotesOff(): void {
     this.postToWorklet({ type: 'allNotesOff' });
+  }
+
+  setVoicing(
+    hammerHardness: number,
+    unisonDetune: number,
+    stretchTuning: number,
+    stringLengthScale: number,
+  ): void {
+    this.postToWorklet({
+      type: 'setVoicing',
+      hammerHardness,
+      unisonDetune,
+      stretchTuning,
+      stringLengthScale,
+    });
+  }
+
+  setSpace(perspective: ListenerPerspective, lidState: LidState): void {
+    this.postToWorklet({
+      type: 'setSpace',
+      perspective,
+      lidState,
+    });
   }
 
   async dispose(): Promise<void> {
@@ -233,6 +266,8 @@ export class WasmAudioHost {
             rmsMono: msg.rmsMono,
             callbackUs: msg.callbackUs,
             maxCallbackUs: msg.maxCallbackUs,
+            p50Us: msg.p50Us,
+            p99Us: msg.p99Us,
             blockCount: msg.blockCount,
           });
         }

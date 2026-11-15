@@ -34,6 +34,8 @@ const REQUIRED_EXPORTS: ReadonlyArray<keyof PianoWasmExports> = [
   'piano_note_off',
   'piano_pedal',
   'piano_all_notes_off',
+  'piano_set_voicing',
+  'piano_set_space',
   'piano_render',
   'piano_out_l_ptr',
   'piano_out_r_ptr',
@@ -197,6 +199,28 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       case 'allNotesOff':
         exports.piano_all_notes_off(ctx);
         break;
+      case 'setVoicing': {
+        const hardness = Number.isFinite(msg.hammerHardness)
+          ? Math.max(0.0, Math.min(1.0, msg.hammerHardness))
+          : 0.5;
+        const detune = Number.isFinite(msg.unisonDetune)
+          ? Math.max(0.0, Math.min(4.0, msg.unisonDetune))
+          : 1.0;
+        const stretch = Number.isFinite(msg.stretchTuning)
+          ? Math.max(0.0, Math.min(2.0, msg.stretchTuning))
+          : 1.0;
+        const scale = Number.isFinite(msg.stringLengthScale)
+          ? Math.max(0.5, Math.min(2.0, msg.stringLengthScale))
+          : 1.0;
+        exports.piano_set_voicing(ctx, hardness, detune, stretch, scale);
+        break;
+      }
+      case 'setSpace': {
+        const persp = (msg.perspective >>> 0) & 0x3;
+        const lid = (msg.lidState >>> 0) & 0x3;
+        exports.piano_set_space(ctx, persp, lid);
+        break;
+      }
       case 'destroy':
         exports.piano_destroy(ctx);
         this.ctx = 0;
@@ -272,6 +296,8 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
         rmsMono: mem[tBase + 3],
         callbackUs: this.lastCallbackUs,
         maxCallbackUs: this.maxCallbackUs,
+        p50Us: 0,
+        p99Us: 0,
         blockCount: this.blockCount,
       });
       this.maxCallbackUs = 0;
