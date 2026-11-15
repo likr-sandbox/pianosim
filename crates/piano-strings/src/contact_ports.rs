@@ -141,7 +141,9 @@ pub(crate) fn strike_phi(key_idx: usize, partial_index: usize) -> f64 {
     let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
     let beta = 0.137 - 0.042 * x;
     let s = sin_cos_f64((partial_index as f64) * PI * beta).0;
-    s / (1.0 + (0.25 + 4.40 * x) * ((partial_index - 1) as f64))
+    let x_tr = (x - (48.0 / 87.0)).max(0.0);
+    let slope = 0.25 + 4.40 * x + 240.0 * x_tr / (1.0 + 10.0 * x_tr);
+    s / (1.0 + slope * ((partial_index - 1) as f64))
 }
 
 #[inline]
@@ -238,16 +240,7 @@ pub(crate) fn populate_string_ports(
             let f_j = partial_frequency_hz(f0, spec.inharmonicity_b, j);
             if f_j > 0.0 && f_j < nyquist {
                 let omega = TAU * f_j;
-                let ph_mult = if (50..=52).contains(&k) {
-                    if j == 1 {
-                        4.0
-                    } else {
-                        0.1
-                    }
-                } else {
-                    1.0
-                };
-                let ph = hs * strike_phi(k, j) * ph_mult;
+                let ph = hs * strike_phi(k, j);
                 let (bh, ah) = ((b_gain * ph) as f32, (ph / (omega * gamma_k)) as f32);
                 bh_s[base + (j - 1)] = bh;
                 ah_s[base + (j - 1)] = ah;
