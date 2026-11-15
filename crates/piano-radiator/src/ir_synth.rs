@@ -30,6 +30,7 @@ pub(crate) fn ir_len_for_sample_rate(sample_rate: f64) -> usize {
 
 /// Reusable scratch storage so `reconfigure_space` allocates zero heap memory
 /// once `ir_len` is initialized.
+#[derive(Clone)]
 pub(crate) struct IrSynthScratch {
     pub(crate) ir_len: usize,
     pub(crate) ir_flat: Vec<f32>,

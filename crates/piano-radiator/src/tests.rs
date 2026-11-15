@@ -419,21 +419,6 @@ fn ir_synth_completes_under_40ms_on_1500_modes() {
         best_synth_ms < 40.0 && best_ms < 40.0,
         "1500-mode IR synth took {best_synth_ms:.2} ms / reconfigure {best_ms:.2} ms (>= 40.0 ms)"
     );
-
-    // Measure steady-state 128-sample runtime throughput (1024 blocks = 131,072 samples).
-    let block = [[0.01_f32; PRESET_RADIATOR_ZONES]; 128];
-    let mut out_l = [0.0_f32; 128];
-    let mut out_r = [0.0_f32; 128];
-    let mut timings_us = Vec::with_capacity(1_024);
-    for _ in 0..1_024 {
-        let t0 = std::time::Instant::now();
-        bank.process_block(&block, &mut out_l, &mut out_r);
-        timings_us.push(t0.elapsed().as_secs_f64() * 1_000_000.0);
-    }
-    timings_us.sort_by(|a, b| a.total_cmp(b));
-    let mean_us = timings_us.iter().sum::<f64>() / (timings_us.len() as f64);
-    let p99_us = timings_us[(timings_us.len() * 99) / 100];
-    eprintln!("RadiatorBank 128-sample runtime @ 48 kHz: mean={mean_us:.1} us, p99={p99_us:.1} us");
 }
 
 #[test]

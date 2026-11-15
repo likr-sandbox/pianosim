@@ -1,3 +1,4 @@
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use piano_spec::{
@@ -5,7 +6,10 @@ use piano_spec::{
     PRESET_BRIDGE_ZONES, PRESET_RADIATOR_ZONES, PRESET_REDUCED_POLES,
 };
 
-use crate::{ir_synth::ir_len_for_sample_rate, partitioned_fft::NupolsTail, RadiatorBank};
+use crate::{
+    ir_synth::ir_len_for_sample_rate, partitioned_fft::NupolsTail, RadiatorBank,
+    CONCERT_GRAND_PRESET_BYTES,
+};
 
 pub(crate) fn test_preset(num_modes: usize) -> BodyPreset {
     let zone_pos_m = [
@@ -121,7 +125,7 @@ fn nupols_matches_direct_convolution_below_minus_100db() {
         LidState::Open,
     );
 
-    // Total length > `24,000` (IR length) AND > `16,384` (ring size) to cover all 7 tiers + wraps.
+    // Total length > `24,000` (IR length) AND > `16,384` (ring size) to cover all 4 tiers + wraps.
     let total_samples = 26_000;
     let mut inputs = vec![[0.0_f32; PRESET_RADIATOR_ZONES]; total_samples];
     let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -142,9 +146,7 @@ fn nupols_matches_direct_convolution_below_minus_100db() {
 
     let mut out_l = vec![0.0_f32; total_samples];
     let mut out_r = vec![0.0_f32; total_samples];
-    let uneven_blocks = [
-        1, 3, 7, 13, 31, 63, 64, 65, 100, 127, 128, 129, 255, 300, 512, 41,
-    ];
+    let uneven_blocks = [1, 7, 64, 128, 256, 513, 3, 13, 31, 63, 127, 300, 41];
     let mut pos = 0;
     let mut b_idx = 0;
     while pos < total_samples {
@@ -256,47 +258,37 @@ fn reset_immediately_zeros_state_and_repeats_cleanly() {
 
 #[test]
 fn staggered_schedule_is_strictly_collision_free_on_128_sample_blocks() {
-    // Verify mathematical stagger schedule across `128 * 128 = 16,384` samples:
-    // At every 64-sample slot `m >= 1`, at most one tier >= 128 runs.
-    // At every 128-sample block `b`, at most one large tier >= 256 runs.
-    for b in 0..256_usize {
-        let mut large_tiers_in_128 = 0;
+    // Verify 4-tier 4x-growth schedule over `128` 128-sample blocks (`256` 64-sample slots):
+    // - Tier 3 (`B=4096`) fires at most ONCE across any 128-sample callback (`sub` spaced by 4).
+    // - Tier 2 (`B=1024`) IFFTs (`sub16 in {12, 13}`) never coincide with Tier 3 (`sub64 & 3 == 3`).
+    let mut tier3_ops_total = 0;
+    for b in 0..128_usize {
+        let mut tier3_in_block = 0;
         for half in 0..2_usize {
             let m = 2 * b + half + 1;
-            let mut active_ge_128 = 0;
-            // Tier specs `(block_size, phi_slots, split_phase)` matching `TIER_CONFIGS`.
-            let tiers = [
-                (128_usize, 1_usize, false),
-                (256, 2, false),
-                (512, 4, false),
-                (1024, 8, false),
-                (2048, 16, false),
-                (4096, 32, true),
-            ];
-            for &(bs, phi, is_split) in &tiers {
-                let p = bs / 64;
-                let fires = if is_split {
-                    (m >= p && (m & (p - 1)) == 0) || (m > phi && (m & (p - 1)) == phi)
-                } else {
-                    m >= p + phi && (m & (p - 1)) == phi
-                };
-                if fires {
-                    active_ge_128 += 1;
-                    if bs >= 256 {
-                        large_tiers_in_128 += 1;
-                    }
-                }
-            }
+            let sub16 = m & 15;
+            let sub64 = m & 63;
+            let tier2_ifft = m >= 16 && (sub16 == 12 || sub16 == 13);
+            let tier3_op = m >= 64
+                && matches!(
+                    sub64,
+                    3 | 7 | 11 | 15 | 19 | 23 | 27 | 31 | 35 | 39 | 43 | 47 | 51 | 55 | 59
+                );
             assert!(
-                active_ge_128 <= 1,
-                "collision in 64-sample slot m={m}: {active_ge_128} tiers >= 128 fired"
+                !(tier2_ifft && tier3_op),
+                "Tier 2 IFFT collided with Tier 3 8192-pt op at slot m={m}"
             );
+            if tier3_op {
+                tier3_in_block += 1;
+                tier3_ops_total += 1;
+            }
         }
         assert!(
-            large_tiers_in_128 <= 1,
-            "collision in 128-sample block b={b}: {large_tiers_in_128} large tiers fired"
+            tier3_in_block <= 1,
+            "multiple Tier 3 8192-pt ops in 128-sample block b={b}"
         );
     }
+    assert!(tier3_ops_total > 0);
 }
 
 #[test]
@@ -317,13 +309,43 @@ fn arbitrary_block_sizes_and_single_sample_parity() {
         bank_a.process_block(&frames[n..n + 1], &mut la[n..n + 1], &mut ra[n..n + 1]);
     }
 
+    let sizes = [1, 7, 64, 128, 256, 513];
+    let mut bank_c = RadiatorBank::from_preset(&preset, 44_100.0);
+    let mut lc = vec![0.0_f32; len];
+    let mut rc = vec![0.0_f32; len];
+    let (mut pos, mut idx) = (0, 0);
+    while pos < len {
+        let bs = sizes[idx % sizes.len()].min(len - pos);
+        bank_c.process_block(
+            &frames[pos..pos + bs],
+            &mut lc[pos..pos + bs],
+            &mut rc[pos..pos + bs],
+        );
+        pos += bs;
+        idx += 1;
+    }
+
     let mut lb = vec![0.0_f32; len + 16];
     let mut rb = vec![0.0_f32; len + 16];
     bank_b.process_block(&frames, &mut lb, &mut rb);
 
     for i in 0..len {
-        assert!((la[i] - lb[i]).abs() < 1.0e-5, "L mismatch at {i}");
-        assert!((ra[i] - rb[i]).abs() < 1.0e-5, "R mismatch at {i}");
+        assert!(
+            (la[i] - lb[i]).abs() < 1.0e-5,
+            "L single vs batch mismatch at {i}"
+        );
+        assert!(
+            (ra[i] - rb[i]).abs() < 1.0e-5,
+            "R single vs batch mismatch at {i}"
+        );
+        assert!(
+            (lc[i] - lb[i]).abs() < 1.0e-5,
+            "L chunked vs batch mismatch at {i}"
+        );
+        assert!(
+            (rc[i] - rb[i]).abs() < 1.0e-5,
+            "R chunked vs batch mismatch at {i}"
+        );
     }
     assert!(lb[len..].iter().all(|&x| x == 0.0));
     assert!(rb[len..].iter().all(|&x| x == 0.0));
@@ -331,4 +353,67 @@ fn arbitrary_block_sizes_and_single_sample_parity() {
     let ir_len = ir_len_for_sample_rate(44_100.0);
     assert_eq!(bank_a.ir_len_samples(), ir_len);
     let _tail = NupolsTail::new(256);
+}
+
+#[test]
+fn concert_grand_init_clone_debug_and_d1_runtime_budget() {
+    let decoded = BodyPreset::decode(CONCERT_GRAND_PRESET_BYTES).expect("valid baked preset");
+    assert!(decoded.modes.len() > 1_000);
+
+    let mut bank_a = RadiatorBank::new_concert_grand(48_000.0);
+    let mut bank_b = bank_a.clone();
+    let dbg_str = format!("{bank_a:?}");
+    assert!(dbg_str.contains("RadiatorBank") && dbg_str.contains("48000"));
+
+    let _alt_space = RadiatorBank::new_concert_grand_with_space(
+        48_000.0,
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+    );
+
+    let mut stim = vec![[0.0_f32; PRESET_RADIATOR_ZONES]; 256];
+    stim[0][2] = 0.25;
+    stim[71][5] = -0.18;
+    let (mut la, mut ra, mut lb, mut rb) = (
+        vec![0.0; 256],
+        vec![0.0; 256],
+        vec![0.0; 256],
+        vec![0.0; 256],
+    );
+    bank_a.process_block(&stim[..128], &mut la[..128], &mut ra[..128]);
+    bank_a.process_block(&stim[128..], &mut la[128..], &mut ra[128..]);
+    bank_b.process_block(&stim[..128], &mut lb[..128], &mut rb[..128]);
+    bank_b.process_block(&stim[128..], &mut lb[128..], &mut rb[128..]);
+    assert!(la
+        .iter()
+        .zip(lb.iter())
+        .all(|(a, b)| (a - b).abs() < 1.0e-7));
+    assert!(ra
+        .iter()
+        .zip(rb.iter())
+        .all(|(a, b)| (a - b).abs() < 1.0e-7));
+    assert!(la[0].abs() > 1.0e-4);
+
+    // Warm 64 blocks before timing 1,024 128-sample blocks @ 48 kHz.
+    let block = [[0.01_f32; PRESET_RADIATOR_ZONES]; 128];
+    let mut out_l = [0.0_f32; 128];
+    let mut out_r = [0.0_f32; 128];
+    for _ in 0..64 {
+        bank_a.process_block(&block, &mut out_l, &mut out_r);
+    }
+    let mut timings_us = Vec::with_capacity(1_024);
+    for _ in 0..1_024 {
+        let t0 = std::time::Instant::now();
+        bank_a.process_block(&block, &mut out_l, &mut out_r);
+        timings_us.push(t0.elapsed().as_secs_f64() * 1_000_000.0);
+    }
+    timings_us.sort_by(|a, b| a.total_cmp(b));
+    let mean_us = timings_us.iter().sum::<f64>() / (timings_us.len() as f64);
+    let p99_us = timings_us[(timings_us.len() * 99) / 100];
+    eprintln!("RadiatorBank new_concert_grand 128-sample @ 48 kHz: mean={mean_us:.1} us, p99={p99_us:.1} us");
+    #[cfg(not(debug_assertions))]
+    assert!(
+        p99_us < 250.0,
+        "RadiatorBank D1 p99 {p99_us:.1} us exceeded 250.0 us budget"
+    );
 }
