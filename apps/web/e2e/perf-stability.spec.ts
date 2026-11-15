@@ -68,12 +68,21 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
       }, { timeout: 3000 })
       .toBeLessThan(1866.7);
 
-    // Verify telemetry HUD callback display and lack of critical overload alert
-    const hudP50El = page.getByTestId('hud-p50');
-    if ((await hudP50El.count()) > 0) {
-      const p50Val = parseFloat((await hudP50El.textContent()) ?? '0');
-      expect(p50Val).toBeLessThan(1866.7);
-    }
+    // Verify telemetry HUD p99 callback display satisfies D1 budget (< 1,866.7 us @ 48 kHz)
+    // Polling allows the 32-snapshot rolling history (~2.7s) to purge initial strike transients
+    // so steady-state sustained 20-voice polyphony cleanly satisfies the D1 budget
+    await expect
+      .poll(
+        async () => {
+          const text = await page.getByTestId('hud-p99').textContent();
+          const val = parseFloat(text ?? '');
+          return Number.isFinite(val) && val > 0 ? val : Infinity;
+        },
+        { timeout: 5000 },
+      )
+      .toBeLessThan(1866.7);
+
+    // Verify absence of critical overload alert once steady-state p99 has stabilized
     const alertEl = page.getByTestId('hud-alert');
     if ((await alertEl.count()) > 0) {
       await expect(alertEl).not.toHaveClass(/is-overloaded|alert-critical/);
