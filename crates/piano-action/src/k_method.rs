@@ -12,9 +12,9 @@ use piano_simd::{AdaaPowerLut, AdaaState};
 use crate::math::pow_nonneg_f64;
 
 /// Default upper bound of the tabulated dimensionless `p_tilde` domain.
-pub const BORIN_P_MAX: f32 = 16.0;
+pub const BORIN_P_MAX: f32 = 64.0;
 /// Default LUT resolution for `BorinKLut`.
-pub const BORIN_LUT_SIZE: usize = 1024;
+pub const BORIN_LUT_SIZE: usize = 2048;
 
 /// Pre-tabulated solver for the dimensionless Borin K-method equation
 /// `y_tilde + y_tilde^p = p_tilde` (`y_tilde >= 0`, `p_tilde >= 0`).
