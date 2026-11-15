@@ -36,6 +36,7 @@ pub(crate) struct FirHead {
     coeffs_r_rev: [[F32x4; HEAD_VECS]; PRESET_RADIATOR_ZONES],
     history: [AlignedRing; PRESET_RADIATOR_ZONES],
     head: usize,
+    zone_active: [usize; PRESET_RADIATOR_ZONES],
 }
 
 impl FirHead {
@@ -45,6 +46,7 @@ impl FirHead {
             coeffs_r_rev: [[F32x4::zero(); HEAD_VECS]; PRESET_RADIATOR_ZONES],
             history: [AlignedRing([0.0; RING_STORAGE]); PRESET_RADIATOR_ZONES],
             head: 0,
+            zone_active: [0; PRESET_RADIATOR_ZONES],
         }
     }
 
@@ -85,6 +87,7 @@ impl FirHead {
             self.history[z].0.fill(0.0);
             z += 1;
         }
+        self.zone_active.fill(0);
         self.head = 0;
     }
 
@@ -119,11 +122,26 @@ impl FirHead {
 
             let mut z = 0;
             while z < PRESET_RADIATOR_ZONES {
+                let s0 = if f0[z].is_finite() { f0[z] } else { 0.0 };
+                let s1 = if f1[z].is_finite() { f1[z] } else { 0.0 };
+                let s2 = if f2[z].is_finite() { f2[z] } else { 0.0 };
+                let s3 = if f3[z].is_finite() { f3[z] } else { 0.0 };
+
                 let ring = &mut self.history[z].0;
-                write_ring_sample(ring, p0, if f0[z].is_finite() { f0[z] } else { 0.0 });
-                write_ring_sample(ring, p1, if f1[z].is_finite() { f1[z] } else { 0.0 });
-                write_ring_sample(ring, p2, if f2[z].is_finite() { f2[z] } else { 0.0 });
-                write_ring_sample(ring, p3, if f3[z].is_finite() { f3[z] } else { 0.0 });
+                write_ring_sample(ring, p0, s0);
+                write_ring_sample(ring, p1, s1);
+                write_ring_sample(ring, p2, s2);
+                write_ring_sample(ring, p3, s3);
+
+                if s0 != 0.0 || s1 != 0.0 || s2 != 0.0 || s3 != 0.0 {
+                    self.zone_active[z] = HEAD_TAPS + 4;
+                }
+
+                if self.zone_active[z] == 0 {
+                    z += 1;
+                    continue;
+                }
+                self.zone_active[z] = self.zone_active[z].saturating_sub(4);
 
                 let win = &ring[w + RING_HIST_OFFSET..w + RING_HIST_OFFSET + HEAD_TAPS + 4];
                 let cl = &self.coeffs_l_rev[z];
@@ -174,6 +192,16 @@ impl FirHead {
                 let x = if raw.is_finite() { raw } else { 0.0 };
                 let ring = &mut self.history[z].0;
                 write_ring_sample(ring, w, x);
+
+                if x != 0.0 {
+                    self.zone_active[z] = HEAD_TAPS + 4;
+                }
+
+                if self.zone_active[z] == 0 {
+                    z += 1;
+                    continue;
+                }
+                self.zone_active[z] = self.zone_active[z].saturating_sub(1);
 
                 let win = &ring[w + RING_HIST_OFFSET..w + RING_HIST_OFFSET + HEAD_TAPS];
                 let cl = &self.coeffs_l_rev[z];

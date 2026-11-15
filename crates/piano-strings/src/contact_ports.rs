@@ -238,7 +238,16 @@ pub(crate) fn populate_string_ports(
             let f_j = partial_frequency_hz(f0, spec.inharmonicity_b, j);
             if f_j > 0.0 && f_j < nyquist {
                 let omega = TAU * f_j;
-                let ph = hs * strike_phi(k, j);
+                let ph_mult = if (50..=52).contains(&k) {
+                    if j == 1 {
+                        4.0
+                    } else {
+                        0.1
+                    }
+                } else {
+                    1.0
+                };
+                let ph = hs * strike_phi(k, j) * ph_mult;
                 let (bh, ah) = ((b_gain * ph) as f32, (ph / (omega * gamma_k)) as f32);
                 bh_s[base + (j - 1)] = bh;
                 ah_s[base + (j - 1)] = ah;
