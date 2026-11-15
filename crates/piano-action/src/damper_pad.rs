@@ -48,6 +48,24 @@ pub struct DamperPadBank {
     slots: [DamperStringSlot; DAMPER_PAD_SLOTS],
 }
 
+fn fill_damper_key_coeffs(
+    voicing: &VoicingSpec,
+    c_nom_key: &mut [f32; DAMPED_KEYS],
+    f_scale_key: &mut [f32; DAMPED_KEYS],
+) {
+    let specs = build_scale_design(voicing);
+    for k in 0..DAMPED_KEYS {
+        let p = specs[k];
+        let m_wire = p.linear_density_kg_m * p.speaking_length_m;
+        let z0 = 2.0 * m_wire * p.f0_et_hz;
+        // Scale viscous damper by string mass with wave-impedance cap to avoid node-pinning.
+        let c_target = (DAMPER_C_PER_MASS * m_wire).min(6.0 * z0);
+        c_nom_key[k] = c_target as f32;
+        // Normalized Stulov nonlinear contact impedance boost proportional to tension/mass.
+        f_scale_key[k] = (0.06 * DAMPER_C_PER_MASS * m_wire) as f32;
+    }
+}
+
 impl DamperPadBank {
     /// Initializes damper pad LUT and static per-key mechanical parameters.
     #[must_use]
@@ -55,20 +73,10 @@ impl DamperPadBank {
         let sr = f64::from(sample_rate.max(8_000.0));
         let a_damp_felt = exp_f64(-1.0 / (TAU_DAMP_FELT_S * sr)) as f32;
         let lut = AdaaPowerLut::new(DAMPER_EXPONENT_P, DAMPER_LUT_X_MAX, DAMPER_LUT_SIZE);
-        let specs = build_scale_design(voicing);
 
         let mut c_nom_key = [0.0_f32; DAMPED_KEYS];
         let mut f_scale_key = [0.0_f32; DAMPED_KEYS];
-        for k in 0..DAMPED_KEYS {
-            let p = specs[k];
-            let m_wire = p.linear_density_kg_m * p.speaking_length_m;
-            let z0 = 2.0 * m_wire * p.f0_et_hz;
-            // Scale viscous damper by string mass with wave-impedance cap to avoid node-pinning.
-            let c_target = (DAMPER_C_PER_MASS * m_wire).min(6.0 * z0);
-            c_nom_key[k] = c_target as f32;
-            // Normalized Stulov nonlinear contact impedance boost proportional to tension/mass.
-            f_scale_key[k] = (0.06 * DAMPER_C_PER_MASS * m_wire) as f32;
-        }
+        fill_damper_key_coeffs(voicing, &mut c_nom_key, &mut f_scale_key);
 
         Self {
             lut,
@@ -77,6 +85,11 @@ impl DamperPadBank {
             f_scale_key,
             slots: [DamperStringSlot::default(); DAMPER_PAD_SLOTS],
         }
+    }
+
+    /// Updates per-key damper mechanical impedance coefficients in-place without reallocating.
+    pub fn update_voicing_in_place(&mut self, voicing: &VoicingSpec) {
+        fill_damper_key_coeffs(voicing, &mut self.c_nom_key, &mut self.f_scale_key);
     }
 
     /// Resets all 460 V/H per-string ADAA and Stulov relaxation slots to zero.
@@ -264,5 +277,23 @@ mod tests {
             let fh_ref = isolated_h.step_damper_sample(k, slot_h, yh, vh, 0.08, -3.0e-4);
             assert_eq!(fh_dual.to_bits(), fh_ref.to_bits());
         }
+    }
+
+    #[test]
+    fn update_voicing_in_place_updates_damper_coeffs_and_matches_fresh_bank() {
+        let mut voicing = VoicingSpec::default();
+        let mut bank = DamperPadBank::new(48_000.0, &voicing);
+        voicing.string_length_scale = 1.15;
+        bank.update_voicing_in_place(&voicing);
+        let fresh = DamperPadBank::new(48_000.0, &voicing);
+
+        for k in [0_usize, 24, 48, 69] {
+            assert!((bank.c_nom_key[k] - fresh.c_nom_key[k]).abs() < 1e-6);
+            assert!((bank.f_scale_key[k] - fresh.f_scale_key[k]).abs() < 1e-6);
+        }
+        assert_ne!(
+            bank.c_nom_key[39].to_bits(),
+            DamperPadBank::new(48_000.0, &VoicingSpec::default()).c_nom_key[39].to_bits()
+        );
     }
 }

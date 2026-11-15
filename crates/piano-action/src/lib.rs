@@ -15,6 +15,7 @@ use piano_spec::{PedalKind, VoicingSpec, NUM_KEYS};
 pub mod damper_pad;
 pub mod felt_stulov;
 pub mod k_method;
+pub mod keybed;
 mod math;
 pub mod oversample;
 pub mod pedals;
@@ -30,6 +31,7 @@ mod tests_hammer;
 use damper_pad::DamperPadBank;
 use felt_stulov::{FeltSharedCoeffs, FeltState, KeyFeltSpec};
 use k_method::{BorinKLut, BORIN_LUT_SIZE, BORIN_P_MAX};
+use keybed::KeybedBank;
 use oversample::{DecimationFir16, HammerOversampleState};
 use pedals::PedalBank;
 use shank_timoshenko::{velocity_from_u16, ShankParams};
@@ -78,6 +80,7 @@ pub struct ActionBank {
     decimation_fir: DecimationFir16,
     pedals: PedalBank,
     damper_pad: DamperPadBank,
+    keybed: KeybedBank,
     keys: Box<[KeyActionSlot]>,
 }
 
@@ -104,6 +107,7 @@ impl ActionBank {
             decimation_fir: DecimationFir16::new(),
             pedals: PedalBank::new(sr),
             damper_pad: DamperPadBank::new(sr, voicing),
+            keybed: KeybedBank::new(sr),
             keys: keys.into_boxed_slice(),
         }
     }
@@ -115,10 +119,11 @@ impl ActionBank {
         self.sample_rate
     }
 
-    /// Resets hammers, dampers, pedals, and Stulov compaction memory to initial rest.
+    /// Resets hammers, dampers, pedals, keybed, and Stulov compaction memory to initial rest.
     pub fn reset(&mut self) {
         self.pedals.reset();
         self.damper_pad.reset();
+        self.keybed.reset();
         for slot in self.keys.iter_mut() {
             slot.hammer.reset();
             slot.felt_state.reset();
@@ -139,6 +144,7 @@ impl ActionBank {
             return;
         }
         self.pedals.note_on(key_idx);
+        self.keybed.note_on(key_idx, velocity_u16);
         let slot = &mut self.keys[key_idx];
         if !self.memory_enabled {
             slot.felt_state.reset();
@@ -281,6 +287,23 @@ impl ActionBank {
         )
     }
 
+    /// Advances active keybed rail impacts by one host sample, returning the total
+    /// Stage 4 Zone 8 mechanical keybed bottoming force (`N`).
+    #[inline]
+    pub fn step_keybed_force_sample(&mut self) -> f32 {
+        self.keybed.step_sample()
+    }
+
+    /// Updates felt stiffness/scaling and damper pad impedance smoothly in-place
+    /// for `voicing` with zero heap allocations, zero locks, and zero panics.
+    pub fn update_voicing_in_place(&mut self, voicing: &VoicingSpec) {
+        let sr = f64::from(self.sample_rate);
+        for (key_idx, slot) in self.keys.iter_mut().enumerate() {
+            slot.felt_spec.update_voicing_in_place(key_idx, sr, voicing);
+        }
+        self.damper_pad.update_voicing_in_place(voicing);
+    }
+
     #[cfg(test)]
     pub(crate) fn set_shank_flex_enabled(&mut self, key_idx: usize, enabled: bool) {
         if let Some(slot) = self.keys.get_mut(key_idx) {
@@ -409,5 +432,63 @@ mod escapement_tests {
                 let _ = dur_off_b;
             }
         }
+    }
+
+    #[test]
+    fn keybed_and_voicing_update_work_in_place_on_action_bank() {
+        let nominal = VoicingSpec::default();
+        let mut bank = ActionBank::new(48_000.0, &nominal);
+        assert_eq!(bank.step_keybed_force_sample(), 0.0);
+        bank.note_on(48, u7_to_u16(1) - 1);
+        assert_eq!(bank.step_keybed_force_sample(), 0.0);
+
+        bank.note_on(48, u7_to_u16(96));
+        for _ in 0..300 {
+            assert_eq!(bank.step_keybed_force_sample(), 0.0);
+        }
+        let peak_kb = (0..300).fold(0.0_f32, |m, _| m.max(bank.step_keybed_force_sample()));
+        assert!(peak_kb > 0.0);
+        bank.note_on(48, u7_to_u16(96));
+        bank.reset();
+        assert_eq!(bank.step_keybed_force_sample(), 0.0);
+
+        let orig_p = bank.keys[48].felt_spec.exponent_p;
+        let strike_stats = |b: &mut ActionBank| -> (f32, f32) {
+            b.reset();
+            let mut s = TestModalString::new(48, 48_000.0, &nominal);
+            b.note_on(48, 51_602);
+            let mut pulse = vec![0.0_f32; 256];
+            for out in &mut pulse {
+                let (y, v) = s.strike_port();
+                let f = b.step_hammer_sample(48, y, v, s.r_port_strike);
+                *out = f;
+                s.step_forces(f, 0.0);
+            }
+            let pk = pulse.iter().copied().fold(0.0_f32, f32::max);
+            let dur = pulse.iter().filter(|&&f| f > 0.05 * pk).count() as f32;
+            let (cent, _) = spectral_centroid_and_band(&pulse, 48_000.0, 100.0, 20_000.0);
+            (dur, cent)
+        };
+
+        let (dur_nom, cent_nom) = strike_stats(&mut bank);
+        let soft = VoicingSpec {
+            hammer_hardness: 0.1,
+            ..VoicingSpec::default()
+        };
+        let hard = VoicingSpec {
+            hammer_hardness: 0.9,
+            ..VoicingSpec::default()
+        };
+        bank.update_voicing_in_place(&soft);
+        assert_eq!(bank.keys[48].felt_spec.exponent_p, orig_p);
+        let (dur_soft, cent_soft) = strike_stats(&mut bank);
+        bank.update_voicing_in_place(&hard);
+        assert_eq!(bank.keys[48].felt_spec.exponent_p, orig_p);
+        let (dur_hard, cent_hard) = strike_stats(&mut bank);
+        assert!(dur_hard < dur_soft && cent_hard > cent_soft);
+
+        bank.update_voicing_in_place(&nominal);
+        let (dur_restored, cent_restored) = strike_stats(&mut bank);
+        assert!((dur_restored - dur_nom).abs() <= 1.0 && (cent_restored - cent_nom).abs() < 1e-2);
     }
 }
