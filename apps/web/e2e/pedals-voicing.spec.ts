@@ -121,7 +121,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     await page.waitForTimeout(350);
     const normal = await sampleDestinationAudio(page);
     await c5Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(350);
+    await expectAudioDecay(page, normal.rms);
 
     // Strike with Una Corda engaged
     await page.getByTestId('pedal-una-corda').click();
