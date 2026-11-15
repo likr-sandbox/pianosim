@@ -5,7 +5,8 @@ pub mod ring_ipc;
 
 pub use exports::{
     piano_all_notes_off, piano_destroy, piano_init, piano_note_off, piano_note_on, piano_out_l_ptr,
-    piano_out_r_ptr, piano_pedal, piano_render, piano_telemetry_ptr,
+    piano_out_r_ptr, piano_pedal, piano_render, piano_set_space, piano_set_voicing,
+    piano_telemetry_ptr,
 };
 pub use ring_ipc::{WasmContext, MAX_BLOCK, TELEMETRY_LEN};
 
@@ -87,5 +88,38 @@ mod tests {
         assert!(piano_out_r_ptr(ptr::null()).is_null());
         assert!(piano_telemetry_ptr(ptr::null()).is_null());
         piano_destroy(ptr::null_mut());
+    }
+
+    #[test]
+    fn c_abi_voicing_and_space_safety() {
+        let ctx = piano_init(48_000.0);
+        assert!(!ctx.is_null());
+
+        // Valid voicing update
+        assert_eq!(piano_set_voicing(ctx, 0.8, 1.5, 1.2, 0.95), 0);
+
+        // Non-finite and extreme values clamped safely without panicking
+        assert_eq!(
+            piano_set_voicing(ctx, f32::NAN, f32::INFINITY, -10.0, 50.0),
+            0
+        );
+
+        // Valid space update
+        assert_eq!(piano_set_space(ctx, 0, 2), 0); // Player, Open
+        assert_eq!(piano_set_space(ctx, 3, 0), 0); // BinauralHrtf, Closed
+
+        // Invalid discriminants rejected with -2
+        assert_eq!(piano_set_space(ctx, 4, 0), -2);
+        assert_eq!(piano_set_space(ctx, 0, 3), -2);
+        assert_eq!(piano_set_space(ctx, 999, 999), -2);
+
+        // Null safety
+        assert_eq!(
+            piano_set_voicing(core::ptr::null_mut(), 0.5, 1.0, 1.0, 1.0),
+            -1
+        );
+        assert_eq!(piano_set_space(core::ptr::null_mut(), 0, 0), -1);
+
+        piano_destroy(ctx);
     }
 }

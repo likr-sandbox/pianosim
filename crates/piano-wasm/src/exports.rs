@@ -133,3 +133,53 @@ pub extern "C" fn piano_telemetry_ptr(ctx: *const WasmContext) -> *const f32 {
     let ctx = unsafe { &*ctx };
     ctx.telemetry_ptr()
 }
+
+/// Sets voicing parameters with 20 ms exponential smoothing.
+///
+/// Returns 0 on success, or -1 if ctx is null.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_set_voicing(
+    ctx: *mut WasmContext,
+    hammer_hardness: f32,
+    unison_detune: f32,
+    stretch: f32,
+    length_scale: f32,
+) -> i32 {
+    if ctx.is_null() {
+        return -1;
+    }
+    // SAFETY: `ctx` is a valid non-null pointer from `piano_init`.
+    let ctx = unsafe { &mut *ctx };
+    ctx.set_voicing(hammer_hardness, unison_detune, stretch, length_scale);
+    0
+}
+
+/// Sets listener perspective and piano lid state with 8 ms raised-cosine crossfade.
+///
+/// Returns 0 on success, -1 if ctx is null, or -2 if perspective or lid discriminant is invalid.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_set_space(ctx: *mut WasmContext, perspective: u32, lid: u32) -> i32 {
+    if ctx.is_null() {
+        return -1;
+    }
+    let p_u8 = match u8::try_from(perspective) {
+        Ok(v) => v,
+        Err(_) => return -2,
+    };
+    let l_u8 = match u8::try_from(lid) {
+        Ok(v) => v,
+        Err(_) => return -2,
+    };
+    let Some(persp) = piano_spec::ListenerPerspective::from_u8(p_u8) else {
+        return -2;
+    };
+    let Some(lid_state) = piano_spec::LidState::from_u8(l_u8) else {
+        return -2;
+    };
+    // SAFETY: `ctx` is a valid non-null pointer from `piano_init`.
+    let ctx = unsafe { &mut *ctx };
+    ctx.set_space(persp, lid_state);
+    0
+}

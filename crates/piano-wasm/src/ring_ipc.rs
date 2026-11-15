@@ -1,7 +1,7 @@
 //! Linear-memory zero-allocation IPC context for `AudioWorkletGlobalScope`.
 
 use piano_engine::{EventQueue, PianoEngine};
-use piano_spec::{EventKind, PedalKind, SampleEvent};
+use piano_spec::{EventKind, LidState, ListenerPerspective, PedalKind, SampleEvent};
 
 /// Maximum audio frames rendered per `piano_render` call.
 pub const MAX_BLOCK: usize = 512;
@@ -82,6 +82,25 @@ impl WasmContext {
             self.events.clear();
             let _ = self.events.push(ev);
         }
+    }
+
+    /// Updates voicing targets for smooth real-time parameter interpolation.
+    #[inline]
+    pub fn set_voicing(
+        &mut self,
+        hammer_hardness: f32,
+        unison_detune: f32,
+        stretch: f32,
+        length_scale: f32,
+    ) {
+        self.engine
+            .set_voicing(hammer_hardness, unison_detune, stretch, length_scale);
+    }
+
+    /// Reconfigures spatial listening perspective and lid opening state.
+    #[inline]
+    pub fn set_space(&mut self, perspective: ListenerPerspective, lid: LidState) {
+        self.engine.set_space(perspective, lid);
     }
 
     /// Renders up to `MAX_BLOCK` frames into the internal L/R buffers, updates
