@@ -7,15 +7,21 @@ struct MockAction {
     weights: [[f32; 3]; NUM_KEYS],
     hammer_left: [usize; NUM_KEYS],
     hammer_peak_n: [f32; NUM_KEYS],
+    damper_cap: f32,
 }
 
 impl MockAction {
     fn all_open() -> Self {
+        Self::with_damper_cap(0.7)
+    }
+
+    fn with_damper_cap(damper_cap: f32) -> Self {
         Self {
             clearances: [0.01; NUM_KEYS],
             weights: [[1.0; 3]; NUM_KEYS],
             hammer_left: [0; NUM_KEYS],
             hammer_peak_n: [0.0; NUM_KEYS],
+            damper_cap,
         }
     }
 
@@ -68,8 +74,12 @@ impl KeyActionDriver for MockAction {
             return 0.0;
         }
         let c_raw = 300.0 * pen.min(4.0);
-        // Cap well below 2.0/rp (vd_post = 0 node-pinning) so waves absorb rather than reflect.
-        let c = if rp > 0.0 { c_raw.min(0.7 / rp) } else { c_raw };
+        // Cap well below 2.0/rp (vd_post = 0 node-pinning) in Test 2; 2.4/rp in regression test.
+        let c = if rp > 0.0 {
+            c_raw.min(self.damper_cap / rp)
+        } else {
+            c_raw
+        };
         (-c * vd) / (1.0 + 0.5 * rp * c)
     }
 }
@@ -359,5 +369,63 @@ fn c4_trichord_bridge_coupling_produces_two_stage_and_phase_dependent_decay() {
     assert!(
         (-prompt_in) > (-prompt_anti) * 1.25,
         "expected coherent prompt decay faster than anti-phase: in={prompt_in:.2} dB/s, anti={prompt_anti:.2} dB/s"
+    );
+}
+
+struct RigidBridge {
+    r0: [f32; TOTAL_STRINGS],
+    zw: [(u8, f32, u8, f32); TOTAL_STRINGS],
+}
+
+impl BridgePortDriver for RigidBridge {
+    fn port_resistances(&self) -> &[f32; TOTAL_STRINGS] {
+        &self.r0
+    }
+    fn zone_weights(&self) -> &[(u8, f32, u8, f32); TOTAL_STRINGS] {
+        &self.zw
+    }
+    fn step_bridge_sample(
+        &mut self,
+        a_waves: &[f32; TOTAL_STRINGS],
+        _: &[f32; 8],
+        b_waves_out: &mut [f32; TOTAL_STRINGS],
+        zone_out: &mut [f32; 8],
+    ) -> (f32, f32) {
+        for (bw, &aw) in b_waves_out.iter_mut().zip(a_waves.iter()) {
+            *bw = -aw;
+        }
+        zone_out.fill(0.0);
+        (0.0, 0.0)
+    }
+}
+
+#[test]
+fn dry_c4_note_off_rigid_bridge_2_4_cap_drops_over_60_db_within_250_ms() {
+    let sr = 48_000.0_f32;
+    let voicing = VoicingSpec::default();
+    let mut bank = StringBank::new(sr, &voicing);
+    let mut action = MockAction::with_damper_cap(2.4);
+    let mut bridge = RigidBridge {
+        r0: *bank.bridge_port_resistances(),
+        zw: [(0, 1.0, 0, 0.0); TOTAL_STRINGS],
+    };
+    let (mut l, mut r) = (vec![0.0_f32; 128], vec![0.0_f32; 128]);
+    action.strike(39, 12.0, 12);
+    for _ in 0..8 {
+        bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut l, &mut r);
+    }
+    let e_pre = bank.key_sav_energy_joules(39);
+    assert!(e_pre > 0.0 && e_pre.is_finite());
+
+    // Engage damper (`clearances[39] = -0.002`) for 93 blocks = 11,904 samples (< 250 ms @ 48 kHz).
+    action.clearances[39] = -0.002;
+    for _ in 0..93 {
+        bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut l, &mut r);
+    }
+    let e_post = bank.key_sav_energy_joules(39);
+    let ratio = e_post / e_pre;
+    assert!(
+        ratio < 1.0e-6,
+        "expected dry C4 NoteOff > 60 dB drop (<1e-6) within 250 ms, got ratio={ratio:.3e} (e_pre={e_pre:.3e}, e_post={e_post:.3e})"
     );
 }

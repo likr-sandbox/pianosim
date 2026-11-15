@@ -1,23 +1,20 @@
-//! Stage 2 <-> Stage 3 tail/damper/hammer helpers (`CHUNK = 128`, `TILE = 8`).
+//! Stage 2 <-> Stage 3 tail/damper/hammer helpers (`CHUNK = 128`, `1x` per-sample active contact).
 
 use core::ops::Range;
 
-use piano_simd::F32x4;
 use piano_spec::{NUM_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_port::BridgePorts;
 use crate::choir_map::{KeyMapEntry, StringMapEntry};
 use crate::contact::{eval_hammer_choir, sample_damper, KeyActionDriver};
-use crate::contact_ports::{
-    refresh_prefix_damp_ports, refresh_string_ports, ContactPorts, DAMPER_CLEAR_THRESHOLD_M,
-};
+use crate::contact_ports::{refresh_string_ports, ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
 use crate::longitudinal::LongitudinalBank;
 use crate::modal_soa::ModalSoa;
 use crate::sav_drift::SavBank;
 use crate::zoh_kernel::{
-    accum_string_tile_in, inject_excitation, step_string_modes, step_string_subblock,
-    step_string_subblock_3, zoh_rotate, TILE,
+    step_string_modes, step_string_subblock, step_string_subblock_3, zoh_rotate,
 };
+use piano_simd::F32x4;
 
 pub(crate) const SUB: usize = 128;
 
@@ -25,9 +22,8 @@ pub(crate) const SUB: usize = 128;
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum KeyCat {
     Uncoupled = 0,
-    DampedStruck = 1,
-    DampedSymp = 2,
-    HammerActive = 3,
+    DampedSymp = 1,
+    ActiveContact = 2,
 }
 
 #[derive(Copy, Clone)]
@@ -47,16 +43,13 @@ impl HammerStepForce {
 
 pub(crate) struct ChunkPlan {
     pub key_cat: [KeyCat; NUM_KEYS],
+    pub key_has_hammer: [bool; NUM_KEYS],
     pub was_nz: [bool; TOTAL_STRINGS],
-    pub hammer_keys: [u8; NUM_KEYS],
-    pub damped_keys: [u8; NUM_KEYS],
-    pub damped_symp_keys: [u8; NUM_KEYS],
+    pub active_keys: [u8; NUM_KEYS],
     pub sav_long_strings: [u8; TOTAL_STRINGS],
     pub hammer_forces: [HammerStepForce; TOTAL_STRINGS],
     pub zone_tail_n: [[f32; 8]; SUB],
-    pub n_h: usize,
-    pub n_d: usize,
-    pub n_ds: usize,
+    pub n_a: usize,
     pub n_sl: usize,
 }
 
@@ -206,158 +199,6 @@ pub(crate) fn step_uncoupled_tails(
     }
 }
 
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn apply_string_damper_pair(
-    r: &mut BridgeRun<'_>,
-    driver: &mut impl KeyActionDriver,
-    k: usize,
-    s_idx: usize,
-    v_range: Range<usize>,
-    h_range: Range<usize>,
-    rv: f32,
-    rh: f32,
-    yc_min: f32,
-    tile_f: f32,
-) {
-    let fv = driver.step_damper_sample(
-        k,
-        s_idx * 2,
-        r.ports.y_dv[s_idx],
-        r.ports.v_dv[s_idx],
-        tile_f * rv,
-        yc_min,
-    );
-    let fh = driver.step_damper_sample(
-        k,
-        s_idx * 2 + 1,
-        r.ports.y_dh[s_idx],
-        r.ports.v_dh[s_idx],
-        tile_f * rh,
-        yc_min,
-    );
-    for (vec_r, raw_f) in [(v_range, fv), (h_range, fh)] {
-        let imp = if raw_f.is_finite() {
-            tile_f * raw_f
-        } else {
-            0.0
-        };
-        if imp != 0.0 {
-            inject_excitation(
-                &mut r.soa.u.as_f32x4_slice_mut()[vec_r.clone()],
-                &r.ports.b_damp.as_f32x4_slice()[vec_r],
-                imp,
-            );
-        }
-    }
-    r.ports.ports_synced[s_idx] = false;
-}
-
-pub(crate) fn step_damped_tile(
-    r: &mut BridgeRun<'_>,
-    driver: &mut impl KeyActionDriver,
-    plan: &mut ChunkPlan,
-    t_base: usize,
-    t_len: usize,
-    sub_l: &mut [f32],
-    sub_r: &mut [f32],
-) {
-    let (tile_f, full) = (t_len as f32, t_len == TILE);
-    for idx in 0..plan.n_d {
-        let k = usize::from(plan.damped_keys[idx]);
-        let yc_min = r.ports.y_clear_scratch[k][t_base..t_base + t_len]
-            .iter()
-            .copied()
-            .fold(f32::MAX, f32::min);
-        let apply_damp = yc_min < DAMPER_CLEAR_THRESHOLD_M;
-        for s_idx in r.keys[k].string_range.clone() {
-            let entry = &r.strings[s_idx];
-            if apply_damp && r.ports.may_be_nonzero[s_idx] {
-                if !r.ports.ports_synced[s_idx] {
-                    refresh_string_ports(r.soa, r.ports, s_idx, entry);
-                }
-                apply_string_damper_pair(
-                    r,
-                    driver,
-                    k,
-                    s_idx,
-                    entry.vert_vecs.clone(),
-                    entry.horiz_vecs.clone(),
-                    r.ports.r_port_damp_v[s_idx],
-                    r.ports.r_port_damp_h[s_idx],
-                    yc_min,
-                    tile_f,
-                );
-            }
-            let m = &r.bridge_ports.meta[s_idx];
-            let l_tail = (entry.long_vecs.start + sav_long_vecs(r, s_idx))..entry.long_vecs.end;
-            let (mut acc, mut acc_l) = ([F32x4::zero(); TILE], [F32x4::zero(); TILE]);
-            let step_rng = if full {
-                accum_string_tile_in::<true>
-            } else {
-                accum_string_tile_in::<false>
-            };
-            step_rng(r.soa, m.v_tail.clone(), t_len, &mut acc);
-            step_rng(r.soa, m.h_tail.clone(), t_len, &mut acc);
-            step_rng(r.soa, l_tail, t_len, &mut acc_l);
-            let (zw, nt, nl) = (
-                r.zone_weights[s_idx],
-                r.bridge_ports.tail_n_trans[s_idx],
-                r.bridge_ports.tail_n_long[s_idx],
-            );
-            for off in 0..t_len {
-                let ft = acc[off].reduce_sum();
-                let fl = if r.long_on {
-                    acc_l[off].reduce_sum()
-                } else {
-                    0.0
-                };
-                let audio = ft + fl;
-                sub_l[t_base + off] += audio * entry.pan_l;
-                sub_r[t_base + off] += audio * entry.pan_r;
-                add_zone_n(&mut plan.zone_tail_n[t_base + off], zw, ft * nt + fl * nl);
-            }
-        }
-    }
-}
-
-/// Prefix-only `TILE = 8` unilateral damper for non-struck sympathetic keys (`>= 5,500 Hz`
-/// tails remain in `CHUNK = 128` `step_uncoupled_tails`).
-pub(crate) fn step_damped_symp_tile(
-    r: &mut BridgeRun<'_>,
-    driver: &mut impl KeyActionDriver,
-    plan: &ChunkPlan,
-    t_base: usize,
-    t_len: usize,
-) {
-    let tile_f = t_len as f32;
-    for idx in 0..plan.n_ds {
-        let k = usize::from(plan.damped_symp_keys[idx]);
-        let yc_min = r.ports.y_clear_scratch[k][t_base..t_base + t_len]
-            .iter()
-            .copied()
-            .fold(f32::MAX, f32::min);
-        if yc_min >= DAMPER_CLEAR_THRESHOLD_M {
-            continue;
-        }
-        for s_idx in r.keys[k].string_range.clone() {
-            if !r.ports.may_be_nonzero[s_idx] {
-                continue;
-            }
-            let (v_br, h_br, rv, rh) = (
-                r.bridge_ports.meta[s_idx].v_br.clone(),
-                r.bridge_ports.meta[s_idx].h_br.clone(),
-                r.bridge_ports.r_damp_prefix_v[s_idx],
-                r.bridge_ports.r_damp_prefix_h[s_idx],
-            );
-            if !r.ports.ports_synced[s_idx] {
-                refresh_prefix_damp_ports(r.soa, r.ports, s_idx, v_br.clone(), h_br.clone());
-            }
-            apply_string_damper_pair(r, driver, k, s_idx, v_br, h_br, rv, rh, yc_min, tile_f);
-        }
-    }
-}
-
 pub(crate) fn prepare_sample_tails_and_hammers(
     r: &mut BridgeRun<'_>,
     driver: &mut impl KeyActionDriver,
@@ -386,8 +227,8 @@ pub(crate) fn prepare_sample_tails_and_hammers(
             tl * r.bridge_ports.tail_n_long[s_idx],
         );
     }
-    for idx in 0..plan.n_h {
-        let k = usize::from(plan.hammer_keys[idx]);
+    for idx in 0..plan.n_a {
+        let k = usize::from(plan.active_keys[idx]);
         let key = &r.keys[k];
         let sr = key.string_range.clone();
         for s_idx in sr.clone() {
@@ -395,7 +236,11 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                 refresh_string_ports(r.soa, r.ports, s_idx, &r.strings[s_idx]);
             }
         }
-        let fh_arr = eval_hammer_choir(driver, r.ports, k, sr.clone(), usize::from(key.choir_size));
+        let fh_arr = if plan.key_has_hammer[k] {
+            eval_hammer_choir(driver, r.ports, k, sr.clone(), usize::from(key.choir_size))
+        } else {
+            [0.0; 3]
+        };
         let yc = r.ports.y_clear_scratch[k][t];
         let damp_on = key.has_damper && yc < DAMPER_CLEAR_THRESHOLD_M;
         for (c, s_idx) in sr.enumerate() {

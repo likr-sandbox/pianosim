@@ -1,32 +1,36 @@
 //! Stage 2 <-> Stage 3 closed-loop continuous SIMD stepping with per-sample WDF
-//! bridge port coupling (`< 5,500 Hz` prefix), `TILE = 8` unilateral dampers,
+//! bridge port coupling (`< 5,500 Hz` prefix), `1x` per-sample unilateral dampers,
 //! `CHUNK = 128` linear tails, SAV drift regulation, and longitudinal precursors.
 
 use piano_simd::F32x4;
 use piano_spec::{LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_port::{
-    step_pol_prefix_wdf, step_pol_prefix_wdf_inj, BridgePortDriver, BridgePorts,
+    step_pol_prefix_wdf, step_pol_prefix_wdf_inj, step_pol_prefix_wdf_symp_damp, BridgePortDriver,
+    BridgePorts,
 };
 use crate::bridge_tails::{
-    prepare_sample_tails_and_hammers, sav_long_vecs, step_damped_symp_tile, step_damped_tile,
-    step_uncoupled_tails, BridgeRun, ChunkPlan, HammerStepForce, KeyCat, SUB,
+    prepare_sample_tails_and_hammers, sav_long_vecs, step_uncoupled_tails, BridgeRun, ChunkPlan,
+    HammerStepForce, KeyCat, SUB,
 };
 use crate::choir_map::ChoirMap;
 use crate::contact::{step_clearance_subblock, KeyActionDriver};
-use crate::contact_ports::{refresh_string_ports, ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
+use crate::contact_ports::{
+    refresh_prefix_damp_ports, refresh_string_ports, ContactPorts, DAMPER_CLEAR_THRESHOLD_M,
+};
 use crate::longitudinal::LongitudinalBank;
 use crate::modal_soa::ModalSoa;
 use crate::sav_drift::SavBank;
-use crate::zoh_kernel::{flush_subnormals_range, TILE};
+use crate::zoh_kernel::flush_subnormals_range;
 
 fn step_all_strings_prefix_wdf(
     r: &mut BridgeRun<'_>,
+    driver: &mut impl KeyActionDriver,
     plan: &ChunkPlan,
     a_waves: &mut [f32; TOTAL_STRINGS],
     b_waves: &[f32; TOTAL_STRINGS],
     out_pair: (&mut [f32], &mut [f32]),
-    t: usize,
+    ts: usize,
 ) {
     let beta_buf = r.bridge_ports.beta_br.as_f32x4_slice();
     let (mut sum_l, mut sum_r) = (0.0_f32, 0.0_f32);
@@ -36,8 +40,8 @@ fn step_all_strings_prefix_wdf(
         let m = &r.bridge_ports.meta[s_idx];
         let v_br = 0.5 * (a_waves[s_idx] + b_waves[s_idx]);
         let neg_vbr = F32x4::splat(-v_br);
-        let is_hammer = plan.key_cat[k] == KeyCat::HammerActive;
-        let (cv, br_v, ch, br_h, sav_active) = if is_hammer {
+        let cat = plan.key_cat[k];
+        let (cv, br_v, ch, br_h) = if cat == KeyCat::ActiveContact {
             let hf = plan.hammer_forces[s_idx];
             if hf.fh != 0.0 {
                 r.ports.struck_active[s_idx] = true;
@@ -70,33 +74,98 @@ fn step_all_strings_prefix_wdf(
                 entry.has_damper,
             );
             r.ports.may_be_nonzero[s_idx] = nz_now;
-            (cv, br_v, ch, br_h, r.ports.struck_active[s_idx])
+            (cv, br_v, ch, br_h)
+        } else if cat == KeyCat::DampedSymp && entry.has_damper && r.ports.may_be_nonzero[s_idx] {
+            let yc = r.ports.y_clear_scratch[k][ts];
+            if yc < DAMPER_CLEAR_THRESHOLD_M {
+                if !r.ports.ports_synced[s_idx] {
+                    refresh_prefix_damp_ports(
+                        r.soa,
+                        r.ports,
+                        s_idx,
+                        m.v_br.clone(),
+                        m.h_br.clone(),
+                    );
+                }
+                let raw_fv = driver.step_damper_sample(
+                    k,
+                    s_idx * 2,
+                    r.ports.y_dv[s_idx],
+                    r.ports.v_dv[s_idx],
+                    r.bridge_ports.r_damp_prefix_v[s_idx],
+                    yc,
+                );
+                let raw_fh = driver.step_damper_sample(
+                    k,
+                    s_idx * 2 + 1,
+                    r.ports.y_dh[s_idx],
+                    r.ports.v_dh[s_idx],
+                    r.bridge_ports.r_damp_prefix_h[s_idx],
+                    yc,
+                );
+                let fd_v = if raw_fv.is_finite() { raw_fv } else { 0.0 };
+                let fd_h = if raw_fh.is_finite() { raw_fh } else { 0.0 };
+                let (cv, br_v, ydv, vdv_raw) = step_pol_prefix_wdf_symp_damp(
+                    r.soa,
+                    r.ports,
+                    beta_buf,
+                    m.v_br.clone(),
+                    m.beta_v_off,
+                    neg_vbr,
+                    fd_v,
+                );
+                let (ch, br_h, ydh, vdh_raw) = step_pol_prefix_wdf_symp_damp(
+                    r.soa,
+                    r.ports,
+                    beta_buf,
+                    m.h_br.clone(),
+                    m.beta_h_off,
+                    neg_vbr,
+                    fd_h,
+                );
+                let alpha = r.ports.alpha_vel[s_idx];
+                r.ports.y_dv[s_idx] = ydv;
+                r.ports.v_dv[s_idx] = alpha * vdv_raw;
+                r.ports.y_dh[s_idx] = ydh;
+                r.ports.v_dh[s_idx] = alpha * vdh_raw;
+                r.ports.ports_synced[s_idx] = true;
+                (cv, br_v, ch, br_h)
+            } else {
+                let (cv, br_v) =
+                    step_pol_prefix_wdf(r.soa, beta_buf, m.v_br.clone(), m.beta_v_off, neg_vbr);
+                let (ch, br_h) =
+                    step_pol_prefix_wdf(r.soa, beta_buf, m.h_br.clone(), m.beta_h_off, neg_vbr);
+                r.ports.ports_synced[s_idx] = false;
+                (cv, br_v, ch, br_h)
+            }
         } else {
             let (cv, br_v) =
                 step_pol_prefix_wdf(r.soa, beta_buf, m.v_br.clone(), m.beta_v_off, neg_vbr);
             let (ch, br_h) =
                 step_pol_prefix_wdf(r.soa, beta_buf, m.h_br.clone(), m.beta_h_off, neg_vbr);
-            if v_br != 0.0 {
+            if r.ports.may_be_nonzero[s_idx] || v_br != 0.0 {
                 r.ports.may_be_nonzero[s_idx] = true;
                 r.ports.ports_synced[s_idx] = false;
             }
-            (cv, br_v, ch, br_h, r.ports.struck_active[s_idx])
+            (cv, br_v, ch, br_h)
         };
-        if r.sav_on && sav_active && k < LONGITUDINAL_MAX_KEY_IDX && r.sav.string_n_vh(s_idx) > 0 {
+        if r.sav_on
+            && r.ports.struck_active[s_idx]
+            && k < LONGITUDINAL_MAX_KEY_IDX
+            && r.sav.string_n_vh(s_idx) > 0
+        {
             r.sav.step_string_sav(s_idx, entry, r.soa, r.long_on);
         }
-        if is_hammer && r.ports.may_be_nonzero[s_idx] {
+        if cat == KeyCat::ActiveContact && r.ports.may_be_nonzero[s_idx] {
             refresh_string_ports(r.soa, r.ports, s_idx, entry);
-        } else if matches!(plan.key_cat[k], KeyCat::DampedStruck | KeyCat::DampedSymp) {
-            r.ports.ports_synced[s_idx] = false;
         }
         a_waves[s_idx] = m.a_wave_gain * (br_v + br_h);
         let term = cv + ch;
         sum_l += term * entry.pan_l;
         sum_r += term * entry.pan_r;
     }
-    out_pair.0[t] += sum_l;
-    out_pair.1[t] += sum_r;
+    out_pair.0[ts] += sum_l;
+    out_pair.1[ts] += sum_r;
 }
 
 /// Executes one closed-loop Stage 1 <-> Stage 2 <-> Stage 3 audio block (`<= SUB` chunked)
@@ -140,16 +209,13 @@ pub(crate) fn render_subblock_bridge_coupled_core(
     );
     let mut plan = ChunkPlan {
         key_cat: [KeyCat::Uncoupled; NUM_KEYS],
+        key_has_hammer: [false; NUM_KEYS],
         was_nz: [false; TOTAL_STRINGS],
-        hammer_keys: [0; NUM_KEYS],
-        damped_keys: [0; NUM_KEYS],
-        damped_symp_keys: [0; NUM_KEYS],
+        active_keys: [0; NUM_KEYS],
         sav_long_strings: [0; TOTAL_STRINGS],
         hammer_forces: [HammerStepForce::ZERO; TOTAL_STRINGS],
         zone_tail_n: [[0.0; 8]; SUB],
-        n_h: 0,
-        n_d: 0,
-        n_ds: 0,
+        n_a: 0,
         n_sl: 0,
     };
 
@@ -163,7 +229,8 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         r.bridge_ports
             .compute_a_waves(r.soa, &plan.was_nz, &mut a_waves);
         plan.key_cat.fill(KeyCat::Uncoupled);
-        (plan.n_h, plan.n_d, plan.n_ds, plan.n_sl) = (0, 0, 0, 0);
+        plan.key_has_hammer.fill(false);
+        (plan.n_a, plan.n_sl) = (0, 0);
         plan.zone_tail_n[..sub].fill([0.0; 8]);
 
         for (k, key) in r.keys.iter().enumerate() {
@@ -186,23 +253,16 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             } else {
                 f32::MAX
             };
-            if hammer {
-                plan.key_cat[k] = KeyCat::HammerActive;
-                plan.hammer_keys[plan.n_h] = k as u8;
-                plan.n_h += 1;
+            let any_struck = r.ports.struck_active[sr.clone()].iter().any(|&b| b);
+            if hammer || (any_struck && min_c < DAMPER_CLEAR_THRESHOLD_M) {
+                plan.key_cat[k] = KeyCat::ActiveContact;
+                plan.key_has_hammer[k] = hammer;
+                plan.active_keys[plan.n_a] = k as u8;
+                plan.n_a += 1;
             } else if min_c < DAMPER_CLEAR_THRESHOLD_M {
-                let any_struck = r.ports.struck_active[sr.clone()].iter().any(|&b| b);
-                if any_struck {
-                    plan.key_cat[k] = KeyCat::DampedStruck;
-                    plan.damped_keys[plan.n_d] = k as u8;
-                    plan.n_d += 1;
-                } else {
-                    plan.key_cat[k] = KeyCat::DampedSymp;
-                    plan.damped_symp_keys[plan.n_ds] = k as u8;
-                    plan.n_ds += 1;
-                }
+                plan.key_cat[k] = KeyCat::DampedSymp;
             }
-            if !hammer {
+            if plan.key_cat[k] != KeyCat::ActiveContact {
                 for s_idx in sr {
                     if sav_long_vecs(&r, s_idx) > 0 {
                         plan.sav_long_strings[plan.n_sl] = s_idx as u8;
@@ -213,45 +273,39 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         }
 
         step_uncoupled_tails(&mut r, &mut plan, sub_l, sub_r);
-        let mut t = 0usize;
-        while t < sub {
-            let t_len = (sub - t).min(TILE);
-            if plan.n_d > 0 {
-                step_damped_tile(&mut r, driver, &mut plan, t, t_len, sub_l, sub_r);
+        for ts in 0..sub {
+            prepare_sample_tails_and_hammers(&mut r, driver, &mut plan, ts, sub_l, sub_r);
+            let (dup_l, dup_r) = bridge.step_bridge_sample(
+                &a_waves,
+                &plan.zone_tail_n[ts],
+                &mut b_waves,
+                &mut zone_out,
+            );
+            if dup_l.is_finite() {
+                sub_l[ts] += dup_l;
             }
-            if plan.n_ds > 0 {
-                step_damped_symp_tile(&mut r, driver, &plan, t, t_len);
+            if dup_r.is_finite() {
+                sub_r[ts] += dup_r;
             }
-            for off in 0..t_len {
-                let ts = t + off;
-                prepare_sample_tails_and_hammers(&mut r, driver, &mut plan, ts, sub_l, sub_r);
-                let (dup_l, dup_r) = bridge.step_bridge_sample(
-                    &a_waves,
-                    &plan.zone_tail_n[ts],
-                    &mut b_waves,
-                    &mut zone_out,
-                );
-                if dup_l.is_finite() {
-                    sub_l[ts] += dup_l;
-                }
-                if dup_r.is_finite() {
-                    sub_r[ts] += dup_r;
-                }
-                step_all_strings_prefix_wdf(
-                    &mut r,
-                    &plan,
-                    &mut a_waves,
-                    &b_waves,
-                    (sub_l, sub_r),
-                    ts,
-                );
-            }
-            t += t_len;
+            step_all_strings_prefix_wdf(
+                &mut r,
+                driver,
+                &plan,
+                &mut a_waves,
+                &b_waves,
+                (sub_l, sub_r),
+                ts,
+            );
         }
         for (s_idx, entry) in r.strings.iter().enumerate() {
-            if r.ports.may_be_nonzero[s_idx] && !flush_subnormals_range(r.soa, entry.all_vecs()) {
-                r.ports.clear_string_state(s_idx);
-                r.sav.reset_string(s_idx);
+            if r.ports.may_be_nonzero[s_idx] {
+                if !flush_subnormals_range(r.soa, entry.all_vecs()) {
+                    r.ports.clear_string_state(s_idx);
+                    r.sav.reset_string(s_idx);
+                } else if plan.key_cat[usize::from(entry.key_idx)] == KeyCat::DampedSymp {
+                    // DampedSymp updates only prefix damper ports (`y_h`/`v_h` and tails need sync if promoted).
+                    r.ports.ports_synced[s_idx] = false;
+                }
             }
         }
         chunk_base += sub;

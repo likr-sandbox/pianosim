@@ -364,3 +364,78 @@ pub(crate) fn step_pol_prefix_wdf_inj(
     }
     (acc_c.reduce_sum(), acc_br.reduce_sum())
 }
+
+/// Single-pass prefix WDF step for damped sympathetic strings (`KeyCat::DampedSymp`):
+/// injects optional `f_d * b_damp` into `u`, couples `-beta_br * v_br` onto `v`,
+/// advances ZOH rotation, and accumulates `(y_d, v_d)` alongside `(acc_c, acc_br)` in registers.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_pol_prefix_wdf_symp_damp(
+    soa: &mut ModalSoa,
+    ports: &ContactPorts,
+    beta_buf: &[F32x4],
+    vr: Range<usize>,
+    beta_off: usize,
+    neg_vbr: F32x4,
+    f_d: f32,
+) -> (f32, f32, f32, f32) {
+    if f_d != 0.0 {
+        step_pol_prefix_wdf_symp_damp_inner::<true>(
+            soa, ports, beta_buf, vr, beta_off, neg_vbr, f_d,
+        )
+    } else {
+        step_pol_prefix_wdf_symp_damp_inner::<false>(
+            soa, ports, beta_buf, vr, beta_off, neg_vbr, 0.0,
+        )
+    }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn step_pol_prefix_wdf_symp_damp_inner<const HAS_FD: bool>(
+    soa: &mut ModalSoa,
+    ports: &ContactPorts,
+    beta_buf: &[F32x4],
+    vr: Range<usize>,
+    beta_off: usize,
+    neg_vbr: F32x4,
+    f_d: f32,
+) -> (f32, f32, f32, f32) {
+    let n = vr.end - vr.start;
+    let (u_all, v_all) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
+    let u = &mut u_all[vr.clone()];
+    let v = &mut v_all[vr.clone()];
+    let d = &soa.d_coeff.as_f32x4_slice()[vr.clone()];
+    let s = &soa.s_coeff.as_f32x4_slice()[vr.clone()];
+    let c = &soa.c_bridge.as_f32x4_slice()[vr.clone()];
+    let bd = &ports.b_damp.as_f32x4_slice()[vr.clone()];
+    let ad = &ports.a_damp.as_f32x4_slice()[vr];
+    let beta = &beta_buf[beta_off..beta_off + n];
+    let fd_v = F32x4::splat(f_d);
+
+    let (mut acc_c, mut acc_br, mut acc_yd, mut acc_vd) =
+        (F32x4::zero(), F32x4::zero(), F32x4::zero(), F32x4::zero());
+    for i in 0..n {
+        let bdi = bd[i];
+        let u_inj = if HAS_FD {
+            fd_v.mul_add(bdi, u[i])
+        } else {
+            u[i]
+        };
+        let bi = beta[i];
+        let vc = bi.mul_add(neg_vbr, v[i]);
+        let (un, vn) = zoh_rotate(u_inj, vc, d[i], s[i]);
+        u[i] = un;
+        v[i] = vn;
+        acc_c = vn.mul_add(c[i], acc_c);
+        acc_br = vn.mul_add(bi, acc_br);
+        acc_yd = vn.mul_add(ad[i], acc_yd);
+        acc_vd = un.mul_add(bdi, acc_vd);
+    }
+    (
+        acc_c.reduce_sum(),
+        acc_br.reduce_sum(),
+        acc_yd.reduce_sum(),
+        acc_vd.reduce_sum(),
+    )
+}
