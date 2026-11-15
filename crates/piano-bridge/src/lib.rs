@@ -41,7 +41,7 @@ fn sanitize_sample_rate(sample_rate: f32) -> f32 {
     }
 }
 
-use zone_proj::{gather_sanitized_run, scatter_sanitized_run, ZoneRunCache};
+use zone_proj::{gather_sanitized_run, scatter_sanitized_run, ZoneRunCache, MAX_ZONE_RUNS};
 
 #[inline]
 fn mat8_vec(
@@ -245,9 +245,36 @@ impl BridgeBank {
         b_waves_out: &mut [f32; TOTAL_STRINGS],
         zone_out: &mut [f32; NUM_BRIDGE_ZONES],
     ) -> (f32, f32) {
+        let mut unused_dup_zones = [0.0_f32; NUM_BRIDGE_ZONES];
+        self.step_bridge_sample_with_duplex_zones(
+            a_waves,
+            zone_str_audio,
+            b_waves_out,
+            zone_out,
+            &mut unused_dup_zones,
+        )
+    }
+
+    /// Advances the Stage 3 bidirectional bridge junction by one audio sample and writes
+    /// unpanned per-zone treble duplex contributions (`Zones 2..8`) into `dup_zone_out`
+    /// (`Zones 0..2` strictly `0.0`) for Stage 4 convolution without stereo-pan bypass.
+    #[inline]
+    pub fn step_bridge_sample_with_duplex_zones(
+        &mut self,
+        a_waves: &[f32; TOTAL_STRINGS],
+        zone_str_audio: &[f32; NUM_BRIDGE_ZONES],
+        b_waves_out: &mut [f32; TOTAL_STRINGS],
+        zone_out: &mut [f32; NUM_BRIDGE_ZONES],
+        dup_zone_out: &mut [f32; NUM_BRIDGE_ZONES],
+    ) -> (f32, f32) {
         let cache = &self.zone_cache;
+        let n_runs = cache.run_count.min(MAX_ZONE_RUNS);
+        let mut run_a_finite = [true; MAX_ZONE_RUNS];
         let mut f_inc_str = [0.0_f64; NUM_BRIDGE_ZONES];
-        for &run in &cache.runs[..cache.run_count] {
+        for (&run, slot_ok) in cache.runs[..n_runs]
+            .iter()
+            .zip(run_a_finite[..n_runs].iter_mut())
+        {
             let (start, end, z0, z1) = run.bounds();
             let (mut v0_acc, mut v1_acc) = (piano_simd::F32x4::zero(), piano_simd::F32x4::zero());
             let mut i = start;
@@ -265,7 +292,9 @@ impl BridgeBank {
                 s1 += cache.rw1_f32[i] * a_waves[i];
                 i += 1;
             }
-            let (acc0, acc1) = if s0.is_finite() && s1.is_finite() {
+            let is_finite = s0.is_finite() && s1.is_finite();
+            *slot_ok = is_finite;
+            let (acc0, acc1) = if is_finite {
                 (f64::from(s0), f64::from(s1))
             } else {
                 scatter_sanitized_run(cache, run, a_waves)
@@ -327,15 +356,21 @@ impl BridgeBank {
             let vz = src as f32;
             *dst = if vz.is_finite() { vz } else { 0.0 };
         }
-        let duplex_stereo = self.duplex.step_with_zone_velocities(&v_zone);
+        let duplex_stereo = self
+            .duplex
+            .step_with_zone_velocities_and_zones(&v_zone, dup_zone_out);
 
-        for &run in &cache.runs[..cache.run_count] {
+        for (&run, &a_ok) in cache.runs[..n_runs]
+            .iter()
+            .zip(run_a_finite[..n_runs].iter())
+        {
             let (start, end, z0, z1) = run.bounds();
             let (vz0, vz1) = (v_zone_f64[z0], v_zone_f64[z1]);
             let two_vz0 = if vz0.is_finite() { 2.0 * vz0 } else { 0.0 };
             let two_vz1 = if vz1.is_finite() { 2.0 * vz1 } else { 0.0 };
-            let tv0 = piano_simd::F32x4::splat(two_vz0 as f32);
-            let tv1 = piano_simd::F32x4::splat(two_vz1 as f32);
+            let (two_vz0_f32, two_vz1_f32) = (two_vz0 as f32, two_vz1 as f32);
+            let tv0 = piano_simd::F32x4::splat(two_vz0_f32);
+            let tv1 = piano_simd::F32x4::splat(two_vz1_f32);
             let mut i = start;
             while i + 4 <= end {
                 let w0 = piano_simd::F32x4::from_slice(&cache.w0_f32[i..i + 4]);
@@ -345,12 +380,16 @@ impl BridgeBank {
                 i += 4;
             }
             while i < end {
-                b_waves_out[i] = (cache.w0_f32[i] * (two_vz0 as f32)
-                    + cache.w1_f32[i] * (two_vz1 as f32))
-                    - a_waves[i];
+                b_waves_out[i] =
+                    (cache.w0_f32[i] * two_vz0_f32 + cache.w1_f32[i] * two_vz1_f32) - a_waves[i];
                 i += 1;
             }
-            if !b_waves_out[start..end].iter().all(|x| x.is_finite()) {
+            if !a_ok
+                || !vz0.is_finite()
+                || !vz1.is_finite()
+                || !two_vz0_f32.is_finite()
+                || !two_vz1_f32.is_finite()
+            {
                 gather_sanitized_run(cache, run, b_waves_out, a_waves, two_vz0, two_vz1);
             }
         }
