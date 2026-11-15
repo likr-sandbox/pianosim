@@ -1,17 +1,20 @@
 :root {
   color-scheme: dark;
-  --bg: #0e1015;
-  --panel: #161a23;
-  --panel-border: #283042;
+  --bg: #0b0d13;
+  --bg-gradient: radial-gradient(circle at 50% 0%, #151b28 0%, #080a0f 75%);
+  --panel: #131722;
+  --panel-card: #181d2a;
+  --panel-border: #232a3c;
   --text: #eef1f7;
-  --muted: #9aa4b8;
-  --accent: #e0a958;
-  --accent-strong: #f2bd6b;
-  --ok: #38b87c;
-  --danger: #e25d5d;
+  --muted: #8e9bb0;
+  --accent: #dca34d;
+  --accent-strong: #f0ba65;
+  --ok: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
   --ivory: #f4f1ea;
   --ivory-active: #ffd98e;
-  --ebony: #1a1e26;
+  --ebony: #181c24;
   --ebony-active: #c88e3d;
 }
 
@@ -23,14 +26,15 @@ body {
   margin: 0;
   min-height: 100vh;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-  background: radial-gradient(circle at top, #181e2c 0%, var(--bg) 65%);
+  background: var(--bg-gradient);
   color: var(--text);
+  overflow-x: hidden;
 }
 
 .studio-shell {
-  max-width: 960px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 24px 16px 40px;
+  padding: 20px 16px 48px;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -48,18 +52,20 @@ body {
   padding: 16px 20px;
 }
 
-.eyebrow {
+.header-titles .eyebrow {
   margin: 0 0 4px;
-  font-size: 12px;
-  letter-spacing: 0.08em;
+  font-size: 11px;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--accent);
+  font-weight: 600;
 }
 
-.studio-header h1 {
+.studio-title {
   margin: 0;
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .header-actions {
@@ -72,14 +78,18 @@ body {
   appearance: none;
   border: 1px solid var(--panel-border);
   border-radius: 8px;
-  background: #202634;
+  background: #1c2230;
   color: var(--text);
   font: inherit;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  padding: 10px 14px;
+  padding: 8px 14px;
   cursor: pointer;
   transition: transform 0.06s ease, background 0.15s ease, border-color 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
 }
 
 .btn:hover:not(:disabled) {
@@ -91,7 +101,7 @@ body {
 }
 
 .btn:disabled {
-  opacity: 0.65;
+  opacity: 0.6;
   cursor: wait;
 }
 
@@ -107,13 +117,29 @@ body {
 }
 
 .btn-accent {
-  background: #252c3d;
-  border-color: rgba(224, 169, 88, 0.5);
+  background: #232a3c;
+  border-color: rgba(220, 163, 77, 0.4);
   color: var(--accent-strong);
 }
 
-.btn-toggle.is-active {
-  background: rgba(224, 169, 88, 0.2);
+.btn-secondary {
+  background: #1b212f;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--muted);
+  border-color: var(--panel-border);
+}
+
+.btn-ghost:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.btn-toggle.active,
+.btn-toggle[aria-pressed='true'] {
+  background: rgba(220, 163, 77, 0.2);
   border-color: var(--accent);
   color: var(--accent-strong);
 }
@@ -122,174 +148,14 @@ body {
   margin: 0;
   padding: 12px 16px;
   border-radius: 10px;
-  border: 1px solid rgba(226, 93, 93, 0.55);
-  background: rgba(226, 93, 93, 0.14);
-  color: #ffb4b4;
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
   font-size: 14px;
-}
-
-.hud-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 10px;
-}
-
-.hud-card {
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: 10px;
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.hud-label {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.hud-value {
-  font-size: 16px;
-  font-variant-numeric: tabular-nums;
-}
-
-.control-strip {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: 12px;
-  padding: 12px 16px;
-}
-
-.control-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.velocity-control {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 14px;
-  color: var(--muted);
-}
-
-.velocity-control input[type='range'] {
-  accent-color: var(--accent);
-}
-
-.mono {
-  font-variant-numeric: tabular-nums;
-  min-width: 28px;
-  color: var(--text);
-}
-
-.keyboard-stage {
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: 12px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.keyboard-meta {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.octave-keyboard {
-  position: relative;
-  display: flex;
-  width: 100%;
-  height: 220px;
-  user-select: none;
-  touch-action: none;
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid #090b0f;
-}
-
-.piano-key {
-  appearance: none;
-  border: none;
-  padding: 10px 4px;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 4px;
   cursor: pointer;
-  font: inherit;
 }
 
-.key-white {
-  flex: 1 1 0;
-  height: 100%;
-  background: linear-gradient(180deg, #fcfaf5 0%, var(--ivory) 85%, #dcd6c8 100%);
-  color: #20242c;
-  border-right: 1px solid #c9c2b2;
-  z-index: 1;
-}
-
-.key-white:last-child {
-  border-right: none;
-}
-
-.key-white.is-active {
-  background: linear-gradient(180deg, #ffe7b3 0%, var(--ivory-active) 100%);
-}
-
-.key-black {
-  position: absolute;
-  top: 0;
-  width: 8%;
-  height: 62%;
-  background: linear-gradient(180deg, #2d3340 0%, var(--ebony) 85%, #0c0e13 100%);
-  color: #e6ebf4;
-  border: 1px solid #0b0d12;
-  border-top: none;
-  border-radius: 0 0 6px 6px;
-  z-index: 2;
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.45);
-}
-
-.key-black.is-active {
-  background: linear-gradient(180deg, #e1a852 0%, var(--ebony-active) 100%);
-  color: #141009;
-}
-
-.key-note {
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.key-hint {
-  font-size: 11px;
-  opacity: 0.72;
-}
-
-@media (max-width: 600px) {
-  .octave-keyboard {
-    height: 170px;
-  }
-
-  .key-note {
-    font-size: 11px;
-  }
-
-  .key-hint {
-    display: none;
-  }
+.val-mono {
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, monospace;
 }

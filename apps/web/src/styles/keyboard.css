@@ -1,0 +1,92 @@
+/** Proportional 88-key piano keyboard styles with ebony and ivory reactive lighting. */
+
+.keyboard-stage {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.piano-keyboard {
+  position: relative;
+  width: 100%;
+  height: 200px;
+  user-select: none;
+  touch-action: none;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #080a0e;
+  border: 1px solid #141722;
+  box-shadow: inset 0 4px 12px rgba(0, 0, 0, 0.7);
+}
+
+.piano-key {
+  appearance: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: block;
+  cursor: pointer;
+  outline: none;
+}
+
+/* White keys: 52 total */
+.piano-key.key-white,
+.piano-key.white-key {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  z-index: 1;
+  background: linear-gradient(180deg, #fffdf8 0%, #f3efe6 85%, #d8d1c1 100%);
+  border-right: 1px solid #b8b1a2;
+  border-bottom: 3px solid #8e8778;
+  border-radius: 0 0 4px 4px;
+  box-shadow: inset 0 -2px 4px rgba(0, 0, 0, 0.08);
+  transition: background 0.04s ease;
+}
+
+.piano-key.key-white:last-of-type,
+.piano-key.white-key:last-of-type {
+  border-right: none;
+}
+
+.piano-key.key-white.is-active,
+.piano-key.key-white.active,
+.piano-key.white-key.is-active,
+.piano-key.white-key.active {
+  background: linear-gradient(180deg, #ffe5ab 0%, #ffd482 100%);
+  box-shadow: inset 0 2px 8px rgba(180, 110, 20, 0.4), 0 0 12px rgba(220, 163, 77, 0.35);
+}
+
+/* Black keys: 36 total */
+.piano-key.key-black,
+.piano-key.black-key {
+  position: absolute;
+  top: 0;
+  height: 62%;
+  width: calc(100% / 52 * 0.65);
+  z-index: 2;
+  background: linear-gradient(180deg, #2b303d 0%, #151821 80%, #07080c 100%);
+  border: 1px solid #080a0e;
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.65), inset 0 1px 1px rgba(255, 255, 255, 0.12);
+  transition: background 0.04s ease;
+}
+
+.piano-key.key-black.is-active,
+.piano-key.key-black.active,
+.piano-key.black-key.is-active,
+.piano-key.black-key.active {
+  background: linear-gradient(180deg, #e1a852 0%, #c48733 100%);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.8), 0 0 14px rgba(220, 163, 77, 0.5);
+}
+
+@media (max-width: 768px) {
+  .piano-keyboard {
+    height: 160px;
+  }
+}
