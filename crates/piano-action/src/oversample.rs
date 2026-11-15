@@ -143,6 +143,7 @@ impl HammerOversampleState {
         borin_lut: &BorinKLut,
         fir: &DecimationFir16,
         memory_enabled: bool,
+        una_corda_mod: (f32, f32),
         y_str_m: f32,
         v_str_mps: f32,
         r_port_strike: f32,
@@ -175,7 +176,13 @@ impl HammerOversampleState {
             // (where K_felt * r_port * dt_host > 1) stay strictly Nyquist-passive across 8x->1x.
             let k_str_end = 0.5 * r_sub * dt_sub + 0.68 * safe_r * dt_host;
 
-            let (f_scale_eff_n, eps_eff) = felt_state.effective_params(felt_spec, memory_enabled);
+            let (f_base_n, eps_base) = felt_state.effective_params(felt_spec, memory_enabled);
+            let f_scale_eff_n = f_base_n * una_corda_mod.0;
+            let eps_eff = if una_corda_mod.1 > 0.0 {
+                (eps_base + una_corda_mod.1).min(0.48)
+            } else {
+                eps_base
+            };
             let c_inst = 1.0 - eps_eff * (1.0 - felt_coeffs.a_fast_sub);
             let k_ham_nom = self.shank.predict_free(shank_params).k_ham;
             let lambda_end = borin_lut.compute_lambda(
