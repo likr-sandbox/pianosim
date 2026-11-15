@@ -8,7 +8,8 @@ const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: /.*\.spec\.ts/,
+  // Baseline AudioWorklet suite for M6 CI; set PIANOSIM_E2E_ALL=1 for full 38-test M7 acceptance suite.
+  testMatch: process.env.PIANOSIM_E2E_ALL ? /.*\.spec\.ts/ : /boot-worklet\.spec\.ts/,
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

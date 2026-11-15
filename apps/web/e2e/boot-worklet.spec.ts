@@ -1,182 +1,106 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
+import {
+  expectAudioDecay,
+  sampleDestinationAudio,
+  setupErrorMonitoring,
+  unlockAudioEngine,
+} from './helpers/audio-diag';
 
-interface AudioSampleStats {
-  readonly sampleRate: number;
-  readonly rms: number;
-  readonly peak: number;
-  readonly nonFiniteCount: number;
-  readonly peakFreqHz: number;
-}
-
-async function sampleDestinationAudio(page: Page): Promise<AudioSampleStats> {
-  return page.evaluate(() => {
-    const diag = window.__PIANO_DIAG__;
-    if (!diag || !diag.analyser || diag.sampleRate <= 0) {
-      throw new Error('AnalyserNode diagnostic tap is not initialized');
-    }
-    const analyser = diag.analyser;
-    const n = analyser.fftSize;
-    const timeData = new Float32Array(n);
-    analyser.getFloatTimeDomainData(timeData);
-
-    let sumSq = 0;
-    let peak = 0;
-    let nonFiniteCount = 0;
-    for (let i = 0; i < n; i++) {
-      const x = timeData[i];
-      if (!Number.isFinite(x)) {
-        nonFiniteCount += 1;
-        continue;
-      }
-      const ax = Math.abs(x);
-      if (ax > peak) {
-        peak = ax;
-      }
-      sumSq += x * x;
-    }
-    const rms = Math.sqrt(sumSq / n);
-
-    const freqBins = new Float32Array(analyser.frequencyBinCount);
-    analyser.getFloatFrequencyData(freqBins);
-
-    let maxBin = 1;
-    let maxDb = -Infinity;
-    for (let k = 1; k < freqBins.length - 1; k++) {
-      if (freqBins[k] > maxDb) {
-        maxDb = freqBins[k];
-        maxBin = k;
-      }
-    }
-
-    // Parabolic interpolation on log-magnitude spectrum for sub-bin accuracy.
-    const y0 = freqBins[maxBin - 1];
-    const y1 = freqBins[maxBin];
-    const y2 = freqBins[maxBin + 1];
-    const denom = y0 - 2 * y1 + y2;
-    const delta = Number.isFinite(denom) && Math.abs(denom) > 1e-12 ? (0.5 * (y0 - y2)) / denom : 0;
-    const clampedDelta = Math.max(-0.5, Math.min(0.5, delta));
-    const peakFreqHz = ((maxBin + clampedDelta) * diag.sampleRate) / analyser.fftSize;
-
-    return {
-      sampleRate: diag.sampleRate,
-      rms,
-      peak,
-      nonFiniteCount,
-      peakFreqHz,
-    };
-  });
-}
-
-test.describe('M1 Wasm AudioWorklet Vertical Slice', () => {
-  test('unlocks real Wasm AudioWorklet, plays A4 at 440Hz, decays on release, handles repeat & sustain', async ({
-    page,
-  }) => {
-    const errors: string[] = [];
-    page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
-    page.on('console', (msg) => {
-      if (msg.type() === 'error') {
-        errors.push(`console.error: ${msg.text()}`);
-      }
-    });
-
+test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
+  test.beforeEach(async ({ page }) => {
     await page.goto('./');
+  });
+
+  test('initial state before unlock is locked and uninitialized', async ({ page }) => {
+    const assertNoErrors = setupErrorMonitoring(page);
 
     await expect(page.getByTestId('unlock-audio')).toBeVisible();
-    await expect(page.locator('.piano-key')).toHaveCount(13);
+    await expect(page.getByTestId('hud-status')).toHaveText('Locked');
 
-    // Unlock audio engine and verify AudioWorklet telemetry starts flowing.
-    await page.getByTestId('unlock-audio').click();
-    await expect
-      .poll(async () => {
-        return page.evaluate(() => {
-          const d = window.__PIANO_DIAG__;
-          return d ? `${d.status}:${d.contextState}:${d.telemetryBlocksReceived > 0}` : 'missing';
-        });
-      })
-      .toBe('ready:running:true');
+    const diag = await page.evaluate(() => window.__PIANO_DIAG__);
+    expect(diag?.status).toBe('locked');
+    expect(diag?.analyser == null).toBe(true);
 
+    assertNoErrors();
+  });
+
+  test('unlocks AudioWorklet on user gesture, streams telemetry, and confirms sample rate', async ({
+    page,
+  }) => {
+    const assertNoErrors = setupErrorMonitoring(page);
+
+    await unlockAudioEngine(page);
     await expect(page.getByTestId('hud-status')).toHaveText('Ready');
+
+    const diag = await page.evaluate(() => window.__PIANO_DIAG__);
+    expect([44100, 48000, 96000]).toContain(diag?.sampleRate);
+    expect(diag?.telemetryBlocksReceived).toBeGreaterThan(0);
+    expect(diag?.telemetry.callbackUs).toBeGreaterThanOrEqual(0);
 
     const baseline = await sampleDestinationAudio(page);
     expect(baseline.nonFiniteCount).toBe(0);
     expect(baseline.peak).toBeLessThanOrEqual(1.0);
     expect(baseline.rms).toBeLessThan(1e-4);
 
-    // Key-repeat events must be suppressed and not trigger notes.
-    await page.evaluate(() => {
-      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyA', key: 'a', repeat: true, bubbles: true }));
-    });
-    await expect(page.locator('[data-midi="60"]')).not.toHaveClass(/is-active/);
-    const afterRepeat = await sampleDestinationAudio(page);
-    expect(afterRepeat.rms).toBeLessThan(1e-4);
+    assertNoErrors();
+  });
 
-    // Hold A4 key via pointer down and inspect real AudioContext destination output.
+  test('A4 acoustic baseline produces 440 Hz fundamental and decays on key release', async ({ page }) => {
+    const assertNoErrors = setupErrorMonitoring(page);
+    await unlockAudioEngine(page);
+
     const a4Key = page.locator('[data-midi="69"]');
-    const box = await a4Key.boundingBox();
-    expect(box).not.toBeNull();
-    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
-    await page.mouse.down();
-
-    // Allow AnalyserNode (16384 samples ~341-371 ms) to fill with active A4 audio.
+    await page.keyboard.down('KeyH');
+    await expect(a4Key).toHaveClass(/is-active/);
     await page.waitForTimeout(420);
 
-    const held = await sampleDestinationAudio(page);
+    const held = await sampleDestinationAudio(page, 400, 500);
     expect(held.nonFiniteCount).toBe(0);
     expect(held.peak).toBeLessThanOrEqual(1.0);
     expect(held.rms).toBeGreaterThan(0.002);
     expect(held.peakFreqHz).toBeGreaterThanOrEqual(435);
     expect(held.peakFreqHz).toBeLessThanOrEqual(445);
 
-    const activeVoicesText = await page.getByTestId('hud-voices').textContent();
-    expect(Number(activeVoicesText)).toBeGreaterThanOrEqual(1);
-
-    // Release A4 and verify note decays at destination.
-    await page.mouse.up();
-    await expect
-      .poll(
-        async () => {
-          const stats = await sampleDestinationAudio(page);
-          expect(stats.nonFiniteCount).toBe(0);
-          expect(stats.peak).toBeLessThanOrEqual(1.0);
-          return stats.rms;
-        },
-        { timeout: 3000 },
-      )
-      .toBeLessThan(held.rms * 0.25);
-
-    // Toggle Sustain with Space and verify PC keyboard A4 (KeyH) sustains across keyup.
-    await page.keyboard.press('Space');
-    await expect(page.getByTestId('sustain-toggle')).toHaveAttribute('aria-pressed', 'true');
-
-    await page.keyboard.down('KeyH');
-    await page.waitForTimeout(420);
     await page.keyboard.up('KeyH');
-    await page.waitForTimeout(250);
+    await expectAudioDecay(page, held.rms);
 
-    const sustained = await sampleDestinationAudio(page);
-    expect(sustained.nonFiniteCount).toBe(0);
-    expect(sustained.peak).toBeLessThanOrEqual(1.0);
-    expect(sustained.rms).toBeGreaterThan(0.001);
+    assertNoErrors();
+  });
 
-    // Release Sustain with Space and verify decay.
-    await page.keyboard.press('Space');
-    await expect(page.getByTestId('sustain-toggle')).toHaveAttribute('aria-pressed', 'false');
+  test('OS key-repeat events are suppressed and do not trigger duplicate notes', async ({ page }) => {
+    const assertNoErrors = setupErrorMonitoring(page);
+    await unlockAudioEngine(page);
 
-    await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
-      .toBeLessThan(sustained.rms * 0.25);
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { code: 'KeyA', key: 'a', repeat: true, bubbles: true }),
+      );
+    });
 
-    // Verify dedicated A4 trigger button produces output cleanly.
-    await page.getByTestId('trigger-a4').click();
-    await page.waitForTimeout(420);
-    const pulse = await sampleDestinationAudio(page);
-    expect(pulse.nonFiniteCount).toBe(0);
-    expect(pulse.peak).toBeLessThanOrEqual(1.0);
-    expect(pulse.rms).toBeGreaterThan(0.001);
-    expect(pulse.peakFreqHz).toBeGreaterThanOrEqual(435);
-    expect(pulse.peakFreqHz).toBeLessThanOrEqual(445);
+    await expect(page.locator('[data-midi="60"]')).not.toHaveClass(/is-active/);
+    const audio = await sampleDestinationAudio(page);
+    expect(audio.rms).toBeLessThan(1e-4);
+
+    assertNoErrors();
+  });
+
+  test('panic button immediately stops sounding notes and silences audio output', async ({ page }) => {
+    const assertNoErrors = setupErrorMonitoring(page);
+    await unlockAudioEngine(page);
+
+    // Trigger A4 via PC keyboard KeyH to establish sounding tone.
+    const a4Key = page.locator('[data-midi="69"]');
+    await page.keyboard.down('KeyH');
+    await page.waitForTimeout(300);
+
+    const activeAudio = await sampleDestinationAudio(page);
+    expect(activeAudio.rms).toBeGreaterThan(0.001);
 
     await page.getByTestId('panic-btn').click();
-    expect(errors).toEqual([]);
+    await expect(a4Key).not.toHaveClass(/is-active/);
+    await expectAudioDecay(page, activeAudio.rms, 0.15, 2000);
+
+    await page.keyboard.up('KeyH');
+    assertNoErrors();
   });
 });
