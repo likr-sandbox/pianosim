@@ -44,6 +44,11 @@ dependencies = [
 [[package]]
 name = "piano-radiator"
 version = "0.1.0"
+dependencies = [
+ "piano-bridge",
+ "piano-simd",
+ "piano-spec",
+]
 
 [[package]]
 name = "piano-simd"
