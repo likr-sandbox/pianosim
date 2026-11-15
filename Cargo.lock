@@ -13,6 +13,10 @@ dependencies = [
 [[package]]
 name = "piano-body-gen"
 version = "0.1.0"
+dependencies = [
+ "piano-bridge",
+ "piano-spec",
+]
 
 [[package]]
 name = "piano-bridge"
