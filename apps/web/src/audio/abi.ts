@@ -3,7 +3,7 @@
 export const WORKLET_PROCESSOR_NAME = 'piano-wasm-processor';
 export const MAX_RENDER_FRAMES = 512;
 export const TELEMETRY_FLOATS = 8;
-export const TELEMETRY_INTERVAL_BLOCKS = 16;
+export const TELEMETRY_INTERVAL_BLOCKS = 32;
 
 export const PEDAL_SUSTAIN = 0 as const;
 export const PEDAL_UNA_CORDA = 1 as const;

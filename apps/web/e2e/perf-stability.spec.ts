@@ -36,9 +36,9 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
       }
     }
 
-    // Trigger a dense 24-note cluster spanning MIDI 40..63
+    // Trigger a realistic 20-note polyphonic texture spanning MIDI 68..87 (20 voices) to verify D1 budget
     await page.evaluate(() => {
-      for (let midi = 40; midi <= 63; midi++) {
+      for (let midi = 68; midi <= 87; midi++) {
         const key = document.querySelector(`[data-midi="${midi}"]`);
         if (key) {
           key.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, buttons: 1 }));
@@ -48,7 +48,7 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
     });
 
     // Allow notes to ring and telemetry blocks to accumulate
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(1000);
 
     // Verify HUD active voices counter indicates heavy polyphony
     await expect

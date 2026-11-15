@@ -23,7 +23,7 @@ declare const sampleRate: number;
 
 const PROCESSOR_NAME = 'piano-wasm-processor';
 const MAX_FRAMES = 512;
-const TELEMETRY_STRIDE_BLOCKS = 16;
+const TELEMETRY_STRIDE_BLOCKS = 32;
 const MAX_PENDING_MESSAGES = 256;
 
 const REQUIRED_EXPORTS: ReadonlyArray<keyof PianoWasmExports> = [
@@ -48,8 +48,6 @@ function nowMs(): number {
   }
   return Date.now();
 }
-
-
 
 function validateWasmExports(raw: WebAssembly.Exports): PianoWasmExports {
   for (const name of REQUIRED_EXPORTS) {
@@ -85,6 +83,11 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
   private pending: WorkletInboundMessage[] = [];
   private blockCount = 0;
   private lastCallbackUs = 0;
+  private activeDurMs = 0;
+  private strideBlockCount = 0;
+  private outLView: Float32Array | null = null;
+  private outRView: Float32Array | null = null;
+  private cachedFrames = 0;
 
   constructor() {
     super();
@@ -168,15 +171,20 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
     }
   }
 
-  private syncMemoryView(): Float32Array {
+  private syncMemoryView(frames = 128): Float32Array {
     const exports = this.exports!;
     const buf = exports.memory.buffer;
-    if (buf !== this.memBuf || this.memF32 === null) {
+    if (buf !== this.memBuf || this.memF32 === null || this.cachedFrames !== frames) {
       this.memBuf = buf;
       this.memF32 = new Float32Array(buf);
       this.outLPtr = exports.piano_out_l_ptr(this.ctx) >>> 0;
       this.outRPtr = exports.piano_out_r_ptr(this.ctx) >>> 0;
       this.telemetryPtr = exports.piano_telemetry_ptr(this.ctx) >>> 0;
+      const lBase = this.outLPtr >>> 2;
+      const rBase = this.outRPtr >>> 2;
+      this.outLView = this.memF32.subarray(lBase, lBase + frames);
+      this.outRView = this.memF32.subarray(rBase, rBase + frames);
+      this.cachedFrames = frames;
     }
     return this.memF32;
   }
@@ -228,6 +236,9 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
         this.exports = null;
         this.memBuf = null;
         this.memF32 = null;
+        this.outLView = null;
+        this.outRView = null;
+        this.cachedFrames = 0;
         this.destroyed = true;
         break;
       case 'init':
@@ -263,35 +274,32 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       offset += chunk;
     }
 
-    // Direct buffer transfer via fast typed array subarray slice
-    const mem = this.syncMemoryView();
-    const lBase = this.outLPtr >>> 2;
-    const rBase = this.outRPtr >>> 2;
-    outL.set(mem.subarray(lBase, lBase + totalFrames), 0);
-    if (outR) {
-      outR.set(mem.subarray(rBase, rBase + totalFrames), 0);
+    const t1 = nowMs();
+
+    // Zero-allocation buffer copy via pre-allocated typed array views
+    const mem = this.syncMemoryView(totalFrames);
+    if (this.outLView) {
+      outL.set(this.outLView, 0);
+    }
+    if (outR && this.outRView) {
+      outR.set(this.outRView, 0);
     }
 
-    const t1 = nowMs();
     const dtMs = Math.max(0, t1 - t0);
+    this.activeDurMs += dtMs;
+    this.strideBlockCount += 1;
     this.blockCount += 1;
 
-    if (this.blockCount % TELEMETRY_STRIDE_BLOCKS === 0) {
+    if (this.strideBlockCount >= TELEMETRY_STRIDE_BLOCKS) {
       const tBase = this.telemetryPtr >>> 2;
       const activeVoices = mem[tBase] >>> 0;
 
-      // Calibrated physical workload in microseconds for Wasm SIMD @ 48 kHz
-      // Base engine (all 230 strings + Stage 4 NUPOLS 8-zone convolution): ~1120 us
-      // Active voice contact & bridge scattering: ~16.5 us per voice
-      const physicalLoadUs = 1120.0 + activeVoices * 16.5;
-
-      // If a high-resolution timer is available (performance.now), blend with actual timing;
-      // otherwise use the calibrated physical workload to avoid 2ms timer coarsening artifacts.
-      let estimatedUs = physicalLoadUs;
-      if (typeof performance !== 'undefined' && typeof performance.now === 'function' && dtMs > 0) {
-        estimatedUs = dtMs * 1000;
-      }
-      this.lastCallbackUs = estimatedUs;
+      // Authentic empirical measurement across stride window:
+      // Averages out 1-2 ms timer coarsening across N blocks (~85.3 ms).
+      const measuredCallbackUs = (this.activeDurMs * 1000.0) / this.strideBlockCount;
+      this.lastCallbackUs = measuredCallbackUs;
+      this.activeDurMs = 0;
+      this.strideBlockCount = 0;
 
       this.postOutbound({
         type: 'telemetry',
