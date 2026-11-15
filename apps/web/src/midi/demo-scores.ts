@@ -33,7 +33,7 @@ export function createBachPrelude(): ParsedSmf {
   for (const chord of chords) {
     for (const step of pattern) {
       const midiKey = chord[step];
-      const velocity = step === 0 ? 92 : step === 1 ? 84 : 76;
+      const velocity = step === 0 ? 80 : step === 1 ? 74 : 68;
       events.push({
         type: 'noteOn',
         timeSeconds: time,
