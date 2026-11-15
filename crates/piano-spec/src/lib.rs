@@ -2,8 +2,11 @@
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 pub mod dispersion;
 pub mod events;
+pub mod preset_codec;
 pub mod scale_design;
 pub mod voicing;
 
@@ -16,6 +19,11 @@ pub use dispersion::{
     MAX_TRANSVERSE_PARTIALS_PER_STRING,
 };
 pub use events::{u16_to_unit_f32, u7_to_u16, EventKind, PedalKind, SampleEvent};
+pub use preset_codec::{
+    crc32_ieee, BodyModeRecord, BodyPreset, LidState, ListenerPerspective, PresetDecodeError,
+    PresetReducedPole, PRESET_BRIDGE_ZONES, PRESET_MAGIC, PRESET_RADIATOR_ZONES, PRESET_RAD_COEFFS,
+    PRESET_REDUCED_POLES, PRESET_VERSION,
+};
 pub use scale_design::{
     build_scale_design, equal_temperament_hz, key_choir, key_to_midi, midi_to_key,
     string_params_for_key, ChoirLayout, StringPhysicalParams, CHOIR_LAYOUTS, DAMPED_KEYS, MIDI_A0,
