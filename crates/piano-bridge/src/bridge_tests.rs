@@ -181,7 +181,7 @@ fn hertz_contact_potential_and_conservation() {
 
 #[test]
 fn lossless_energy_conservation_across_sample_rates() {
-    let freqs = [89.0_f64, 205.0_f64, 385.0_f64];
+    let freqs = [89.0_f64, 218.0_f64, 425.0_f64];
     let drive_keys = [18_usize, 32, 48];
     for sr in SAMPLE_RATES {
         let ts = 1.0 / f64::from(sr);
@@ -370,7 +370,7 @@ fn duplex_treble_excitation_and_bass_isolation() {
     for n in 0..2_048 {
         let t = (n as f64) * ts;
         let mut a = [0.0_f32; TOTAL_STRINGS];
-        let strike_env = if n < 48 { 1.0 } else { 0.4 };
+        let strike_env = if n < 48 { 1.2 } else { 0.8 };
         let val = (strike_env * (0.6 * (TAU * f_dup_a * t).sin() + 0.6 * (TAU * f_dup_b * t).sin()))
             as f32;
         for &key_idx in &treble_keys {
