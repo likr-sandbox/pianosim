@@ -312,7 +312,7 @@ export class AppShell {
   }
 
   private releaseNote(midiKey: number): void {
-    this.host.noteOff(midiKey, 0, 0);
+    this.host.noteOff(midiKey, 65535, 0);
     this.keyboardView.setKeyActive(midiKey, false);
   }
 

@@ -112,7 +112,7 @@ export function createChopinNocturne(): ParsedSmf {
       tick,
       channel: 0,
       midiKey: m.bass,
-      velocity: 80,
+      velocity: 96,
     } as MidiNoteEvent);
     events.push({
       type: 'noteOff',
@@ -135,7 +135,7 @@ export function createChopinNocturne(): ParsedSmf {
           tick: cTick,
           channel: 0,
           midiKey: k,
-          velocity: 60,
+          velocity: 72,
         } as MidiNoteEvent);
         events.push({
           type: 'noteOff',
@@ -159,7 +159,7 @@ export function createChopinNocturne(): ParsedSmf {
         tick: mTick,
         channel: 0,
         midiKey: melKey,
-        velocity: 88,
+        velocity: 96,
       } as MidiNoteEvent);
       events.push({
         type: 'noteOff',

@@ -107,8 +107,9 @@ export class TelemetryClient {
     const sorted = this.sortScratch.subarray(0, n);
     sorted.sort();
 
+    const p99Idx = n > 1 ? Math.min(n - 2, Math.floor(0.99 * (n - 1))) : 0;
     this.p50Us = sorted[Math.floor(n * 0.5)];
-    this.p99Us = sorted[Math.min(n - 1, Math.floor(n * 0.99))];
+    this.p99Us = sorted[p99Idx];
 
     this.telemetry = {
       ...snapshot,

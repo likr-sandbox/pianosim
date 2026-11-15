@@ -5,10 +5,13 @@ export interface PointerGlissandoCallbacks {
   onRelease(midiKey: number): void;
 }
 
+const GLISSANDO_HOLD_MS = 450;
+
 export class PointerGlissando {
   private readonly container: HTMLElement;
   private readonly callbacks: PointerGlissandoCallbacks;
   private readonly activePointers = new Map<number, number>(); // pointerId -> midiKey
+  private readonly pendingGlissando = new Map<number, number>(); // timerId -> midiKey
   private readonly cleanupHandlers: Array<() => void> = [];
 
   constructor(container: HTMLElement, callbacks: PointerGlissandoCallbacks) {
@@ -18,10 +21,24 @@ export class PointerGlissando {
   }
 
   clear(): void {
+    for (const [timerId, midiKey] of this.pendingGlissando.entries()) {
+      window.clearTimeout(timerId);
+      this.callbacks.onRelease(midiKey);
+    }
+    this.pendingGlissando.clear();
+
     for (const midiKey of this.activePointers.values()) {
       this.callbacks.onRelease(midiKey);
     }
     this.activePointers.clear();
+  }
+
+  private clearPendingGlissando(): void {
+    for (const [timerId, midiKey] of this.pendingGlissando.entries()) {
+      window.clearTimeout(timerId);
+      this.callbacks.onRelease(midiKey);
+    }
+    this.pendingGlissando.clear();
   }
 
   destroy(): void {
@@ -35,7 +52,7 @@ export class PointerGlissando {
   private attachListeners(): void {
     const onPointerDown = (e: PointerEvent) => {
       // Only primary mouse button or touch/pen
-      if (e.pointerType === 'mouse' && e.button !== 0) {
+      if (e.pointerType === 'mouse' && e.button !== 0 && e.buttons !== 1) {
         return;
       }
       const keyEl = this.findKeyElement(e.target as Element | null, e.clientX, e.clientY);
@@ -83,15 +100,29 @@ export class PointerGlissando {
         this.activePointers.set(e.pointerId, nextMidi);
         this.callbacks.onPress(nextMidi);
       } else if (currentMidi !== nextMidi) {
-        // Glissando transition to adjacent key
-        this.callbacks.onRelease(currentMidi);
+        // Glissando transition to adjacent key: maintain voice polyphony during drag
+        const timerId = window.setTimeout(() => {
+          this.pendingGlissando.delete(timerId);
+          this.callbacks.onRelease(currentMidi);
+        }, GLISSANDO_HOLD_MS);
+        this.pendingGlissando.set(timerId, currentMidi);
         this.activePointers.set(e.pointerId, nextMidi);
         this.callbacks.onPress(nextMidi);
       }
     };
 
     const onPointerUp = (e: PointerEvent) => {
-      const midi = this.activePointers.get(e.pointerId);
+      this.clearPendingGlissando();
+      let midi = this.activePointers.get(e.pointerId);
+      if (midi === undefined) {
+        const keyEl = this.findKeyElement(e.target as Element | null, e.clientX, e.clientY);
+        if (keyEl) {
+          const targetMidi = this.extractMidiKey(keyEl);
+          if (targetMidi !== null) {
+            midi = targetMidi;
+          }
+        }
+      }
       if (midi !== undefined) {
         this.callbacks.onRelease(midi);
         this.activePointers.delete(e.pointerId);
@@ -99,7 +130,17 @@ export class PointerGlissando {
     };
 
     const onPointerCancel = (e: PointerEvent) => {
-      const midi = this.activePointers.get(e.pointerId);
+      this.clearPendingGlissando();
+      let midi = this.activePointers.get(e.pointerId);
+      if (midi === undefined) {
+        const keyEl = this.findKeyElement(e.target as Element | null, e.clientX, e.clientY);
+        if (keyEl) {
+          const targetMidi = this.extractMidiKey(keyEl);
+          if (targetMidi !== null) {
+            midi = targetMidi;
+          }
+        }
+      }
       if (midi !== undefined) {
         this.callbacks.onRelease(midi);
         this.activePointers.delete(e.pointerId);
@@ -110,17 +151,22 @@ export class PointerGlissando {
       this.clear();
     };
 
-    this.container.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerup', onPointerUp, { passive: true });
-    window.addEventListener('pointercancel', onPointerCancel, { passive: true });
+    this.container.addEventListener('pointerdown', onPointerDown, { capture: true });
+    this.container.addEventListener('pointerup', onPointerUp, { capture: true });
+    this.container.addEventListener('pointercancel', onPointerCancel, { capture: true });
+
+    window.addEventListener('pointermove', onPointerMove, { passive: true, capture: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true, capture: true });
+    window.addEventListener('pointercancel', onPointerCancel, { passive: true, capture: true });
     window.addEventListener('blur', onWindowBlur);
 
     this.cleanupHandlers.push(() => {
-      this.container.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointercancel', onPointerCancel);
+      this.container.removeEventListener('pointerdown', onPointerDown, { capture: true });
+      this.container.removeEventListener('pointerup', onPointerUp, { capture: true });
+      this.container.removeEventListener('pointercancel', onPointerCancel, { capture: true });
+      window.removeEventListener('pointermove', onPointerMove, { capture: true });
+      window.removeEventListener('pointerup', onPointerUp, { capture: true });
+      window.removeEventListener('pointercancel', onPointerCancel, { capture: true });
       window.removeEventListener('blur', onWindowBlur);
     });
   }

@@ -11,7 +11,7 @@ import workletCode from './worklet-processor.ts?worklet';
 
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d] as const;
 const INIT_TIMEOUT_MS = 10_000;
-const ANALYSER_FFT_SIZE = 16_384;
+const ANALYSER_FFT_SIZE = 2048;
 
 function assertValidWasmBytes(bytes: ArrayBuffer): void {
   if (bytes.byteLength < 8) {
@@ -155,7 +155,7 @@ export class WasmAudioHost {
         throw new Error('Web Audio API is not supported in this browser.');
       }
 
-      audioContext = new AudioCtx({ latencyHint: 'interactive' });
+      audioContext = new AudioCtx({ latencyHint: 'interactive', sampleRate: 48000 });
       audioContext.onstatechange = () => {
         this.telemetry.syncContextState();
       };

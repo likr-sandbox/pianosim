@@ -125,5 +125,6 @@ export interface PianoDiagnostics {
 /** Maps a 7-bit MIDI value (`0..=127`) onto 16-bit unsigned (`0..=65535`). */
 export function u7ToU16(v: number): number {
   const clamped = Math.max(0, Math.min(127, Math.trunc(v)));
-  return Math.trunc((clamped * 65535) / 127);
+  if (clamped === 0) return 0;
+  return Math.trunc(14000 + ((clamped - 1) * (65535 - 14000)) / 126);
 }
