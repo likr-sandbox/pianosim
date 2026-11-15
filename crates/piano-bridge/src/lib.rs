@@ -47,6 +47,146 @@ const fn sanitize_sample_rate(sample_rate: f32) -> f32 {
     }
 }
 
+const MAX_ZONE_RUNS: usize = 16;
+const _: () = assert!(TOTAL_STRINGS <= u8::MAX as usize);
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct ZoneRun(u8, u8, u8, u8);
+
+impl ZoneRun {
+    #[inline]
+    fn bounds(self) -> (usize, usize, usize, usize) {
+        let end = usize::from(self.1).min(TOTAL_STRINGS);
+        let mask = NUM_BRIDGE_ZONES - 1;
+        (
+            usize::from(self.0).min(end),
+            end,
+            usize::from(self.2) & mask,
+            usize::from(self.3) & mask,
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ZoneRunCache {
+    runs: [ZoneRun; MAX_ZONE_RUNS],
+    run_count: usize,
+    rw0: [f64; TOTAL_STRINGS],
+    rw1: [f64; TOTAL_STRINGS],
+    w0_f64: [f64; TOTAL_STRINGS],
+    w1_f64: [f64; TOTAL_STRINGS],
+}
+
+impl ZoneRunCache {
+    fn build(zone_weights: &[ZoneWeight; TOTAL_STRINGS], r0: &[f32; TOTAL_STRINGS]) -> Self {
+        let mut runs = [ZoneRun::default(); MAX_ZONE_RUNS];
+        let mut run_count = 0_usize;
+        let mut rw0 = [0.0_f64; TOTAL_STRINGS];
+        let mut rw1 = [0.0_f64; TOTAL_STRINGS];
+        let mut w0_f64 = [0.0_f64; TOTAL_STRINGS];
+        let mut w1_f64 = [0.0_f64; TOTAL_STRINGS];
+
+        for (s, (&(raw_z0, w0, raw_z1, w1), &r_s)) in zone_weights.iter().zip(r0).enumerate() {
+            let z0 = raw_z0 & ((NUM_BRIDGE_ZONES - 1) as u8);
+            let z1 = raw_z1 & ((NUM_BRIDGE_ZONES - 1) as u8);
+            let fw0 = f64::from(w0);
+            let fw1 = f64::from(w1);
+            let fr = f64::from(r_s);
+            w0_f64[s] = fw0;
+            w1_f64[s] = fw1;
+            rw0[s] = fr * fw0;
+            rw1[s] = fr * fw1;
+
+            let end = (s + 1) as u8;
+            if run_count > 0 && runs[run_count - 1].2 == z0 && runs[run_count - 1].3 == z1 {
+                runs[run_count - 1].1 = end;
+            } else if run_count < MAX_ZONE_RUNS {
+                runs[run_count] = ZoneRun(s as u8, end, z0, z1);
+                run_count += 1;
+            }
+        }
+
+        Self {
+            runs,
+            run_count,
+            rw0,
+            rw1,
+            w0_f64,
+            w1_f64,
+        }
+    }
+
+    fn update_resistances(&mut self, r0: &[f32; TOTAL_STRINGS]) {
+        for (s, &r_s) in r0.iter().enumerate() {
+            let fr = f64::from(r_s);
+            self.rw0[s] = fr * self.w0_f64[s];
+            self.rw1[s] = fr * self.w1_f64[s];
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn scatter_sanitized_run(
+    cache: &ZoneRunCache,
+    run: ZoneRun,
+    a_waves: &[f32; TOTAL_STRINGS],
+) -> (f64, f64) {
+    let (start, end, _, _) = run.bounds();
+    let (mut acc0, mut acc1) = (0.0_f64, 0.0_f64);
+    for ((&a_s, &c0), &c1) in a_waves[start..end]
+        .iter()
+        .zip(&cache.rw0[start..end])
+        .zip(&cache.rw1[start..end])
+    {
+        let safe_a = if a_s.is_finite() { f64::from(a_s) } else { 0.0 };
+        acc0 += c0 * safe_a;
+        acc1 += c1 * safe_a;
+    }
+    (acc0, acc1)
+}
+
+#[cold]
+#[inline(never)]
+fn gather_sanitized_run(
+    cache: &ZoneRunCache,
+    run: ZoneRun,
+    b_waves: &mut [f32; TOTAL_STRINGS],
+    a_waves: &[f32; TOTAL_STRINGS],
+    two_vz0: f64,
+    two_vz1: f64,
+) {
+    let (start, end, _, _) = run.bounds();
+    for (((b_out, &a_s), &w0), &w1) in b_waves[start..end]
+        .iter_mut()
+        .zip(&a_waves[start..end])
+        .zip(&cache.w0_f64[start..end])
+        .zip(&cache.w1_f64[start..end])
+    {
+        if !b_out.is_finite() {
+            let safe_a = if a_s.is_finite() { f64::from(a_s) } else { 0.0 };
+            let fb = (w0 * two_vz0 + w1 * two_vz1 - safe_a) as f32;
+            *b_out = if fb.is_finite() { fb } else { 0.0 };
+        }
+    }
+}
+
+#[inline]
+fn mat8_vec(
+    m: &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+    v: &[f64; NUM_BRIDGE_ZONES],
+) -> [f64; NUM_BRIDGE_ZONES] {
+    let mut out = [0.0_f64; NUM_BRIDGE_ZONES];
+    for (dst, row) in out.iter_mut().zip(m.iter()) {
+        let mut acc = 0.0_f64;
+        for (&m_ij, &v_j) in row.iter().zip(v.iter()) {
+            acc += m_ij * v_j;
+        }
+        *dst = acc;
+    }
+    out
+}
+
 /// Integrated Stage 3 bidirectional bridge bank coupling all 230 strings, 10 reduced
 /// soundboard/bridge modes, nonlinear Hertz bridge-pin contact, and 64 treble duplex modes
 /// across 8 physical bridge zones.
@@ -56,31 +196,41 @@ pub struct BridgeBank {
     ts: f64,
     zone_weights: [ZoneWeight; TOTAL_STRINGS],
     r0: [f32; TOTAL_STRINGS],
+    zone_cache: ZoneRunCache,
     ssm: AdmittanceSsm,
     hertz: HertzBridgeContact,
     duplex: DuplexBank,
 }
 
 impl BridgeBank {
-    /// Initializes the Stage 3 bridge bank with physical concert-grand defaults at `sample_rate`.
-    #[must_use]
-    pub fn new(sample_rate: f32) -> Self {
+    fn build(sample_rate: f32, mut ssm: AdmittanceSsm, duplex: DuplexBank) -> Self {
         let safe_sr = sanitize_sample_rate(sample_rate);
         let r0 = default_string_port_resistances(safe_sr);
         let zone_weights = build_zone_weights();
-        let mut ssm = AdmittanceSsm::new(safe_sr);
         let hertz = HertzBridgeContact::new(safe_sr);
-        let duplex = DuplexBank::new(safe_sr);
         ssm.set_port_resistances(&r0, &zone_weights, duplex.port_resistances());
+        let zone_cache = ZoneRunCache::build(&zone_weights, &r0);
         Self {
             sample_rate: safe_sr,
             ts: 1.0 / f64::from(safe_sr),
             zone_weights,
             r0,
+            zone_cache,
             ssm,
             hertz,
             duplex,
         }
+    }
+
+    /// Initializes the Stage 3 bridge bank with physical concert-grand defaults at `sample_rate`.
+    #[must_use]
+    pub fn new(sample_rate: f32) -> Self {
+        let safe_sr = sanitize_sample_rate(sample_rate);
+        Self::build(
+            safe_sr,
+            AdmittanceSsm::new(safe_sr),
+            DuplexBank::new(safe_sr),
+        )
     }
 
     /// Initializes the Stage 3 bridge bank in exact lossless mode (`zeta = 0`, `y_inf = 0`,
@@ -88,49 +238,30 @@ impl BridgeBank {
     #[must_use]
     pub fn lossless_for_test(sample_rate: f32) -> Self {
         let safe_sr = sanitize_sample_rate(sample_rate);
-        let r0 = default_string_port_resistances(safe_sr);
-        let zone_weights = build_zone_weights();
-        let mut ssm = AdmittanceSsm::new_lossless(safe_sr);
-        let hertz = HertzBridgeContact::new(safe_sr);
-        let duplex = DuplexBank::new_with_params(safe_sr, 0.0, true);
-        ssm.set_port_resistances(&r0, &zone_weights, duplex.port_resistances());
-        Self {
-            sample_rate: safe_sr,
-            ts: 1.0 / f64::from(safe_sr),
-            zone_weights,
-            r0,
-            ssm,
-            hertz,
-            duplex,
-        }
+        Self::build(
+            safe_sr,
+            AdmittanceSsm::new_lossless(safe_sr),
+            DuplexBank::new_with_params(safe_sr, 0.0, true),
+        )
     }
 
     #[cfg(test)]
     pub(crate) fn lossless_with_duplex_for_test(sample_rate: f32) -> Self {
         let safe_sr = sanitize_sample_rate(sample_rate);
-        let r0 = default_string_port_resistances(safe_sr);
-        let zone_weights = build_zone_weights();
-        let mut ssm = AdmittanceSsm::new_lossless(safe_sr);
-        let hertz = HertzBridgeContact::new(safe_sr);
-        let duplex = DuplexBank::new_with_params(safe_sr, 1.0, true);
-        ssm.set_port_resistances(&r0, &zone_weights, duplex.port_resistances());
-        Self {
-            sample_rate: safe_sr,
-            ts: 1.0 / f64::from(safe_sr),
-            zone_weights,
-            r0,
-            ssm,
-            hertz,
-            duplex,
-        }
+        Self::build(
+            safe_sr,
+            AdmittanceSsm::new_lossless(safe_sr),
+            DuplexBank::new_with_params(safe_sr, 1.0, true),
+        )
     }
 
     /// Updates per-string WDF bridge port resistances `r0` (`[kg/s]`) and recomputes the
     /// precomputed `8x8` WDF junction matrices offline (`init` / reconfiguration only).
     pub fn set_port_resistances(&mut self, r0: &[f32; TOTAL_STRINGS]) {
-        for (dst, &src) in self.r0.iter_mut().zip(r0.iter()) {
-            *dst = if src.is_finite() { src.max(0.0) } else { 0.0 };
+        for (dst_r, &src) in self.r0.iter_mut().zip(r0.iter()) {
+            *dst_r = if src.is_finite() { src.max(0.0) } else { 0.0 };
         }
+        self.zone_cache.update_resistances(&self.r0);
         self.ssm
             .set_port_resistances(&self.r0, &self.zone_weights, self.duplex.port_resistances());
     }
@@ -242,68 +373,53 @@ impl BridgeBank {
         b_waves_out: &mut [f32; TOTAL_STRINGS],
         zone_out: &mut [f32; NUM_BRIDGE_ZONES],
     ) -> (f32, f32) {
+        let cache = &self.zone_cache;
         let mut f_inc_str = [0.0_f64; NUM_BRIDGE_ZONES];
-        for ((&a_s, &(z0, w0, z1, w1)), &r_s) in a_waves
-            .iter()
-            .zip(self.zone_weights.iter())
-            .zip(self.r0.iter())
-        {
-            let safe_a = if a_s.is_finite() { f64::from(a_s) } else { 0.0 };
-            let inc = f64::from(r_s) * safe_a;
-            let i0 = usize::from(z0) & (NUM_BRIDGE_ZONES - 1);
-            let i1 = usize::from(z1) & (NUM_BRIDGE_ZONES - 1);
-            f_inc_str[i0] += f64::from(w0) * inc;
-            f_inc_str[i1] += f64::from(w1) * inc;
+        for &run in &cache.runs[..cache.run_count] {
+            let (start, end, z0, z1) = run.bounds();
+            let (mut acc0, mut acc1) = (0.0_f64, 0.0_f64);
+            for ((&a_s, &rw0), &rw1) in a_waves[start..end]
+                .iter()
+                .zip(&cache.rw0[start..end])
+                .zip(&cache.rw1[start..end])
+            {
+                let a = f64::from(a_s);
+                acc0 += rw0 * a;
+                acc1 += rw1 * a;
+            }
+            if !(acc0.is_finite() && acc1.is_finite()) {
+                (acc0, acc1) = scatter_sanitized_run(cache, run, a_waves);
+            }
+            f_inc_str[z0] += acc0;
+            f_inc_str[z1] += acc1;
         }
 
         let f_dup_free = self.duplex.free_forces();
-        let mut f_inc_wdf = [0.0_f64; NUM_BRIDGE_ZONES];
-        for z in 0..NUM_BRIDGE_ZONES {
-            f_inc_wdf[z] = f_inc_str[z] + f_dup_free[z];
-        }
-
         let (qd_free, v_free) = self.ssm.free_velocities();
         let g = self.hertz.eval_sav_gradient();
         let r_h = self.hertz.r_sav();
 
-        let a_br = self.ssm.a_br();
-        let solve_8x8 = self.ssm.solve_8x8();
-        let solve_abr = self.ssm.solve_abr();
-        let g_total = self.ssm.g_total();
-
+        let mut f_inc_wdf = [0.0_f64; NUM_BRIDGE_ZONES];
         let mut f_rhs_eff = [0.0_f64; NUM_BRIDGE_ZONES];
         for z in 0..NUM_BRIDGE_ZONES {
-            f_rhs_eff[z] = f_inc_wdf[z] - r_h * g[z];
+            let f_wdf = f_inc_str[z] + f_dup_free[z];
+            f_inc_wdf[z] = f_wdf;
+            f_rhs_eff[z] = f_wdf - r_h * g[z];
         }
 
+        let a_f = mat8_vec(self.ssm.a_br(), &f_rhs_eff);
         let mut rhs = [0.0_f64; NUM_BRIDGE_ZONES];
         for i in 0..NUM_BRIDGE_ZONES {
-            let mut acc = v_free[i];
-            for j in 0..NUM_BRIDGE_ZONES {
-                acc += a_br[i][j] * f_rhs_eff[j];
-            }
-            rhs[i] = acc;
+            rhs[i] = v_free[i] + a_f[i];
         }
-
-        let mut v0 = [0.0_f64; NUM_BRIDGE_ZONES];
-        for i in 0..NUM_BRIDGE_ZONES {
-            let mut acc = 0.0_f64;
-            for j in 0..NUM_BRIDGE_ZONES {
-                acc += solve_8x8[i][j] * rhs[j];
-            }
-            v0[i] = acc;
-        }
+        let v0 = mat8_vec(self.ssm.solve_8x8(), &rhs);
+        let s_g = mat8_vec(self.ssm.solve_abr(), &g);
 
         let half_ts = 0.5 * self.ts;
         let mut u_sm = [0.0_f64; NUM_BRIDGE_ZONES];
-        let mut denom = 1.0_f64;
-        let mut g_dot_v0 = 0.0_f64;
+        let (mut denom, mut g_dot_v0) = (1.0_f64, 0.0_f64);
         for i in 0..NUM_BRIDGE_ZONES {
-            let mut acc = 0.0_f64;
-            for j in 0..NUM_BRIDGE_ZONES {
-                acc += solve_abr[i][j] * g[j];
-            }
-            let ui = half_ts * acc;
+            let ui = half_ts * s_g[i];
             u_sm[i] = ui;
             denom += g[i] * ui;
             g_dot_v0 += g[i] * v0[i];
@@ -319,13 +435,10 @@ impl BridgeBank {
         }
 
         let f_hertz_on_br = self.hertz.commit_step(&g, &v_zone_f64);
+        let g_v = mat8_vec(self.ssm.g_total(), &v_zone_f64);
         let mut f_zone_ssm = [0.0_f64; NUM_BRIDGE_ZONES];
         for i in 0..NUM_BRIDGE_ZONES {
-            let mut g_v = 0.0_f64;
-            for j in 0..NUM_BRIDGE_ZONES {
-                g_v += g_total[i][j] * v_zone_f64[j];
-            }
-            f_zone_ssm[i] = f_inc_wdf[i] + f_hertz_on_br[i] - g_v;
+            f_zone_ssm[i] = f_inc_wdf[i] + f_hertz_on_br[i] - g_v[i];
         }
         self.ssm.commit_step(&qd_free, &f_zone_ssm);
 
@@ -336,17 +449,25 @@ impl BridgeBank {
         }
         let duplex_stereo = self.duplex.step_with_zone_velocities(&v_zone);
 
-        for ((b_out, &a_s), &(z0, w0, z1, w1)) in b_waves_out
-            .iter_mut()
-            .zip(a_waves.iter())
-            .zip(self.zone_weights.iter())
-        {
-            let safe_a = if a_s.is_finite() { f64::from(a_s) } else { 0.0 };
-            let i0 = usize::from(z0) & (NUM_BRIDGE_ZONES - 1);
-            let i1 = usize::from(z1) & (NUM_BRIDGE_ZONES - 1);
-            let v_br_s = f64::from(w0) * v_zone_f64[i0] + f64::from(w1) * v_zone_f64[i1];
-            let b_val = (2.0 * v_br_s - safe_a) as f32;
-            *b_out = if b_val.is_finite() { b_val } else { 0.0 };
+        for &run in &cache.runs[..cache.run_count] {
+            let (start, end, z0, z1) = run.bounds();
+            let (vz0, vz1) = (v_zone_f64[z0], v_zone_f64[z1]);
+            let two_vz0 = if vz0.is_finite() { 2.0 * vz0 } else { 0.0 };
+            let two_vz1 = if vz1.is_finite() { 2.0 * vz1 } else { 0.0 };
+            let mut all_finite = true;
+            for (((b_out, &a_s), &w0), &w1) in b_waves_out[start..end]
+                .iter_mut()
+                .zip(&a_waves[start..end])
+                .zip(&cache.w0_f64[start..end])
+                .zip(&cache.w1_f64[start..end])
+            {
+                let b = (w0 * two_vz0 + w1 * two_vz1 - f64::from(a_s)) as f32;
+                *b_out = b;
+                all_finite &= b.is_finite();
+            }
+            if !all_finite {
+                gather_sanitized_run(cache, run, b_waves_out, a_waves, two_vz0, two_vz1);
+            }
         }
 
         let y_inf = self.ssm.y_inf();
