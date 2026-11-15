@@ -1,6 +1,7 @@
 //! Stage 2 <-> Stage 3 Wave Digital Filter (WDF) displacement-bridge port
 //! precomputation and compact `< 4,500 Hz` prefix table packing (`no_std`).
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -36,6 +37,25 @@ pub trait BridgePortDriver {
     ) -> (f32, f32);
 }
 
+/// Compact per-string prefix metadata for contiguous L1 uncoupled WDF stepping.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct FastPrefixMeta {
+    pub n_vh: u32,
+    pub a_wave_gain: f32,
+    pub pan_l: f32,
+    pub pan_r: f32,
+}
+
+impl FastPrefixMeta {
+    pub const ZERO: Self = Self {
+        n_vh: 0,
+        a_wave_gain: 0.0,
+        pan_l: 0.0,
+        pan_r: 0.0,
+    };
+}
+
 /// Precomputed per-string prefix/tail slice bounds and WDF bridge port weights.
 #[derive(Clone, Debug)]
 pub(crate) struct StringBridgeMeta {
@@ -45,6 +65,7 @@ pub(crate) struct StringBridgeMeta {
     pub h_tail: Range<usize>,
     pub beta_v_off: usize,
     pub beta_h_off: usize,
+    pub n_vh: usize,
     pub a_wave_gain: f32,
 }
 
@@ -57,18 +78,26 @@ impl StringBridgeMeta {
             h_tail: 0..0,
             beta_v_off: 0,
             beta_h_off: 0,
+            n_vh: 0,
             a_wave_gain: 0.0,
         }
     }
 }
 
-/// Precomputed compact WDF bridge port couplings and packed ZOH tables for string prefixes.
+/// Precomputed compact WDF bridge port couplings and L1-packed ZOH state/tables.
 #[derive(Clone, Debug)]
 pub(crate) struct BridgePorts {
+    pub total_prefix_vecs: usize,
     pub beta_br: AlignedBuf,
     pub d_br: AlignedBuf,
     pub s_br: AlignedBuf,
     pub c_br: AlignedBuf,
+    pub u_br: AlignedBuf,
+    pub v_br: AlignedBuf,
+    pub c_tail_l: AlignedBuf,
+    pub c_tail_r: AlignedBuf,
+    pub tail_idx_scratch: Box<[u16]>,
+    pub fast_meta: [FastPrefixMeta; TOTAL_STRINGS],
     pub r0: [f32; TOTAL_STRINGS],
     pub r_damp_prefix_v: [f32; TOTAL_STRINGS],
     pub r_damp_prefix_h: [f32; TOTAL_STRINGS],
@@ -168,11 +197,18 @@ impl BridgePorts {
             total_prefix_vecs += nv_vecs + nh_vecs;
         }
 
+        assert!(map.total_vecs() <= usize::from(u16::MAX));
         let mut beta_vals: Vec<f32> = Vec::with_capacity(total_prefix_vecs * 4);
         beta_vals.resize(total_prefix_vecs * 4, 0.0);
         let mut d_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
         let mut s_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
         let mut c_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
+        let u_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
+        let v_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
+        let mut c_tail_l = AlignedBuf::zeroed(map.total_vecs().max(1) * 4);
+        let mut c_tail_r = AlignedBuf::zeroed(map.total_vecs().max(1) * 4);
+        let tail_idx_scratch = alloc::vec![0_u16; map.total_vecs()].into_boxed_slice();
+        let mut fast_meta = [FastPrefixMeta::ZERO; TOTAL_STRINGS];
         let d_src = soa.d_coeff.as_f32x4_slice();
         let s_src = soa.s_coeff.as_f32x4_slice();
         let c_src = soa.c_bridge.as_f32x4_slice();
@@ -238,23 +274,38 @@ impl BridgePorts {
             meta[s_idx].h_tail = (entry.horiz_vecs.start + nh_vecs)..entry.horiz_vecs.end;
             meta[s_idx].beta_v_off = beta_v_off;
             meta[s_idx].beta_h_off = beta_h_off;
+            meta[s_idx].n_vh = nv_vecs + nh_vecs;
 
-            let (v_br, h_br) = (meta[s_idx].v_br.clone(), meta[s_idx].h_br.clone());
+            fast_meta[s_idx] = FastPrefixMeta {
+                n_vh: (nv_vecs + nh_vecs) as u32,
+                a_wave_gain: meta[s_idx].a_wave_gain,
+                pan_l: entry.pan_l,
+                pan_r: entry.pan_r,
+            };
+
+            let (v_br_r, h_br_r) = (meta[s_idx].v_br.clone(), meta[s_idx].h_br.clone());
             d_br.as_f32x4_slice_mut()[beta_v_off..beta_v_off + nv_vecs]
-                .copy_from_slice(&d_src[v_br.clone()]);
+                .copy_from_slice(&d_src[v_br_r.clone()]);
             s_br.as_f32x4_slice_mut()[beta_v_off..beta_v_off + nv_vecs]
-                .copy_from_slice(&s_src[v_br.clone()]);
+                .copy_from_slice(&s_src[v_br_r.clone()]);
             c_br.as_f32x4_slice_mut()[beta_v_off..beta_v_off + nv_vecs]
-                .copy_from_slice(&c_src[v_br.clone()]);
+                .copy_from_slice(&c_src[v_br_r]);
             d_br.as_f32x4_slice_mut()[beta_h_off..beta_h_off + nh_vecs]
-                .copy_from_slice(&d_src[h_br.clone()]);
+                .copy_from_slice(&d_src[h_br_r.clone()]);
             s_br.as_f32x4_slice_mut()[beta_h_off..beta_h_off + nh_vecs]
-                .copy_from_slice(&s_src[h_br.clone()]);
+                .copy_from_slice(&s_src[h_br_r.clone()]);
             c_br.as_f32x4_slice_mut()[beta_h_off..beta_h_off + nh_vecs]
-                .copy_from_slice(&c_src[h_br]);
+                .copy_from_slice(&c_src[h_br_r]);
+
+            let (pl, pr) = (F32x4::splat(entry.pan_l), F32x4::splat(entry.pan_r));
+            let (cl_sl, cr_sl) = (c_tail_l.as_f32x4_slice_mut(), c_tail_r.as_f32x4_slice_mut());
+            for i in entry.all_vecs() {
+                cl_sl[i] = c_src[i] * pl;
+                cr_sl[i] = c_src[i] * pr;
+            }
 
             // Prefix damper port resistances match `r_port_damp_v/h` (`alpha * sum(b_damp^2)`)
-            // so `1 + 0.5 * rp * c` preserves exact discrete passivity on `< 5,500 Hz` prefixes.
+            // so `1 + 0.5 * rp * c` preserves exact discrete passivity on `< 4,500 Hz` prefixes.
             if entry.has_damper {
                 let bd = ports.b_damp.as_slice();
                 let sum_sq_slice = |vr: &Range<usize>| -> f64 {
@@ -271,10 +322,17 @@ impl BridgePorts {
         let mut beta_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
         beta_br.as_mut_slice()[..beta_vals.len()].copy_from_slice(&beta_vals);
         Self {
+            total_prefix_vecs,
             beta_br,
             d_br,
             s_br,
             c_br,
+            u_br,
+            v_br,
+            c_tail_l,
+            c_tail_r,
+            tail_idx_scratch,
+            fast_meta,
             r0,
             r_damp_prefix_v,
             r_damp_prefix_h,
@@ -284,35 +342,89 @@ impl BridgePorts {
         }
     }
 
-    /// Computes incident velocity waves `a_waves[s]` from current modal `soa.v`.
+    /// Zeroes packed L1 prefix state buffers without reallocating.
+    #[inline]
+    pub fn reset_resting(&mut self) {
+        self.u_br.as_mut_slice().fill(0.0);
+        self.v_br.as_mut_slice().fill(0.0);
+    }
+
+    /// Copies all 230 strings' prefix `(u, v)` state from `soa` into L1-packed buffers.
+    pub fn pack_from_soa(&mut self, soa: &ModalSoa) {
+        let (u_src, v_src) = (soa.u.as_f32x4_slice(), soa.v.as_f32x4_slice());
+        let (u_dst, v_dst) = (
+            self.u_br.as_f32x4_slice_mut(),
+            self.v_br.as_f32x4_slice_mut(),
+        );
+        for m in &self.meta {
+            let (nv, nh) = (m.v_br.len(), m.h_br.len());
+            u_dst[m.beta_v_off..m.beta_v_off + nv].copy_from_slice(&u_src[m.v_br.clone()]);
+            v_dst[m.beta_v_off..m.beta_v_off + nv].copy_from_slice(&v_src[m.v_br.clone()]);
+            u_dst[m.beta_h_off..m.beta_h_off + nh].copy_from_slice(&u_src[m.h_br.clone()]);
+            v_dst[m.beta_h_off..m.beta_h_off + nh].copy_from_slice(&v_src[m.h_br.clone()]);
+        }
+    }
+
+    /// Copies all 230 strings' prefix `(u, v)` state from L1-packed buffers back to `soa`.
+    pub fn unpack_to_soa(&self, soa: &mut ModalSoa) {
+        let (u_dst, v_dst) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
+        let (u_src, v_src) = (self.u_br.as_f32x4_slice(), self.v_br.as_f32x4_slice());
+        for m in &self.meta {
+            let (nv, nh) = (m.v_br.len(), m.h_br.len());
+            u_dst[m.v_br.clone()].copy_from_slice(&u_src[m.beta_v_off..m.beta_v_off + nv]);
+            v_dst[m.v_br.clone()].copy_from_slice(&v_src[m.beta_v_off..m.beta_v_off + nv]);
+            u_dst[m.h_br.clone()].copy_from_slice(&u_src[m.beta_h_off..m.beta_h_off + nh]);
+            v_dst[m.h_br.clone()].copy_from_slice(&v_src[m.beta_h_off..m.beta_h_off + nh]);
+        }
+    }
+
+    /// Syncs a single string's packed prefix `(u, v)` out to `soa`.
+    #[inline(always)]
+    pub fn sync_string_to_soa(&self, soa: &mut ModalSoa, s_idx: usize) {
+        let m = &self.meta[s_idx];
+        let (u_dst, v_dst) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
+        let (u_src, v_src) = (self.u_br.as_f32x4_slice(), self.v_br.as_f32x4_slice());
+        let (nv, nh) = (m.v_br.len(), m.h_br.len());
+        u_dst[m.v_br.clone()].copy_from_slice(&u_src[m.beta_v_off..m.beta_v_off + nv]);
+        v_dst[m.v_br.clone()].copy_from_slice(&v_src[m.beta_v_off..m.beta_v_off + nv]);
+        u_dst[m.h_br.clone()].copy_from_slice(&u_src[m.beta_h_off..m.beta_h_off + nh]);
+        v_dst[m.h_br.clone()].copy_from_slice(&v_src[m.beta_h_off..m.beta_h_off + nh]);
+    }
+
+    /// Syncs a single string's prefix `(u, v)` from `soa` into L1-packed buffers.
+    #[inline(always)]
+    pub fn sync_string_from_soa(&mut self, soa: &ModalSoa, s_idx: usize) {
+        let m = &self.meta[s_idx];
+        let (u_src, v_src) = (soa.u.as_f32x4_slice(), soa.v.as_f32x4_slice());
+        let (u_dst, v_dst) = (
+            self.u_br.as_f32x4_slice_mut(),
+            self.v_br.as_f32x4_slice_mut(),
+        );
+        let (nv, nh) = (m.v_br.len(), m.h_br.len());
+        u_dst[m.beta_v_off..m.beta_v_off + nv].copy_from_slice(&u_src[m.v_br.clone()]);
+        v_dst[m.beta_v_off..m.beta_v_off + nv].copy_from_slice(&v_src[m.v_br.clone()]);
+        u_dst[m.beta_h_off..m.beta_h_off + nh].copy_from_slice(&u_src[m.h_br.clone()]);
+        v_dst[m.beta_h_off..m.beta_h_off + nh].copy_from_slice(&v_src[m.h_br.clone()]);
+    }
+
+    /// Computes incident velocity waves `a_waves[s]` from L1-packed `v_br`.
     pub fn compute_a_waves(
         &self,
-        soa: &ModalSoa,
         may_be_nonzero: &[bool; TOTAL_STRINGS],
         a_waves: &mut [f32; TOTAL_STRINGS],
     ) {
-        let v = soa.v.as_f32x4_slice();
+        let v = self.v_br.as_f32x4_slice();
         let beta = self.beta_br.as_f32x4_slice();
         for (s_idx, m) in self.meta.iter().enumerate() {
             if !may_be_nonzero[s_idx] {
                 a_waves[s_idx] = 0.0;
                 continue;
             }
-            let sum_v = dot_beta_v(v, beta, m.v_br.clone(), m.beta_v_off);
-            let sum_h = dot_beta_v(v, beta, m.h_br.clone(), m.beta_h_off);
-            a_waves[s_idx] = m.a_wave_gain * (sum_v + sum_h);
+            let mut acc = F32x4::zero();
+            for i in m.beta_v_off..(m.beta_v_off + m.n_vh) {
+                acc = v[i].mul_add(beta[i], acc);
+            }
+            a_waves[s_idx] = m.a_wave_gain * acc.reduce_sum();
         }
     }
-}
-
-#[inline(always)]
-fn dot_beta_v(v: &[F32x4], beta: &[F32x4], vr: Range<usize>, beta_off: usize) -> f32 {
-    let n = vr.end - vr.start;
-    let vs = &v[vr];
-    let bs = &beta[beta_off..beta_off + n];
-    let mut acc = F32x4::zero();
-    for i in 0..n {
-        acc = vs[i].mul_add(bs[i], acc);
-    }
-    acc.reduce_sum()
 }

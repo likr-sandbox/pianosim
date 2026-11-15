@@ -1,32 +1,110 @@
-//! 2x-unrolled packed WDF prefix ZOH kernels and 2-string paired SAV batching (`no_std`).
+//! L1-packed WDF prefix ZOH kernels and 2-string paired SAV batching (`no_std`).
 
 use core::ops::Range;
 
 use piano_simd::F32x4;
+use piano_spec::TOTAL_STRINGS;
 
-use crate::bridge_port::BridgePorts;
+use crate::bridge_port::{BridgePorts, FastPrefixMeta};
 use crate::choir_map::StringMapEntry;
 use crate::contact_ports::ContactPorts;
 use crate::modal_soa::ModalSoa;
 use crate::phantom::MAX_PHANTOM_LONG_VECS;
-use crate::sav_drift::{load_nl_state_n, load_vh_state, store_vh_u, SavBank};
+use crate::sav_drift::{load_nl_state_n, SavBank};
 use crate::sav_pair::{eval_no_phantom_pair, eval_phantom_pair};
 use crate::zoh_kernel::zoh_rotate;
 
-/// Advances WDF prefix `(u, v)` using packed `(d_br, s_br, c_br, beta_br)` tables with 2x
-/// accumulator unrolling and defers horizontal vector reductions to the caller.
+/// Contiguously steps all uncoupled strings' `[v_br | h_br]` L1-packed prefix vectors in one pass.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_uncoupled_prefixes_fast(
+    u_br: &mut [F32x4],
+    v_br: &mut [F32x4],
+    d_br: &[F32x4],
+    s_br: &[F32x4],
+    c_br: &[F32x4],
+    beta_br: &[F32x4],
+    meta: &[FastPrefixMeta; TOTAL_STRINGS],
+    str_coupled: &[bool; TOTAL_STRINGS],
+    a_waves: &mut [f32; TOTAL_STRINGS],
+    b_waves: &[f32; TOTAL_STRINGS],
+    may_be_nz: &mut [bool; TOTAL_STRINGS],
+    ports_synced: &mut [bool; TOTAL_STRINGS],
+) -> (f32, f32) {
+    let len = u_br.len();
+    assert!(
+        v_br.len() == len
+            && d_br.len() == len
+            && s_br.len() == len
+            && c_br.len() == len
+            && beta_br.len() == len
+    );
+    let (mut u_rem, mut v_rem) = (u_br, v_br);
+    let (mut d_rem, mut s_rem, mut c_rem, mut b_rem) = (d_br, s_br, c_br, beta_br);
+    let (mut sum_l_vec, mut sum_r_vec) = (F32x4::zero(), F32x4::zero());
+
+    for s_idx in 0..TOTAL_STRINGS {
+        let fm = meta[s_idx];
+        let n = fm.n_vh as usize;
+        let (u, u_rest) = u_rem.split_at_mut(n);
+        let (v, v_rest) = v_rem.split_at_mut(n);
+        let (d, d_rest) = d_rem.split_at(n);
+        let (s, s_rest) = s_rem.split_at(n);
+        let (c, c_rest) = c_rem.split_at(n);
+        let (beta, b_rest) = b_rem.split_at(n);
+        (u_rem, v_rem, d_rem, s_rem, c_rem, b_rem) =
+            (u_rest, v_rest, d_rest, s_rest, c_rest, b_rest);
+        if str_coupled[s_idx] {
+            continue;
+        }
+        let v_port = 0.5 * (a_waves[s_idx] + b_waves[s_idx]);
+        let neg_vbr = F32x4::splat(-v_port);
+        if may_be_nz[s_idx] || v_port != 0.0 {
+            may_be_nz[s_idx] = true;
+            ports_synced[s_idx] = false;
+        }
+        let (mut acc_c0, mut acc_br0) = (F32x4::zero(), F32x4::zero());
+        let (mut acc_c1, mut acc_br1) = (F32x4::zero(), F32x4::zero());
+        let mut i = 0usize;
+        while i + 1 < n {
+            let (b0, b1) = (beta[i], beta[i + 1]);
+            let (un0, vn0) = zoh_rotate(u[i], b0.mul_add(neg_vbr, v[i]), d[i], s[i]);
+            let (un1, vn1) =
+                zoh_rotate(u[i + 1], b1.mul_add(neg_vbr, v[i + 1]), d[i + 1], s[i + 1]);
+            (u[i], v[i]) = (un0, vn0);
+            (u[i + 1], v[i + 1]) = (un1, vn1);
+            acc_c0 = vn0.mul_add(c[i], acc_c0);
+            acc_br0 = vn0.mul_add(b0, acc_br0);
+            acc_c1 = vn1.mul_add(c[i + 1], acc_c1);
+            acc_br1 = vn1.mul_add(b1, acc_br1);
+            i += 2;
+        }
+        if i < n {
+            let bi = beta[i];
+            let (un, vn) = zoh_rotate(u[i], bi.mul_add(neg_vbr, v[i]), d[i], s[i]);
+            (u[i], v[i]) = (un, vn);
+            acc_c0 = vn.mul_add(c[i], acc_c0);
+            acc_br0 = vn.mul_add(bi, acc_br0);
+        }
+        let (acc_c, acc_br) = (acc_c0 + acc_c1, acc_br0 + acc_br1);
+        a_waves[s_idx] = fm.a_wave_gain * acc_br.reduce_sum();
+        sum_l_vec = acc_c.mul_add(F32x4::splat(fm.pan_l), sum_l_vec);
+        sum_r_vec = acc_c.mul_add(F32x4::splat(fm.pan_r), sum_r_vec);
+    }
+    (sum_l_vec.reduce_sum(), sum_r_vec.reduce_sum())
+}
+
+/// Steps one string's merged `[v_br | h_br]` L1 prefix slice when damper is currently clear.
 #[inline(always)]
-pub(crate) fn step_pol_prefix_wdf(
-    soa: &mut ModalSoa,
-    bp: &BridgePorts,
-    vr: Range<usize>,
+pub(crate) fn step_string_prefix_wdf_br(
+    bp: &mut BridgePorts,
     beta_off: usize,
+    n_vh: usize,
     neg_vbr: F32x4,
 ) -> (F32x4, F32x4) {
-    let n = vr.end - vr.start;
-    let br = beta_off..beta_off + n;
-    let (u_all, v_all) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
-    let (u, v) = (&mut u_all[vr.clone()], &mut v_all[vr]);
+    let br = beta_off..beta_off + n_vh;
+    let (u_all, v_all) = (bp.u_br.as_f32x4_slice_mut(), bp.v_br.as_f32x4_slice_mut());
+    let (u, v) = (&mut u_all[br.clone()], &mut v_all[br.clone()]);
     let d = &bp.d_br.as_f32x4_slice()[br.clone()];
     let s = &bp.s_br.as_f32x4_slice()[br.clone()];
     let c = &bp.c_br.as_f32x4_slice()[br.clone()];
@@ -35,7 +113,7 @@ pub(crate) fn step_pol_prefix_wdf(
     let (mut acc_c0, mut acc_br0) = (F32x4::zero(), F32x4::zero());
     let (mut acc_c1, mut acc_br1) = (F32x4::zero(), F32x4::zero());
     let mut i = 0usize;
-    while i + 1 < n {
+    while i + 1 < n_vh {
         let (b0, b1) = (beta[i], beta[i + 1]);
         let (un0, vn0) = zoh_rotate(u[i], b0.mul_add(neg_vbr, v[i]), d[i], s[i]);
         let (un1, vn1) = zoh_rotate(u[i + 1], b1.mul_add(neg_vbr, v[i + 1]), d[i + 1], s[i + 1]);
@@ -47,7 +125,7 @@ pub(crate) fn step_pol_prefix_wdf(
         acc_br1 = vn1.mul_add(b1, acc_br1);
         i += 2;
     }
-    if i < n {
+    if i < n_vh {
         let bi = beta[i];
         let (un, vn) = zoh_rotate(u[i], bi.mul_add(neg_vbr, v[i]), d[i], s[i]);
         (u[i], v[i]) = (un, vn);
@@ -57,13 +135,12 @@ pub(crate) fn step_pol_prefix_wdf(
     (acc_c0 + acc_c1, acc_br0 + acc_br1)
 }
 
-/// Same as [`step_pol_prefix_wdf`] with simultaneous hammer/damper force injection into `u`.
+/// Steps one polarization's L1 prefix WDF slice with simultaneous hammer/damper injection.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_pol_prefix_wdf_inj(
-    soa: &mut ModalSoa,
     ports: &ContactPorts,
-    bp: &BridgePorts,
+    bp: &mut BridgePorts,
     vr: Range<usize>,
     beta_off: usize,
     neg_vbr: F32x4,
@@ -73,8 +150,8 @@ pub(crate) fn step_pol_prefix_wdf_inj(
 ) -> (F32x4, F32x4) {
     let n = vr.end - vr.start;
     let br = beta_off..beta_off + n;
-    let (u_all, v_all) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
-    let (u, v) = (&mut u_all[vr.clone()], &mut v_all[vr.clone()]);
+    let (u_all, v_all) = (bp.u_br.as_f32x4_slice_mut(), bp.v_br.as_f32x4_slice_mut());
+    let (u, v) = (&mut u_all[br.clone()], &mut v_all[br.clone()]);
     let d = &bp.d_br.as_f32x4_slice()[br.clone()];
     let s = &bp.s_br.as_f32x4_slice()[br.clone()];
     let c = &bp.c_br.as_f32x4_slice()[br.clone()];
@@ -123,31 +200,29 @@ pub(crate) fn step_pol_prefix_wdf_inj(
     (acc_c0 + acc_c1, acc_br0 + acc_br1)
 }
 
-/// Single-pass 2x-unrolled prefix WDF step accumulating `(acc_c, acc_br, yd, vd_raw)` in registers.
+/// Single-pass 2x-unrolled L1 prefix WDF step accumulating `(acc_c, acc_br, yd, vd_raw)`.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_pol_prefix_wdf_symp_damp(
-    soa: &mut ModalSoa,
     ports: &ContactPorts,
-    bp: &BridgePorts,
+    bp: &mut BridgePorts,
     vr: Range<usize>,
     beta_off: usize,
     neg_vbr: F32x4,
     f_d: f32,
 ) -> (F32x4, F32x4, f32, f32) {
     if f_d != 0.0 {
-        step_pol_prefix_wdf_symp_damp_inner::<true>(soa, ports, bp, vr, beta_off, neg_vbr, f_d)
+        step_pol_prefix_wdf_symp_damp_inner::<true>(ports, bp, vr, beta_off, neg_vbr, f_d)
     } else {
-        step_pol_prefix_wdf_symp_damp_inner::<false>(soa, ports, bp, vr, beta_off, neg_vbr, 0.0)
+        step_pol_prefix_wdf_symp_damp_inner::<false>(ports, bp, vr, beta_off, neg_vbr, 0.0)
     }
 }
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn step_pol_prefix_wdf_symp_damp_inner<const HAS_FD: bool>(
-    soa: &mut ModalSoa,
     ports: &ContactPorts,
-    bp: &BridgePorts,
+    bp: &mut BridgePorts,
     vr: Range<usize>,
     beta_off: usize,
     neg_vbr: F32x4,
@@ -155,8 +230,8 @@ fn step_pol_prefix_wdf_symp_damp_inner<const HAS_FD: bool>(
 ) -> (F32x4, F32x4, f32, f32) {
     let n = vr.end - vr.start;
     let br = beta_off..beta_off + n;
-    let (u_all, v_all) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
-    let (u, v) = (&mut u_all[vr.clone()], &mut v_all[vr.clone()]);
+    let (u_all, v_all) = (bp.u_br.as_f32x4_slice_mut(), bp.v_br.as_f32x4_slice_mut());
+    let (u, v) = (&mut u_all[br.clone()], &mut v_all[br.clone()]);
     let d = &bp.d_br.as_f32x4_slice()[br.clone()];
     let s = &bp.s_br.as_f32x4_slice()[br.clone()];
     let c = &bp.c_br.as_f32x4_slice()[br.clone()];
@@ -220,9 +295,23 @@ fn step_pol_prefix_wdf_symp_damp_inner<const HAS_FD: bool>(
     )
 }
 
+#[inline(always)]
+fn load_vh_br(u: &[F32x4], v: &[F32x4], b: usize) -> ([F32x4; 2], [F32x4; 2]) {
+    assert!(b + 1 < u.len() && b + 1 < v.len());
+    ([u[b], u[b + 1]], [v[b], v[b + 1]])
+}
+
+#[inline(always)]
+fn store_vh_u_br(u_s: &mut [F32x4], b: usize, u: &[F32x4; 2]) {
+    assert!(b + 1 < u_s.len());
+    u_s[b] = u[0];
+    u_s[b + 1] = u[1];
+}
+
 /// Evaluates SAV drift + phantom tension for all active `sav_strings` in pairs bucketed by `nl`.
 pub(crate) fn step_sav_batch_prefix(
     soa: &mut ModalSoa,
+    bp: &mut BridgePorts,
     sav: &mut SavBank,
     strings: &[StringMapEntry],
     sav_strings: &[u8],
@@ -233,7 +322,9 @@ pub(crate) fn step_sav_batch_prefix(
         let s_idx = usize::from(s_u8);
         let (nv, nh, nl, m_ph) = sav.string_prefix_bounds(s_idx, long_on);
         if nv < 2 || nh < 2 {
+            bp.sync_string_to_soa(soa, s_idx);
             sav.step_string_sav(s_idx, &strings[s_idx], soa, long_on);
+            bp.sync_string_from_soa(soa, s_idx);
             continue;
         }
         let bucket = if m_ph == 0 {
@@ -242,14 +333,29 @@ pub(crate) fn step_sav_batch_prefix(
             nl.min(MAX_PHANTOM_LONG_VECS)
         };
         if let Some(s0) = pending[bucket].take() {
-            let (e0, e1) = (&strings[s0], &strings[s_idx]);
             if bucket == 0 {
-                eval_sav_no_phantom_prefix(soa, sav, s0, e0, s_idx, e1);
+                eval_sav_no_phantom_prefix(bp, sav, s0, s_idx);
             } else if bucket == 1 {
-                eval_sav_phantom_prefix::<1>(soa, sav, s0, e0, s_idx, e1, 1);
+                eval_sav_phantom_prefix::<1>(
+                    soa,
+                    bp,
+                    sav,
+                    s0,
+                    &strings[s0],
+                    s_idx,
+                    &strings[s_idx],
+                    1,
+                );
             } else {
                 eval_sav_phantom_prefix::<MAX_PHANTOM_LONG_VECS>(
-                    soa, sav, s0, e0, s_idx, e1, bucket,
+                    soa,
+                    bp,
+                    sav,
+                    s0,
+                    &strings[s0],
+                    s_idx,
+                    &strings[s_idx],
+                    bucket,
                 );
             }
         } else {
@@ -257,29 +363,24 @@ pub(crate) fn step_sav_batch_prefix(
         }
     }
     for s_idx in pending.into_iter().flatten() {
+        bp.sync_string_to_soa(soa, s_idx);
         sav.step_string_sav(s_idx, &strings[s_idx], soa, long_on);
+        bp.sync_string_from_soa(soa, s_idx);
     }
 }
 
 #[inline(always)]
-fn eval_sav_no_phantom_prefix(
-    soa: &mut ModalSoa,
-    sav: &mut SavBank,
-    s0: usize,
-    e0: &StringMapEntry,
-    s1: usize,
-    e1: &StringMapEntry,
-) {
-    let (vb0, hb0, vb1, hb1) = (
-        e0.vert_vecs.start,
-        e0.horiz_vecs.start,
-        e1.vert_vecs.start,
-        e1.horiz_vecs.start,
-    );
-    let (mut uv0, vv0) = load_vh_state(soa, vb0, 2);
-    let (mut uh0, vh0) = load_vh_state(soa, hb0, 2);
-    let (mut uv1, vv1) = load_vh_state(soa, vb1, 2);
-    let (mut uh1, vh1) = load_vh_state(soa, hb1, 2);
+fn eval_sav_no_phantom_prefix(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
+    let (vb0, hb0) = (bp.meta[s0].beta_v_off, bp.meta[s0].beta_h_off);
+    let (vb1, hb1) = (bp.meta[s1].beta_v_off, bp.meta[s1].beta_h_off);
+    let (mut uv0, vv0, mut uh0, vh0, mut uv1, vv1, mut uh1, vh1) = {
+        let (ub, vb) = (bp.u_br.as_f32x4_slice(), bp.v_br.as_f32x4_slice());
+        let (uv0, vv0) = load_vh_br(ub, vb, vb0);
+        let (uh0, vh0) = load_vh_br(ub, vb, hb0);
+        let (uv1, vv1) = load_vh_br(ub, vb, vb1);
+        let (uh1, vh1) = load_vh_br(ub, vb, hb1);
+        (uv0, vv0, uh0, vh0, uv1, vv1, uh1, vh1)
+    };
     let (mut r0, mut r1) = (sav.r_sav[s0], sav.r_sav[s1]);
     eval_no_phantom_pair(
         sav.spec(s0),
@@ -298,15 +399,18 @@ fn eval_sav_no_phantom_prefix(
     );
     sav.r_sav[s0] = r0;
     sav.r_sav[s1] = r1;
-    store_vh_u(soa, vb0, 2, &uv0);
-    store_vh_u(soa, hb0, 2, &uh0);
-    store_vh_u(soa, vb1, 2, &uv1);
-    store_vh_u(soa, hb1, 2, &uh1);
+    let ub = bp.u_br.as_f32x4_slice_mut();
+    store_vh_u_br(ub, vb0, &uv0);
+    store_vh_u_br(ub, hb0, &uh0);
+    store_vh_u_br(ub, vb1, &uv1);
+    store_vh_u_br(ub, hb1, &uh1);
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn eval_sav_phantom_prefix<const NL_MAX: usize>(
     soa: &mut ModalSoa,
+    bp: &mut BridgePorts,
     sav: &mut SavBank,
     s0: usize,
     e0: &StringMapEntry,
@@ -315,13 +419,25 @@ fn eval_sav_phantom_prefix<const NL_MAX: usize>(
     nl: usize,
 ) {
     let n = if NL_MAX == 1 { 1 } else { nl.min(NL_MAX) };
-    let (vb0, hb0, lb0) = (e0.vert_vecs.start, e0.horiz_vecs.start, e0.long_vecs.start);
-    let (vb1, hb1, lb1) = (e1.vert_vecs.start, e1.horiz_vecs.start, e1.long_vecs.start);
-    let (mut uv0, vv0) = load_vh_state(soa, vb0, 2);
-    let (mut uh0, vh0) = load_vh_state(soa, hb0, 2);
+    let (vb0, hb0, lb0) = (
+        bp.meta[s0].beta_v_off,
+        bp.meta[s0].beta_h_off,
+        e0.long_vecs.start,
+    );
+    let (vb1, hb1, lb1) = (
+        bp.meta[s1].beta_v_off,
+        bp.meta[s1].beta_h_off,
+        e1.long_vecs.start,
+    );
+    let (mut uv0, vv0, mut uh0, vh0, mut uv1, vv1, mut uh1, vh1) = {
+        let (ub, vb) = (bp.u_br.as_f32x4_slice(), bp.v_br.as_f32x4_slice());
+        let (uv0, vv0) = load_vh_br(ub, vb, vb0);
+        let (uh0, vh0) = load_vh_br(ub, vb, hb0);
+        let (uv1, vv1) = load_vh_br(ub, vb, vb1);
+        let (uh1, vh1) = load_vh_br(ub, vb, hb1);
+        (uv0, vv0, uh0, vh0, uv1, vv1, uh1, vh1)
+    };
     let (mut ul0, vl0) = load_nl_state_n::<NL_MAX>(soa, lb0, n);
-    let (mut uv1, vv1) = load_vh_state(soa, vb1, 2);
-    let (mut uh1, vh1) = load_vh_state(soa, hb1, 2);
     let (mut ul1, vl1) = load_nl_state_n::<NL_MAX>(soa, lb1, n);
     let (mut r0, mut r1) = (sav.r_sav[s0], sav.r_sav[s1]);
     eval_phantom_pair::<NL_MAX>(
@@ -346,10 +462,11 @@ fn eval_sav_phantom_prefix<const NL_MAX: usize>(
     );
     sav.r_sav[s0] = r0;
     sav.r_sav[s1] = r1;
-    store_vh_u(soa, vb0, 2, &uv0);
-    store_vh_u(soa, hb0, 2, &uh0);
-    store_vh_u(soa, vb1, 2, &uv1);
-    store_vh_u(soa, hb1, 2, &uh1);
+    let ub = bp.u_br.as_f32x4_slice_mut();
+    store_vh_u_br(ub, vb0, &uv0);
+    store_vh_u_br(ub, hb0, &uh0);
+    store_vh_u_br(ub, vb1, &uv1);
+    store_vh_u_br(ub, hb1, &uh1);
     let u_s = soa.u.as_f32x4_slice_mut();
     if NL_MAX == 1 {
         u_s[lb0] = ul0[0];

@@ -12,7 +12,8 @@ use crate::longitudinal::LongitudinalBank;
 use crate::modal_soa::ModalSoa;
 use crate::sav_drift::SavBank;
 use crate::zoh_kernel::{
-    step_string_modes, step_string_subblock, step_string_subblock_3, zoh_rotate,
+    step_string_modes, step_string_subblock, step_string_subblock_3, step_tails_flat_3vec,
+    zoh_rotate,
 };
 use piano_simd::F32x4;
 
@@ -78,6 +79,8 @@ pub(crate) struct ChunkPlan {
     pub key_has_hammer: [bool; NUM_KEYS],
     pub was_nz: [bool; TOTAL_STRINGS],
     pub was_tail_nz: [bool; TOTAL_STRINGS],
+    pub str_coupled: [bool; TOTAL_STRINGS],
+    pub coupled_strs: [u8; TOTAL_STRINGS],
     pub active_keys: [u8; NUM_KEYS],
     pub sav_long_slices: [SavLongSlice; TOTAL_STRINGS],
     pub sav_strings: [u8; TOTAL_STRINGS],
@@ -87,12 +90,13 @@ pub(crate) struct ChunkPlan {
     pub n_a: usize,
     pub n_sl: usize,
     pub n_sav: usize,
+    pub n_coupled_strs: usize,
 }
 
 pub(crate) struct BridgeRun<'a> {
     pub soa: &'a mut ModalSoa,
     pub ports: &'a mut ContactPorts,
-    pub bridge_ports: &'a BridgePorts,
+    pub bridge_ports: &'a mut BridgePorts,
     pub long_bank: &'a LongitudinalBank,
     pub sav: &'a mut SavBank,
     pub keys: &'a [KeyMapEntry],
@@ -222,6 +226,7 @@ pub(crate) fn step_uncoupled_tails(
 ) {
     let sub = sub_l.len();
     let (mut th_mono, mut l_mono, mut dummy_r) = ([0.0_f32; SUB], [0.0_f32; SUB], [0.0_f32; SUB]);
+    let mut n_flat = 0usize;
     for k in 0..NUM_KEYS {
         if !matches!(plan.key_cat[k], KeyCat::Uncoupled | KeyCat::DampedSymp) {
             continue;
@@ -232,16 +237,21 @@ pub(crate) fn step_uncoupled_tails(
             let nl_sav = sav_long_vecs(r, s_idx);
             let l_tail = (entry.long_vecs.start + nl_sav)..entry.long_vecs.end;
             if !plan.was_tail_nz[s_idx] {
-                let l_act = if r.long_on { l_tail.clone() } else { 0..0 };
-                step_string_subblock_3(
-                    r.soa,
-                    [m.v_tail.clone(), m.h_tail.clone(), l_act],
-                    entry.pan_l,
-                    entry.pan_r,
-                    sub_l,
-                    sub_r,
-                );
-                if !r.long_on {
+                let scratch = &mut r.bridge_ports.tail_idx_scratch;
+                for i in m.v_tail.clone() {
+                    scratch[n_flat] = i as u16;
+                    n_flat += 1;
+                }
+                for i in m.h_tail.clone() {
+                    scratch[n_flat] = i as u16;
+                    n_flat += 1;
+                }
+                if r.long_on {
+                    for i in l_tail {
+                        scratch[n_flat] = i as u16;
+                        n_flat += 1;
+                    }
+                } else if !l_tail.is_empty() {
                     step_string_subblock(r.soa, l_tail, 0.0, 0.0, sub_l, sub_r);
                 }
                 continue;
@@ -281,6 +291,14 @@ pub(crate) fn step_uncoupled_tails(
                 add_zone_n(&mut plan.zone_tail_n[t], zw, th_mono[t] * nt + fl * nl);
             }
         }
+    }
+    if n_flat > 0 {
+        let (c_l, c_r, indices) = (
+            r.bridge_ports.c_tail_l.as_f32x4_slice(),
+            r.bridge_ports.c_tail_r.as_f32x4_slice(),
+            &r.bridge_ports.tail_idx_scratch[..n_flat],
+        );
+        step_tails_flat_3vec(r.soa, c_l, c_r, indices, sub_l, sub_r);
     }
 }
 
@@ -325,6 +343,7 @@ pub(crate) fn prepare_sample_tails_and_hammers(
         let sr = key.string_range.clone();
         for s_idx in sr.clone() {
             if r.ports.may_be_nonzero[s_idx] && !r.ports.ports_synced[s_idx] {
+                r.bridge_ports.sync_string_to_soa(r.soa, s_idx);
                 refresh_string_ports(r.soa, r.ports, s_idx, &r.strings[s_idx]);
             }
         }
