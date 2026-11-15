@@ -229,7 +229,7 @@ pub(crate) fn load_vh_state(soa: &ModalSoa, b: usize, len: usize) -> ([F32x4; 2]
 }
 
 #[inline(always)]
-fn store_vh_u(soa: &mut ModalSoa, b: usize, len: usize, u: &[F32x4; 2]) {
+pub(crate) fn store_vh_u(soa: &mut ModalSoa, b: usize, len: usize, u: &[F32x4; 2]) {
     let u_s = soa.u.as_f32x4_slice_mut();
     if len >= 2 {
         assert!(b + 1 < u_s.len());

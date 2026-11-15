@@ -9,6 +9,7 @@
 extern crate alloc;
 
 pub mod bridge_coupled;
+pub(crate) mod bridge_kernels;
 pub(crate) mod bridge_port;
 pub(crate) mod bridge_tails;
 pub mod choir_map;
@@ -67,7 +68,7 @@ impl StringBank {
         let choir_map = ChoirMap::build_with_specs(&specs, voicing);
         let soa = ModalSoa::build_with_lossless(sr64, voicing, &specs, &choir_map, lossless);
         let ports = ContactPorts::build(sr64, voicing, &specs, &choir_map);
-        let bridge_ports = BridgePorts::build(sr64, voicing, &specs, &choir_map, &ports);
+        let bridge_ports = BridgePorts::build(sr64, voicing, &specs, &choir_map, &ports, &soa);
         let long_bank = LongitudinalBank::build(sr64, &specs, &choir_map, &ports.gamma_s);
         let sav = SavBank::build(
             sr64,
@@ -220,6 +221,7 @@ impl StringBank {
         if let Some(key_entry) = self.choir_map.key(key_idx) {
             for s_idx in key_entry.string_range.clone() {
                 self.ports.may_be_nonzero[s_idx] = true;
+                self.ports.tail_nonzero[s_idx] = true;
                 self.ports.struck_active[s_idx] = true;
                 self.ports.ports_synced[s_idx] = false;
             }
@@ -249,6 +251,7 @@ impl StringBank {
                 let range = self.choir_map.strings()[str_idx].all_vecs();
                 inject_excitation(&mut u_vecs[range.clone()], &b_vecs[range], force * w);
                 self.ports.may_be_nonzero[str_idx] = true;
+                self.ports.tail_nonzero[str_idx] = true;
                 self.ports.struck_active[str_idx] = true;
                 self.ports.ports_synced[str_idx] = false;
             }

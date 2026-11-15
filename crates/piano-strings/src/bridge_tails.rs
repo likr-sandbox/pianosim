@@ -41,16 +41,52 @@ impl HammerStepForce {
     };
 }
 
+#[derive(Copy, Clone)]
+pub(crate) struct SavLongSlice {
+    pub s_idx: u8,
+    pub start: u16,
+    pub end: u16,
+}
+
+impl SavLongSlice {
+    pub const ZERO: Self = Self {
+        s_idx: 0,
+        start: 0,
+        end: 0,
+    };
+}
+
+#[derive(Copy, Clone)]
+pub(crate) struct TailDampPartial {
+    pub ydv: f32,
+    pub vdv_raw: f32,
+    pub ydh: f32,
+    pub vdh_raw: f32,
+}
+
+impl TailDampPartial {
+    pub const ZERO: Self = Self {
+        ydv: 0.0,
+        vdv_raw: 0.0,
+        ydh: 0.0,
+        vdh_raw: 0.0,
+    };
+}
+
 pub(crate) struct ChunkPlan {
     pub key_cat: [KeyCat; NUM_KEYS],
     pub key_has_hammer: [bool; NUM_KEYS],
     pub was_nz: [bool; TOTAL_STRINGS],
+    pub was_tail_nz: [bool; TOTAL_STRINGS],
     pub active_keys: [u8; NUM_KEYS],
-    pub sav_long_strings: [u8; TOTAL_STRINGS],
+    pub sav_long_slices: [SavLongSlice; TOTAL_STRINGS],
+    pub sav_strings: [u8; TOTAL_STRINGS],
     pub hammer_forces: [HammerStepForce; TOTAL_STRINGS],
+    pub tail_partial_damp: [TailDampPartial; TOTAL_STRINGS],
     pub zone_tail_n: [[f32; 8]; SUB],
     pub n_a: usize,
     pub n_sl: usize,
+    pub n_sav: usize,
 }
 
 pub(crate) struct BridgeRun<'a> {
@@ -129,6 +165,55 @@ fn step_tail_pol(
     acc.reduce_sum()
 }
 
+#[inline(always)]
+fn step_tail_pol_damp(
+    soa: &mut ModalSoa,
+    ports: &ContactPorts,
+    vr: Range<usize>,
+    f_d: f32,
+) -> (f32, f32, f32) {
+    if vr.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    if f_d != 0.0 {
+        step_tail_pol_damp_inner::<true>(soa, ports, vr, f_d)
+    } else {
+        step_tail_pol_damp_inner::<false>(soa, ports, vr, 0.0)
+    }
+}
+
+#[inline(always)]
+fn step_tail_pol_damp_inner<const HAS_FD: bool>(
+    soa: &mut ModalSoa,
+    ports: &ContactPorts,
+    vr: Range<usize>,
+    f_d: f32,
+) -> (f32, f32, f32) {
+    let (u_all, v_all) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
+    let (u_sl, v_sl) = (&mut u_all[vr.clone()], &mut v_all[vr.clone()]);
+    let d = &soa.d_coeff.as_f32x4_slice()[vr.clone()];
+    let s = &soa.s_coeff.as_f32x4_slice()[vr.clone()];
+    let c = &soa.c_bridge.as_f32x4_slice()[vr.clone()];
+    let bd = &ports.b_damp.as_f32x4_slice()[vr.clone()];
+    let ad = &ports.a_damp.as_f32x4_slice()[vr];
+    let fd_v = F32x4::splat(f_d);
+    let (mut acc_c, mut acc_yd, mut acc_vd) = (F32x4::zero(), F32x4::zero(), F32x4::zero());
+    for i in 0..u_sl.len() {
+        let bdi = bd[i];
+        let u_inj = if HAS_FD {
+            fd_v.mul_add(bdi, u_sl[i])
+        } else {
+            u_sl[i]
+        };
+        let (un, vn) = zoh_rotate(u_inj, v_sl[i], d[i], s[i]);
+        (u_sl[i], v_sl[i]) = (un, vn);
+        acc_c = vn.mul_add(c[i], acc_c);
+        acc_yd = vn.mul_add(ad[i], acc_yd);
+        acc_vd = un.mul_add(bdi, acc_vd);
+    }
+    (acc_c.reduce_sum(), acc_yd.reduce_sum(), acc_vd.reduce_sum())
+}
+
 pub(crate) fn step_uncoupled_tails(
     r: &mut BridgeRun<'_>,
     plan: &mut ChunkPlan,
@@ -146,7 +231,7 @@ pub(crate) fn step_uncoupled_tails(
             let m = &r.bridge_ports.meta[s_idx];
             let nl_sav = sav_long_vecs(r, s_idx);
             let l_tail = (entry.long_vecs.start + nl_sav)..entry.long_vecs.end;
-            if !plan.was_nz[s_idx] {
+            if !plan.was_tail_nz[s_idx] {
                 let l_act = if r.long_on { l_tail.clone() } else { 0..0 };
                 step_string_subblock_3(
                     r.soa,
@@ -207,25 +292,32 @@ pub(crate) fn prepare_sample_tails_and_hammers(
     sub_l: &mut [f32],
     sub_r: &mut [f32],
 ) {
-    for idx in 0..plan.n_sl {
-        let s_idx = usize::from(plan.sav_long_strings[idx]);
-        let entry = &r.strings[s_idx];
-        let nl = r.sav.string_prefix_bounds(s_idx, true).2;
-        let lr = entry.long_vecs.start..(entry.long_vecs.start + nl);
-        let tl = step_string_modes(
-            &mut r.soa.u.as_f32x4_slice_mut()[lr.clone()],
-            &mut r.soa.v.as_f32x4_slice_mut()[lr.clone()],
-            &r.soa.d_coeff.as_f32x4_slice()[lr.clone()],
-            &r.soa.s_coeff.as_f32x4_slice()[lr.clone()],
-            &r.soa.c_bridge.as_f32x4_slice()[lr],
-        );
-        sub_l[t] += tl * entry.pan_l;
-        sub_r[t] += tl * entry.pan_r;
-        add_zone_n(
-            &mut plan.zone_tail_n[t],
-            r.zone_weights[s_idx],
-            tl * r.bridge_ports.tail_n_long[s_idx],
-        );
+    if plan.n_sl > 0 {
+        let (u_all, v_all) = (r.soa.u.as_f32x4_slice_mut(), r.soa.v.as_f32x4_slice_mut());
+        let d_all = r.soa.d_coeff.as_f32x4_slice();
+        let s_all = r.soa.s_coeff.as_f32x4_slice();
+        let c_all = r.soa.c_bridge.as_f32x4_slice();
+        for idx in 0..plan.n_sl {
+            let sl = plan.sav_long_slices[idx];
+            let (start, end) = (usize::from(sl.start), usize::from(sl.end));
+            let mut acc = F32x4::zero();
+            for i in start..end {
+                let (un, vn) = zoh_rotate(u_all[i], v_all[i], d_all[i], s_all[i]);
+                u_all[i] = un;
+                v_all[i] = vn;
+                acc = vn.mul_add(c_all[i], acc);
+            }
+            let tl = acc.reduce_sum();
+            let s_idx = usize::from(sl.s_idx);
+            let entry = &r.strings[s_idx];
+            sub_l[t] += tl * entry.pan_l;
+            sub_r[t] += tl * entry.pan_r;
+            add_zone_n(
+                &mut plan.zone_tail_n[t],
+                r.zone_weights[s_idx],
+                tl * r.bridge_ports.tail_n_long[s_idx],
+            );
+        }
     }
     for idx in 0..plan.n_a {
         let k = usize::from(plan.active_keys[idx]);
@@ -236,7 +328,8 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                 refresh_string_ports(r.soa, r.ports, s_idx, &r.strings[s_idx]);
             }
         }
-        let fh_arr = if plan.key_has_hammer[k] {
+        let has_hammer = plan.key_has_hammer[k];
+        let fh_arr = if has_hammer {
             eval_hammer_choir(driver, r.ports, k, sr.clone(), usize::from(key.choir_size))
         } else {
             [0.0; 3]
@@ -251,10 +344,27 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                 (0.0, 0.0)
             };
             plan.hammer_forces[s_idx] = HammerStepForce { fh, fd_v, fd_h };
+            if fh != 0.0 || fd_v != 0.0 || fd_h != 0.0 {
+                r.ports.tail_nonzero[s_idx] = true;
+            }
             let entry = &r.strings[s_idx];
             let m = &r.bridge_ports.meta[s_idx];
-            let tv = step_tail_pol(r.soa, r.ports, m.v_tail.clone(), fh, fd_v, key.has_damper);
-            let th = step_tail_pol(r.soa, r.ports, m.h_tail.clone(), fh, fd_h, key.has_damper);
+            let (tv, th) = if has_hammer {
+                (
+                    step_tail_pol(r.soa, r.ports, m.v_tail.clone(), fh, fd_v, key.has_damper),
+                    step_tail_pol(r.soa, r.ports, m.h_tail.clone(), fh, fd_h, key.has_damper),
+                )
+            } else {
+                let (tv, ydv, vdv_raw) = step_tail_pol_damp(r.soa, r.ports, m.v_tail.clone(), fd_v);
+                let (th, ydh, vdh_raw) = step_tail_pol_damp(r.soa, r.ports, m.h_tail.clone(), fd_h);
+                plan.tail_partial_damp[s_idx] = TailDampPartial {
+                    ydv,
+                    vdv_raw,
+                    ydh,
+                    vdh_raw,
+                };
+                (tv, th)
+            };
             let rl = entry.long_vecs.clone();
             let tl = if rl.is_empty() {
                 0.0

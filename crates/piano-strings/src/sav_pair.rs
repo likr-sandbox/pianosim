@@ -164,7 +164,7 @@ fn psi_and_inv_pair(x0: f64, x1: f64) -> ((f64, f64), (f64, f64)) {
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn eval_no_phantom_pair(
+pub(crate) fn eval_no_phantom_pair(
     sp0: &SavStringSpec,
     sp1: &SavStringSpec,
     ts: f64,
@@ -207,7 +207,7 @@ fn eval_no_phantom_pair(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn eval_phantom_pair<const NL_MAX: usize>(
+pub(crate) fn eval_phantom_pair<const NL_MAX: usize>(
     sp0: &SavStringSpec,
     sp1: &SavStringSpec,
     ts: f64,
