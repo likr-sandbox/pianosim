@@ -14,6 +14,8 @@ import { getDemoScore } from '../midi/demo-scores';
 import { MidiPlayer } from '../midi/midi-player';
 import { parseSmf } from '../midi/smf-parser';
 import { WebMidiManager } from '../midi/web-midi';
+import { PerfMeter } from '../viz/perf-meter';
+import { SpectrumCanvas } from '../viz/spectrum-canvas';
 import { KeyboardView } from './keyboard-view';
 import { PedalBar } from './pedal-bar';
 import { SpacePanel } from './space-panel';
@@ -37,6 +39,8 @@ export class AppShell {
   private spacePanel!: SpacePanel;
   private transportBar!: TransportBar;
   private pcKeyboard!: PcKeyboard;
+  private perfMeter!: PerfMeter;
+  private spectrumCanvas!: SpectrumCanvas;
 
   private unlockBtn!: HTMLButtonElement;
   private a4Btn!: HTMLButtonElement;
@@ -102,6 +106,8 @@ export class AppShell {
     this.spacePanel?.destroy();
     this.transportBar?.destroy();
     this.pcKeyboard?.destroy();
+    this.perfMeter?.destroy();
+    this.spectrumCanvas?.destroy();
     for (const off of this.cleanupHandlers) {
       off();
     }
@@ -189,6 +195,14 @@ export class AppShell {
   }
 
   private bindComponents(): void {
+    // Telemetry HUD PerfMeter
+    const hudContainer = this.root.querySelector<HTMLElement>('#hud-mount')!;
+    this.perfMeter = new PerfMeter(hudContainer, this.telemetry);
+
+    // Spectrum Visualizer Canvas
+    const canvasEl = this.root.querySelector<HTMLCanvasElement>('#spectrum-canvas')!;
+    this.spectrumCanvas = new SpectrumCanvas(canvasEl, () => this.host.getAnalyser());
+
     // 88-Key Piano Keyboard
     const keyboardContainer = this.root.querySelector<HTMLElement>('#keyboard-mount')!;
     this.keyboardView = new KeyboardView(keyboardContainer, {
@@ -337,6 +351,14 @@ export class AppShell {
 
   getTransportBar(): TransportBar {
     return this.transportBar;
+  }
+
+  getPerfMeter(): PerfMeter {
+    return this.perfMeter;
+  }
+
+  getSpectrumCanvas(): SpectrumCanvas {
+    return this.spectrumCanvas;
   }
 
   getHost(): WasmAudioHost {
