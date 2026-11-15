@@ -148,11 +148,9 @@ export function parseSmf(buffer: ArrayBuffer | Uint8Array): ParsedSmf {
   const rawEvents: RawEvent[] = [];
   const tempoChanges: Array<{ tick: number; uspqn: number }> = [{ tick: 0, uspqn: 500_000 }];
   let eventCounter = 0;
+  let tracksParsed = 0;
 
-  for (let trackIdx = 0; trackIdx < trackCount && reader.remaining > 0; trackIdx++) {
-    if (reader.remaining < 8) {
-      break;
-    }
+  while (tracksParsed < trackCount && reader.remaining >= 8) {
     const chunkType = [reader.readU8(), reader.readU8(), reader.readU8(), reader.readU8()];
     const isMTrk =
       chunkType[0] === 0x4d &&
@@ -266,6 +264,7 @@ export function parseSmf(buffer: ArrayBuffer | Uint8Array): ParsedSmf {
       }
     }
 
+    tracksParsed++;
     reader.seek(trackEnd);
   }
 

@@ -129,77 +129,89 @@ export class WebMidiManager {
     }
   }
 
-  handleMidiBytes(bytes: Uint8Array | number[]): void {
-    if (bytes.length === 0) return;
-    const status = bytes[0];
-    const cmd = status & 0xf0;
+  handleMidiBytes(bytes: Uint8Array | ArrayLike<number>): void {
+    if (!bytes || bytes.length === 0) return;
+    let offset = 0;
 
-    // CC 88 Prefix for High-Resolution Velocity (MIDI CA-031)
-    if (cmd === 0xb0 && bytes.length >= 3) {
-      const cc = bytes[1];
-      const val = bytes[2];
-      if (cc === 88) {
-        this.highResVelocityPrefix = val & 0x7f;
-        return;
+    while (offset < bytes.length) {
+      const status = bytes[offset];
+      if ((status & 0x80) === 0) {
+        offset++;
+        continue;
       }
-      if (cc === 64) {
-        // Sustain / Damper pedal
-        const valU16 = u7ToU16(val);
-        this.host.pedal(PEDAL_SUSTAIN, valU16, 0);
-        this.callbacks.onPedalChange?.(PEDAL_SUSTAIN, val);
-        return;
+      if (status >= 0xf8) {
+        offset += 1;
+        continue;
       }
-      if (cc === 66) {
-        // Sostenuto pedal
-        const valU16 = val >= 64 ? 65535 : 0;
-        this.host.pedal(PEDAL_SOSTENUTO, valU16, 0);
-        this.callbacks.onPedalChange?.(PEDAL_SOSTENUTO, val);
-        return;
+      if (status === 0xf0) {
+        offset++;
+        while (offset < bytes.length && bytes[offset] !== 0xf7) {
+          offset++;
+        }
+        if (offset < bytes.length && bytes[offset] === 0xf7) {
+          offset++;
+        }
+        continue;
       }
-      if (cc === 67) {
-        // Una Corda pedal
-        const valU16 = u7ToU16(val);
-        this.host.pedal(PEDAL_UNA_CORDA, valU16, 0);
-        this.callbacks.onPedalChange?.(PEDAL_UNA_CORDA, val);
-        return;
-      }
-    }
 
-    // NoteOff (0x80)
-    if (cmd === 0x80 && bytes.length >= 2) {
-      const key = bytes[1] & 0x7f;
-      this.host.noteOff(key, 0, 0);
-      this.highResVelocityPrefix = null;
-      this.callbacks.onNoteRelease?.(key);
-      return;
-    }
+      const cmd = status & 0xf0;
 
-    // NoteOn (0x90)
-    if (cmd === 0x90 && bytes.length >= 3) {
-      const key = bytes[1] & 0x7f;
-      const val7 = bytes[2] & 0x7f;
-
-      if (val7 === 0) {
-        // Zero-velocity NoteOn is strictly NoteOff
+      if (cmd === 0xb0) {
+        if (offset + 2 >= bytes.length) break;
+        const cc = bytes[offset + 1];
+        const val = bytes[offset + 2];
+        if (cc === 88) {
+          this.highResVelocityPrefix = val & 0x7f;
+        } else if (cc === 64) {
+          const valU16 = u7ToU16(val);
+          this.host.pedal(PEDAL_SUSTAIN, valU16, 0);
+          this.callbacks.onPedalChange?.(PEDAL_SUSTAIN, val);
+        } else if (cc === 66) {
+          const valU16 = val >= 64 ? 65535 : 0;
+          this.host.pedal(PEDAL_SOSTENUTO, valU16, 0);
+          this.callbacks.onPedalChange?.(PEDAL_SOSTENUTO, val);
+        } else if (cc === 67) {
+          const valU16 = u7ToU16(val);
+          this.host.pedal(PEDAL_UNA_CORDA, valU16, 0);
+          this.callbacks.onPedalChange?.(PEDAL_UNA_CORDA, val);
+        }
+        offset += 3;
+      } else if (cmd === 0x80) {
+        if (offset + 1 >= bytes.length) break;
+        const key = bytes[offset + 1] & 0x7f;
         this.host.noteOff(key, 0, 0);
         this.highResVelocityPrefix = null;
         this.callbacks.onNoteRelease?.(key);
-        return;
-      }
+        offset += offset + 2 < bytes.length && (bytes[offset + 2] & 0x80) === 0 ? 3 : 2;
+      } else if (cmd === 0x90) {
+        if (offset + 2 >= bytes.length) break;
+        const key = bytes[offset + 1] & 0x7f;
+        const val7 = bytes[offset + 2] & 0x7f;
 
-      let velU16: number;
-      if (this.highResVelocityPrefix !== null) {
-        // 14-bit high resolution velocity
-        const vel14 = (val7 << 7) | this.highResVelocityPrefix;
-        velU16 = Math.round((vel14 * 65535) / 16383);
-        this.highResVelocityPrefix = null;
+        if (val7 === 0) {
+          this.host.noteOff(key, 0, 0);
+          this.highResVelocityPrefix = null;
+          this.callbacks.onNoteRelease?.(key);
+        } else {
+          let velU16: number;
+          if (this.highResVelocityPrefix !== null) {
+            const vel14 = (val7 << 7) | this.highResVelocityPrefix;
+            velU16 = Math.round((vel14 * 65535) / 16383);
+            this.highResVelocityPrefix = null;
+          } else {
+            velU16 = u7ToU16(val7);
+          }
+          this.host.noteOn(key, velU16, 0);
+          this.callbacks.onNotePress?.(key, val7);
+        }
+        offset += 3;
+      } else if (cmd === 0xc0 || cmd === 0xd0) {
+        offset += 2;
+      } else if (cmd === 0xa0 || cmd === 0xe0) {
+        offset += 3;
       } else {
-        velU16 = u7ToU16(val7);
+        offset += 1;
       }
-
-      this.host.noteOn(key, velU16, 0);
-      this.callbacks.onNotePress?.(key, val7);
-      return;
     }
   }
 

@@ -24,6 +24,8 @@ export class MidiPlayer {
   private score: ParsedSmf | null = null;
   private isPlayingState = false;
   private timerId: number | null = null;
+  private isStarting = false;
+  private operationEpoch = 0;
 
   private startAudioTime = 0;
   private startScoreTime = 0;
@@ -38,6 +40,8 @@ export class MidiPlayer {
   }
 
   load(score: ParsedSmf): void {
+    this.operationEpoch++;
+    this.isStarting = false;
     this.stop();
     this.score = score;
     this.callbacks.onProgress?.(0, score.durationSeconds);
@@ -64,25 +68,50 @@ export class MidiPlayer {
   }
 
   async play(): Promise<void> {
-    if (!this.score || this.isPlayingState) {
+    if (!this.score || this.isPlayingState || this.isStarting) {
       return;
     }
-    await this.host.unlock();
-    const ctx = this.host.getAudioContext();
-    const audioNow = ctx ? ctx.currentTime : 0;
+    this.isStarting = true;
+    const epoch = ++this.operationEpoch;
 
-    this.startAudioTime = audioNow;
-    this.startScoreTime = this.playheadSeconds;
-    this.isPlayingState = true;
-    this.callbacks.onStateChange?.(true);
+    try {
+      await this.host.unlock();
+      if (epoch !== this.operationEpoch || !this.score || this.isPlayingState) {
+        return;
+      }
+      if (this.timerId !== null) {
+        window.clearInterval(this.timerId);
+        this.timerId = null;
+      }
+      const ctx = this.host.getAudioContext();
+      const audioNow = ctx ? ctx.currentTime : 0;
 
-    this.timerId = window.setInterval(() => this.tick(), 15);
+      this.startAudioTime = audioNow;
+      this.startScoreTime = this.playheadSeconds;
+      if (this.score) {
+        let idx = 0;
+        const events = this.score.events;
+        while (idx < events.length && events[idx].timeSeconds < this.playheadSeconds) {
+          idx++;
+        }
+        this.nextEventIndex = idx;
+      }
+      this.isPlayingState = true;
+      this.callbacks.onStateChange?.(true);
+
+      this.timerId = window.setInterval(() => this.tick(), 15);
+    } finally {
+      this.isStarting = false;
+    }
   }
 
   pause(): void {
+    this.operationEpoch++;
+    this.isStarting = false;
     if (!this.isPlayingState) {
       return;
     }
+    this.playheadSeconds = this.calculateCurrentScoreTime();
     this.isPlayingState = false;
     if (this.timerId !== null) {
       window.clearInterval(this.timerId);
@@ -108,6 +137,9 @@ export class MidiPlayer {
   }
 
   seek(targetSeconds: number): void {
+    if (!Number.isFinite(targetSeconds)) {
+      return;
+    }
     const dur = this.score?.durationSeconds ?? 0;
     const clamped = Math.max(0, Math.min(dur, targetSeconds));
 
@@ -138,6 +170,9 @@ export class MidiPlayer {
   }
 
   setTempo(factor: number): void {
+    if (!Number.isFinite(factor) || factor <= 0) {
+      return;
+    }
     const clamped = Math.max(0.5, Math.min(2.0, factor));
     if (Math.abs(this.tempoFactor - clamped) < 1e-4) {
       return;
@@ -150,11 +185,15 @@ export class MidiPlayer {
   }
 
   panic(): void {
+    this.operationEpoch++;
+    this.isStarting = false;
     this.stop();
     this.host.allNotesOff();
   }
 
   destroy(): void {
+    this.operationEpoch++;
+    this.isStarting = false;
     this.stop();
     this.score = null;
   }
