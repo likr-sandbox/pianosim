@@ -60,45 +60,76 @@ pub struct KeyFeltSpec {
     pub mem_sub_gain: f32,
 }
 
+fn compute_key_felt_spec(
+    key_idx: usize,
+    sample_rate: f64,
+    voicing: &VoicingSpec,
+    fixed_exponent_p: Option<f64>,
+) -> KeyFeltSpec {
+    let k = key_idx.min(NUM_KEYS - 1);
+    let x = (k as f64) / ((NUM_KEYS - 1) as f64);
+    let h = f64::from(voicing.effective_hammer_hardness(k));
+
+    let p_base = 2.45 + 0.65 * x;
+    let exponent_p =
+        fixed_exponent_p.unwrap_or_else(|| (p_base + (h - 0.5) * 0.50).clamp(2.2, 3.5));
+
+    // Smooth monotonic rigid-felt baseline tuned so coupled string contact durations hit
+    // A0 ~ 3.2 ms, A4 mf ~ 1.5 ms, and C8 mf ~ 0.14 ms.
+    let tau_c = 4.2e-3 * exp_f64(-2.85 * x - 0.70 * x * x * x);
+    let c_hertz = 3.21 + 0.34 * (exponent_p - 2.2);
+    let delta_mf = tau_c * MF_REF_SPEED_MPS / c_hertz;
+
+    let shank = ShankParams::for_key(k, sample_rate);
+    let m_h = f64::from(shank.hammer_mass_kg);
+    let k0_nominal = (exponent_p + 1.0) * m_h * MF_REF_SPEED_MPS * MF_REF_SPEED_MPS
+        / (2.0 * pow_nonneg_f64(delta_mf, exponent_p + 1.0));
+    // Calibrate for Stulov hysteresis (~1 - 0.5 * eps) & voicing hardness.
+    let voicing_stiff = exp_f64((h - 0.5) * 1.40);
+    let k0_si = k0_nominal * 1.12 * voicing_stiff;
+
+    // Normalize LUT domain so fff strikes sit cleanly inside u in [0, 1].
+    let delta_mf_eff = if fixed_exponent_p.is_some() && (h - 0.5).abs() >= 1.0e-12 {
+        delta_mf * pow_nonneg_f64(1.0 / voicing_stiff, 1.0 / (exponent_p + 1.0))
+    } else {
+        delta_mf
+    };
+    let delta_scale_m = (3.4 * delta_mf_eff).max(1.2e-4);
+    let f_scale_n = k0_si * pow_nonneg_f64(delta_scale_m, exponent_p);
+    let dt_sub = 1.0 / (8.0 * sample_rate);
+    let mem_sub_gain = (f64::from(MEM_ACCUM_GAIN) * dt_sub / TAU_COMPACT_S) as f32;
+
+    KeyFeltSpec {
+        exponent_p: exponent_p as f32,
+        k0_si: k0_si as f32,
+        delta_scale_m: delta_scale_m as f32,
+        f_scale_n: f_scale_n as f32,
+        nominal_contact_s: tau_c as f32,
+        mem_sub_gain,
+    }
+}
+
 impl KeyFeltSpec {
     /// Builds physical felt parameters for `key_idx` under `voicing`.
     #[must_use]
     pub fn for_key(key_idx: usize, sample_rate: f64, voicing: &VoicingSpec) -> Self {
-        let k = key_idx.min(NUM_KEYS - 1);
-        let x = (k as f64) / ((NUM_KEYS - 1) as f64);
-        let h = f64::from(voicing.effective_hammer_hardness(k));
+        compute_key_felt_spec(key_idx, sample_rate, voicing, None)
+    }
 
-        let p_base = 2.45 + 0.65 * x;
-        let exponent_p = (p_base + (h - 0.5) * 0.50).clamp(2.2, 3.5);
-
-        // Smooth monotonic rigid-felt baseline tuned so coupled string contact durations hit
-        // A0 ~ 3.2 ms, A4 mf ~ 1.5 ms, and C8 mf ~ 0.14 ms.
-        let tau_c = 4.2e-3 * exp_f64(-2.85 * x - 0.70 * x * x * x);
-        let c_hertz = 3.21 + 0.34 * (exponent_p - 2.2);
-        let delta_mf = tau_c * MF_REF_SPEED_MPS / c_hertz;
-
-        let shank = ShankParams::for_key(k, sample_rate);
-        let m_h = f64::from(shank.hammer_mass_kg);
-        let k0_nominal = (exponent_p + 1.0) * m_h * MF_REF_SPEED_MPS * MF_REF_SPEED_MPS
-            / (2.0 * pow_nonneg_f64(delta_mf, exponent_p + 1.0));
-        // Calibrate for Stulov hysteresis (~1 - 0.5 * eps) & voicing hardness.
-        let voicing_stiff = exp_f64((h - 0.5) * 1.40);
-        let k0_si = k0_nominal * 1.12 * voicing_stiff;
-
-        // Normalize LUT domain so fff strikes sit cleanly inside u in [0, 1].
-        let delta_scale_m = (3.4 * delta_mf).max(1.2e-4);
-        let f_scale_n = k0_si * pow_nonneg_f64(delta_scale_m, exponent_p);
-        let dt_sub = 1.0 / (8.0 * sample_rate);
-        let mem_sub_gain = (f64::from(MEM_ACCUM_GAIN) * dt_sub / TAU_COMPACT_S) as f32;
-
-        Self {
-            exponent_p: exponent_p as f32,
-            k0_si: k0_si as f32,
-            delta_scale_m: delta_scale_m as f32,
-            f_scale_n: f_scale_n as f32,
-            nominal_contact_s: tau_c as f32,
-            mem_sub_gain,
-        }
+    /// Updates stiffness and scaling parameters in-place for `voicing` without reallocating
+    /// LUT tables (`exponent_p` remains pinned to the preallocated power LUTs).
+    pub fn update_voicing_in_place(
+        &mut self,
+        key_idx: usize,
+        sample_rate: f64,
+        voicing: &VoicingSpec,
+    ) {
+        *self = compute_key_felt_spec(
+            key_idx,
+            sample_rate,
+            voicing,
+            Some(f64::from(self.exponent_p)),
+        );
     }
 }
 
@@ -229,5 +260,38 @@ mod tests {
             state.z_mem
         );
         assert_eq!(state.z_fast, 0.0);
+    }
+
+    #[test]
+    fn update_voicing_in_place_matches_default_and_scales_stiffness_preserving_exponent() {
+        let nominal = VoicingSpec::default();
+        for &k in &[0_usize, 39, 48, 87] {
+            let baseline = KeyFeltSpec::for_key(k, 48_000.0, &nominal);
+            let mut spec = baseline;
+
+            // Default re-application keeps exponent_p pinned and matches baseline.
+            spec.update_voicing_in_place(k, 48_000.0, &nominal);
+            assert_eq!(spec.exponent_p, baseline.exponent_p);
+            assert!((spec.k0_si - baseline.k0_si).abs() <= baseline.k0_si * 1e-6);
+            assert!((spec.delta_scale_m - baseline.delta_scale_m).abs() <= 1e-7);
+
+            // Global + per-note hardness updates stiffness and LUT scaling with fixed exponent_p.
+            let mut soft = nominal.clone();
+            soft.hammer_hardness = 0.1;
+            let mut hard = nominal.clone();
+            hard.hammer_hardness = 0.9;
+            hard.note_offsets[k].hammer_hardness_offset = 0.05;
+
+            let mut s_soft = baseline;
+            s_soft.update_voicing_in_place(k, 48_000.0, &soft);
+            let mut s_hard = baseline;
+            s_hard.update_voicing_in_place(k, 48_000.0, &hard);
+
+            assert_eq!(s_soft.exponent_p, baseline.exponent_p);
+            assert_eq!(s_hard.exponent_p, baseline.exponent_p);
+            assert!(s_soft.k0_si < baseline.k0_si && baseline.k0_si < s_hard.k0_si);
+            assert!(s_hard.delta_scale_m < s_soft.delta_scale_m);
+            assert!(s_hard.f_scale_n > s_soft.f_scale_n);
+        }
     }
 }
