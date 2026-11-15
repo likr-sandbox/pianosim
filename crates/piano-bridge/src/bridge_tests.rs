@@ -69,13 +69,39 @@ fn reduced_poles_and_high_frequency_y_inf_mobility() {
     let mut bridge = BridgeBank::new(48_000.0);
     let poles = bridge.reduced_poles();
     assert_eq!(poles.len(), NUM_REDUCED_MODES);
-    assert!(poles[0].freq_hz >= 60.0 && poles[0].freq_hz <= 80.0);
+    assert!(poles[0].freq_hz >= 50.0 && poles[0].freq_hz <= 60.0);
     assert!(poles[NUM_REDUCED_MODES - 1].freq_hz >= 1_050.0);
-    for pole in poles {
+    for (m, pole) in poles.iter().enumerate() {
         assert!(pole.zeta > 0.0);
         let expected_q = 1.0 / (2.0 * pole.zeta);
         assert!((pole.q_factor - expected_q).abs() < 1.0e-4);
         assert!(pole.modal_mass_kg > 0.0);
+        if m < 3 {
+            assert!(pole.zone_gains[0].abs() <= 0.22);
+            assert!(pole.zone_gains[1].abs() <= 0.22);
+        }
+    }
+
+    // Verify full spatial rank 8x8 SPD admittance and well-conditioned WDF junction solve.
+    let mut l_chol = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
+    let a_br = bridge.ssm().a_br();
+    for i in 0..NUM_BRIDGE_ZONES {
+        for j in 0..=i {
+            let mut sum = a_br[i][j];
+            for (&lik, &ljk) in l_chol[i][..j].iter().zip(&l_chol[j][..j]) {
+                sum -= lik * ljk;
+            }
+            if i == j {
+                assert!(sum > 0.0, "a_br Cholesky pivot {i} not SPD: {sum}");
+                l_chol[i][j] = sum.sqrt();
+            } else {
+                l_chol[i][j] = sum / l_chol[j][j];
+            }
+        }
+    }
+    let solve = bridge.ssm().solve_8x8();
+    for (i, row) in solve.iter().enumerate() {
+        assert!(row[i] > 0.0 && row[i] <= 1.0 + 1.0e-9);
     }
 
     let mut b_zero = [0.0_f32; TOTAL_STRINGS];
@@ -155,7 +181,7 @@ fn hertz_contact_potential_and_conservation() {
 
 #[test]
 fn lossless_energy_conservation_across_sample_rates() {
-    let freqs = [112.0_f64, 235.0_f64, 445.0_f64];
+    let freqs = [89.0_f64, 210.0_f64, 410.0_f64];
     let drive_keys = [18_usize, 32, 48];
     for sr in SAMPLE_RATES {
         let ts = 1.0 / f64::from(sr);

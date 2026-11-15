@@ -1,6 +1,6 @@
 //! Reduced-order concert grand soundboard/bridge admittance state-space model (`AdmittanceSsm`).
 //!
-//! Models 10 passive reduced soundboard modes (`~68..1,120 Hz`) plus diagonal local
+//! Models 10 passive reduced soundboard modes (`~54..1,120 Hz`) plus diagonal local
 //! high-frequency resistive mobility `y_inf` across the 8 bridge zones, integrated
 //! with exact discrete trapezoidal energy balance and precomputed `8x8` WDF junction solve.
 
@@ -10,7 +10,7 @@ use piano_spec::{build_scale_design, VoicingSpec, CHOIR_LAYOUTS, TOTAL_STRINGS};
 
 use crate::zone_proj::{ZoneWeight, NUM_BRIDGE_ZONES};
 
-/// Number of reduced bidirectional soundboard/bridge modes (`~68..1,120 Hz`).
+/// Number of reduced bidirectional soundboard/bridge modes (`~54..1,120 Hz`).
 pub const NUM_REDUCED_MODES: usize = 10;
 
 /// Publicly exported reduced bridge pole descriptor for M6 `piano-body-gen` pole cancellation.
@@ -31,22 +31,22 @@ pub struct ReducedBridgePole {
 /// Default high-frequency passive local resistive mobility `y_inf` `[m / (N*s)]`
 /// across bridge zones `0..8`, preventing any `1.12 kHz` brick wall on treble/longitudinal signals.
 pub const DEFAULT_Y_INF: [f32; NUM_BRIDGE_ZONES] = [
-    0.000_90, 0.001_30, 0.001_55, 0.001_50, 0.001_30, 0.000_95, 0.000_55, 0.000_28,
+    0.000_28, 0.000_45, 0.000_72, 0.000_78, 0.000_70, 0.000_52, 0.000_32, 0.000_18,
 ];
 
 const MODE_FREQS_HZ: [f32; NUM_REDUCED_MODES] = [
-    68.0, 112.0, 168.0, 235.0, 328.0, 445.0, 590.0, 760.0, 935.0, 1120.0,
+    54.0, 89.0, 142.0, 210.0, 295.0, 410.0, 555.0, 730.0, 920.0, 1120.0,
 ];
 const MODE_ZETAS: [f32; NUM_REDUCED_MODES] = [
-    0.028, 0.024, 0.022, 0.020, 0.019, 0.018, 0.017, 0.017, 0.016, 0.016,
+    0.055, 0.042, 0.032, 0.025, 0.022, 0.020, 0.019, 0.018, 0.017, 0.016,
 ];
 const MODE_MASSES_KG: [f32; NUM_REDUCED_MODES] =
-    [0.72, 0.58, 0.50, 0.44, 0.40, 0.36, 0.32, 0.29, 0.26, 0.24];
+    [3.40, 2.40, 1.45, 1.05, 0.82, 0.72, 0.64, 0.56, 0.50, 0.44];
 
 const MODE_ZONE_GAINS: [[f32; NUM_BRIDGE_ZONES]; NUM_REDUCED_MODES] = [
-    [0.24, 0.36, 0.44, 0.46, 0.42, 0.34, 0.24, 0.14],
-    [0.34, 0.38, 0.24, 0.04, -0.18, -0.34, -0.32, -0.18],
-    [0.36, 0.20, -0.12, -0.36, -0.34, -0.10, 0.22, 0.26],
+    [0.12, 0.20, 0.34, 0.42, 0.40, 0.32, 0.22, 0.12],
+    [0.18, 0.21, 0.18, 0.04, -0.18, -0.32, -0.30, -0.18],
+    [0.20, 0.14, -0.10, -0.34, -0.32, -0.10, 0.22, 0.26],
     [0.26, -0.10, -0.38, -0.22, 0.18, 0.36, 0.14, -0.22],
     [0.18, -0.30, -0.26, 0.22, 0.38, 0.08, -0.30, -0.20],
     [0.14, -0.34, 0.12, 0.38, -0.10, -0.36, 0.08, 0.28],
