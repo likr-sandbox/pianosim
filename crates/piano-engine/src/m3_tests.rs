@@ -24,7 +24,7 @@ pub(crate) fn render_chunks(
         let end = (offset + block_size).min(total_frames);
         let evs = if first { first_events } else { &[] };
         first = false;
-        engine.render_block(evs, &mut out_l[offset..end], &mut out_r[offset..end]);
+        engine.render_block_bridge(evs, &mut out_l[offset..end], &mut out_r[offset..end]);
         offset = end;
     }
     (out_l, out_r)
@@ -394,7 +394,7 @@ fn gate3_continuous_half_pedal_repedaling_and_16_note_cluster() {
                 value_u16: sus,
             },
         }];
-        engine.render_block(&evs, &mut out_l, &mut out_r);
+        engine.render_block_bridge(&evs, &mut out_l, &mut out_r);
         l.extend_from_slice(&out_l);
         r.extend_from_slice(&out_r);
     }

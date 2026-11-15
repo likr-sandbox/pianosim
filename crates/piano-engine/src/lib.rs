@@ -1,11 +1,17 @@
 //! Zero-allocation 4-stage real-time piano synthesizer engine.
 
+pub(crate) mod drivers;
 pub mod engine;
+pub(crate) mod engine_core;
 pub mod event_queue;
+pub mod param_smooth;
 pub mod telemetry;
 
 pub use engine::PianoEngine;
 pub use event_queue::{EventQueue, MAX_EVENTS};
+pub use param_smooth::{
+    IntoLidState, IntoListenerPerspective, SpaceCrossfadeGuard, VoicingSmoother,
+};
 pub use piano_spec;
 pub use telemetry::EngineTelemetry;
 
@@ -17,6 +23,12 @@ mod m4_tests;
 
 #[cfg(test)]
 mod m5_tests;
+
+#[cfg(test)]
+mod m6_tests;
+
+#[cfg(test)]
+mod m6_acoustic_tests;
 
 #[cfg(test)]
 mod tests {
@@ -93,7 +105,7 @@ mod tests {
             let end = (offset + block_size).min(total_frames);
             let evs = if first { first_events } else { &[] };
             first = false;
-            engine.render_block(evs, &mut out_l[offset..end], &mut out_r[offset..end]);
+            engine.render_block_bridge(evs, &mut out_l[offset..end], &mut out_r[offset..end]);
             offset = end;
         }
         (out_l, out_r)

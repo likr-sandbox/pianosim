@@ -40,7 +40,7 @@ fn render_timeline(
                 block_evs.push(ev);
             }
         }
-        engine.render_block(&block_evs, &mut out_l[offset..end], &mut out_r[offset..end]);
+        engine.render_block_bridge(&block_evs, &mut out_l[offset..end], &mut out_r[offset..end]);
         offset = end;
     }
     let mono = mono_mix(&out_l, &out_r);
