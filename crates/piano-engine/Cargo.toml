@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 piano-action = { path = "../piano-action" }
+piano-bridge = { path = "../piano-bridge" }
 piano-simd = { path = "../piano-simd" }
 piano-spec = { path = "../piano-spec" }
 piano-strings = { path = "../piano-strings" }

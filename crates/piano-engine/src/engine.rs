@@ -1,10 +1,12 @@
 //! Real-time 88-key / 230-string / ~26k-mode physical piano engine core.
 
 use piano_action::ActionBank;
+use piano_bridge::BridgeBank;
 use piano_spec::{
     midi_to_key, EventKind, PedalKind, SampleEvent, VoicingSpec, DAMPED_KEYS, NUM_KEYS,
+    TOTAL_STRINGS,
 };
-use piano_strings::{KeyActionDriver, StringBank};
+use piano_strings::{BridgePortDriver, KeyActionDriver, StringBank};
 
 use crate::event_queue::{is_sorted_by_offset, EventQueue};
 use crate::telemetry::{compute_block_telemetry, EngineTelemetry};
@@ -12,69 +14,142 @@ use crate::telemetry::{compute_block_telemetry, EngineTelemetry};
 const KEY_SILENCE_RMS_THRESHOLD: f32 = 1.0e-4;
 const DAMPER_ACTIVE_HOLD_CLEARANCE_M: f32 = 0.5e-3;
 
-struct ActionDriver<'a>(&'a mut ActionBank);
+struct ActionDriver<'a> {
+    action: &'a mut ActionBank,
+    key_down: &'a mut [bool; NUM_KEYS],
+    ringing: &'a mut [bool; NUM_KEYS],
+    mid_events: &'a [SampleEvent],
+    seg_base: usize,
+    ev_cursor: usize,
+}
 
 impl KeyActionDriver for ActionDriver<'_> {
     #[inline]
     fn is_hammer_active(&self, key_idx: usize) -> bool {
-        self.0.is_hammer_active(key_idx)
+        self.action.is_hammer_active(key_idx)
     }
-
     #[inline]
     fn damper_clearance_m(&self, key_idx: usize) -> f32 {
-        self.0.damper_clearance_m(key_idx)
+        self.action.damper_clearance_m(key_idx)
     }
-
     #[inline]
     fn strike_weights(&self, key_idx: usize) -> [f32; 3] {
-        self.0.strike_weights(key_idx)
+        self.action.strike_weights(key_idx)
     }
-
     #[inline]
     fn step_key_clearance(&mut self, key_idx: usize) -> f32 {
-        self.0.step_key_clearance(key_idx)
+        self.action.step_key_clearance(key_idx)
     }
-
     #[inline]
-    fn step_key_clearance_tile(
-        &mut self,
-        key_idx: usize,
-        t_len: usize,
-        out_clears: &mut [f32; 8],
-    ) -> f32 {
-        self.0.step_key_clearance_tile(key_idx, t_len, out_clears)
+    fn step_key_clearance_tile(&mut self, key_idx: usize, t_len: usize, out: &mut [f32; 8]) -> f32 {
+        self.action.step_key_clearance_tile(key_idx, t_len, out)
     }
-
     #[inline]
-    fn step_hammer_sample(
-        &mut self,
-        key_idx: usize,
-        y_str_m: f32,
-        v_str_mps: f32,
-        r_port_strike: f32,
-    ) -> f32 {
-        self.0
-            .step_hammer_sample(key_idx, y_str_m, v_str_mps, r_port_strike)
+    fn has_mid_block_event(&self, key_idx: usize, chunk_base: usize, sub: usize) -> bool {
+        let lo = self.seg_base + chunk_base;
+        let hi = lo + sub;
+        for &ev in &self.mid_events[self.ev_cursor..] {
+            let off = ev.sample_offset as usize;
+            if off >= hi {
+                break;
+            }
+            if off >= lo {
+                let k_opt = match ev.kind {
+                    EventKind::NoteOn { midi_key, .. } | EventKind::NoteOff { midi_key, .. } => {
+                        midi_to_key(midi_key)
+                    }
+                    _ => None,
+                };
+                if k_opt == Some(key_idx) {
+                    return true;
+                }
+            }
+        }
+        false
     }
-
+    #[inline]
+    fn apply_sample_events_at(&mut self, sample_idx: usize) -> u128 {
+        let target = self.seg_base + sample_idx;
+        let mut note_on_mask = 0_u128;
+        while self.ev_cursor < self.mid_events.len() {
+            let ev = self.mid_events[self.ev_cursor];
+            if (ev.sample_offset as usize) > target {
+                break;
+            }
+            self.ev_cursor += 1;
+            match ev.kind {
+                EventKind::NoteOn {
+                    midi_key,
+                    velocity_u16,
+                } => {
+                    if let Some(k) = midi_to_key(midi_key) {
+                        if velocity_u16 == 0 {
+                            self.key_down[k] = false;
+                            self.action.note_off(k, 0);
+                        } else {
+                            self.key_down[k] = true;
+                            self.ringing[k] = true;
+                            self.action.note_on(k, velocity_u16);
+                            note_on_mask |= 1_u128 << k;
+                        }
+                    }
+                }
+                EventKind::NoteOff {
+                    midi_key,
+                    release_vel_u16,
+                } => {
+                    if let Some(k) = midi_to_key(midi_key) {
+                        self.key_down[k] = false;
+                        self.action.note_off(k, release_vel_u16);
+                    }
+                }
+                _ => {}
+            }
+        }
+        note_on_mask
+    }
+    #[inline]
+    fn step_hammer_sample(&mut self, key_idx: usize, y_s: f32, v_s: f32, r_h: f32) -> f32 {
+        self.action.step_hammer_sample(key_idx, y_s, v_s, r_h)
+    }
     #[inline]
     fn step_damper_sample(
         &mut self,
         key_idx: usize,
-        slot_idx: usize,
-        y_damp_m: f32,
-        v_damp_mps: f32,
-        r_port_damp: f32,
-        y_clear_m: f32,
+        pad_slot: usize,
+        y_d: f32,
+        v_d: f32,
+        r_d: f32,
+        y_clear: f32,
     ) -> f32 {
-        self.0.step_damper_sample(
-            key_idx,
-            slot_idx,
-            y_damp_m,
-            v_damp_mps,
-            r_port_damp,
-            y_clear_m,
-        )
+        self.action
+            .step_damper_sample(key_idx, pad_slot, y_d, v_d, r_d, y_clear)
+    }
+}
+
+struct BridgeDriver<'a>(&'a mut BridgeBank);
+
+impl BridgePortDriver for BridgeDriver<'_> {
+    #[inline]
+    fn port_resistances(&self) -> &[f32; TOTAL_STRINGS] {
+        self.0.port_resistances()
+    }
+
+    #[inline]
+    fn zone_weights(&self) -> &[(u8, f32, u8, f32); TOTAL_STRINGS] {
+        self.0.zone_weights()
+    }
+
+    #[inline]
+    fn step_bridge_sample(
+        &mut self,
+        a_waves: &[f32; TOTAL_STRINGS],
+        zone_str_audio: &[f32; 8],
+        b_waves_out: &mut [f32; TOTAL_STRINGS],
+        zone_out: &mut [f32; 8],
+    ) -> (f32, f32) {
+        self.0
+            .step_bridge_sample(a_waves, zone_str_audio, b_waves_out, zone_out)
     }
 }
 
@@ -83,12 +158,13 @@ impl KeyActionDriver for ActionDriver<'_> {
 struct EngineCore {
     action: ActionBank,
     bank: StringBank,
+    bridge: BridgeBank,
     key_down: [bool; NUM_KEYS],
     ringing: [bool; NUM_KEYS],
 }
 
-/// Zero-allocation 88-key polyphonic piano engine coupling Stage 1 [`ActionBank`]
-/// with Stage 2 [`StringBank`].
+/// Zero-allocation 88-key polyphonic piano engine coupling Stage 1 [`ActionBank`],
+/// Stage 2 [`StringBank`], and Stage 3 [`BridgeBank`].
 #[derive(Clone, Debug)]
 pub struct PianoEngine {
     core: EngineCore,
@@ -97,19 +173,24 @@ pub struct PianoEngine {
 }
 
 impl PianoEngine {
-    /// Allocates and precomputes all 88-key action and string tables with default voicing.
+    /// Allocates and precomputes all 88-key action, string, and bridge tables with default voicing.
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
         Self::new_with_voicing(sample_rate, &VoicingSpec::default())
     }
 
-    /// Allocates and precomputes all 88-key action and string tables for `voicing`.
+    /// Allocates and precomputes all 88-key action, string, and bridge tables for `voicing`.
     #[must_use]
     pub fn new_with_voicing(sample_rate: f32, voicing: &VoicingSpec) -> Self {
+        let action = ActionBank::new(sample_rate, voicing);
+        let bank = StringBank::new(sample_rate, voicing);
+        let mut bridge = BridgeBank::new(bank.sample_rate());
+        bridge.set_port_resistances(bank.bridge_port_resistances());
         Self {
             core: EngineCore {
-                action: ActionBank::new(sample_rate, voicing),
-                bank: StringBank::new(sample_rate, voicing),
+                action,
+                bank,
+                bridge,
                 key_down: [false; NUM_KEYS],
                 ringing: [false; NUM_KEYS],
             },
@@ -170,6 +251,16 @@ impl PianoEngine {
     #[cfg(test)]
     pub(crate) fn total_sav_energy_joules(&self) -> f64 {
         self.core.bank.total_sav_energy_joules()
+            + self
+                .core
+                .bank
+                .bridge_link_energy_joules(self.core.bridge.port_resistances())
+            + self.core.bridge.total_energy_joules()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn string_linear_energy_joules(&self, s_idx: usize) -> f64 {
+        self.core.bank.string_linear_energy_joules(s_idx)
     }
 
     #[cfg(test)]
@@ -221,23 +312,68 @@ impl EngineCore {
 
     fn render_event_slice(&mut self, events: &[SampleEvent], out_l: &mut [f32], out_r: &mut [f32]) {
         let frames = out_l.len();
-        let mut cursor = 0_usize;
-        for &ev in events {
-            let target = (ev.sample_offset as usize).min(frames);
-            if target > cursor {
-                self.render_subblock(&mut out_l[cursor..target], &mut out_r[cursor..target]);
-                cursor = target;
+        let (mut cursor, mut idx) = (0_usize, 0_usize);
+        while cursor < frames {
+            while idx < events.len() && (events[idx].sample_offset as usize) <= cursor {
+                self.apply_event(events[idx].kind);
+                idx += 1;
             }
-            self.apply_event(ev.kind);
+            let mid_start = idx;
+            let mut seg_end = frames;
+            while idx < events.len() {
+                let off = (events[idx].sample_offset as usize).min(frames);
+                if off >= frames {
+                    break;
+                }
+                if matches!(
+                    events[idx].kind,
+                    EventKind::Pedal { .. } | EventKind::AllNotesOff
+                ) {
+                    seg_end = off;
+                    break;
+                }
+                idx += 1;
+            }
+            if seg_end > cursor {
+                self.render_segment(
+                    cursor,
+                    &events[mid_start..idx],
+                    &mut out_l[cursor..seg_end],
+                    &mut out_r[cursor..seg_end],
+                );
+                cursor = seg_end;
+            }
         }
-        if cursor < frames {
-            self.render_subblock(&mut out_l[cursor..frames], &mut out_r[cursor..frames]);
+        while idx < events.len() {
+            self.apply_event(events[idx].kind);
+            idx += 1;
         }
+        let hammers = core::array::from_fn(|k| self.action.is_hammer_active(k));
+        self.bank.flush_bridge_subnormals(&hammers);
     }
 
-    fn render_subblock(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
-        let mut driver = ActionDriver(&mut self.action);
-        self.bank.render_subblock_coupled(&mut driver, out_l, out_r);
+    fn render_segment(
+        &mut self,
+        seg_base: usize,
+        mid_events: &[SampleEvent],
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+    ) {
+        let mut action_drv = ActionDriver {
+            action: &mut self.action,
+            key_down: &mut self.key_down,
+            ringing: &mut self.ringing,
+            mid_events,
+            seg_base,
+            ev_cursor: 0,
+        };
+        let mut bridge_drv = BridgeDriver(&mut self.bridge);
+        self.bank.render_subblock_bridge_coupled_no_flush(
+            &mut action_drv,
+            &mut bridge_drv,
+            out_l,
+            out_r,
+        );
         self.action.decay_idle_memory(out_l.len());
         for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
             *l = soft_limit(*l);
@@ -293,6 +429,7 @@ impl EngineCore {
         self.ringing.fill(false);
         self.action.reset();
         self.bank.reset();
+        self.bridge.reset();
     }
 
     fn retire_silent_keys(&mut self) {
