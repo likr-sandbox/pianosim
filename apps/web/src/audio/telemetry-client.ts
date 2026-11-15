@@ -22,7 +22,11 @@ declare global {
 
 /** Tracks live AudioWorklet telemetry and updates `window.__PIANO_DIAG__`. */
 export class TelemetryClient {
-  private static readonly HISTORY_CAPACITY = 64;
+  /**
+   * Capacity of rolling telemetry history (32 packets * 32 blocks * 2.67 ms = ~2.73 seconds at 48 kHz).
+   * 32 snapshots provide sufficient smoothing while allowing attack transients to purge within ~2.7s.
+   */
+  private static readonly HISTORY_CAPACITY = 32;
   private readonly callbackHistory = new Float32Array(TelemetryClient.HISTORY_CAPACITY);
   private readonly sortScratch = new Float32Array(TelemetryClient.HISTORY_CAPACITY);
   private historyCount = 0;
@@ -107,8 +111,18 @@ export class TelemetryClient {
     const sorted = this.sortScratch.subarray(0, n);
     sorted.sort();
 
-    const p99Idx = n > 1 ? Math.min(n - 2, Math.floor(0.99 * (n - 1))) : 0;
+    // Median (50th percentile)
     this.p50Us = sorted[Math.floor(n * 0.5)];
+
+    // 99th percentile with small-sample robustness:
+    // When n >= 4, clamps to at most n - 2 to protect against a single anomalous CPU/OS interrupt spike.
+    // For n < 4, uses the highest available sample (n - 1).
+    let p99Idx = 0;
+    if (n >= 4) {
+      p99Idx = Math.min(n - 2, Math.max(0, Math.floor(0.99 * (n - 1))));
+    } else if (n > 1) {
+      p99Idx = n - 1;
+    }
     this.p99Us = sorted[p99Idx];
 
     this.telemetry = {

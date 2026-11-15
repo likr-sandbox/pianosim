@@ -46,6 +46,13 @@ function nowMs(): number {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
     return performance.now();
   }
+  if (
+    typeof globalThis !== 'undefined' &&
+    globalThis.performance &&
+    typeof globalThis.performance.now === 'function'
+  ) {
+    return globalThis.performance.now();
+  }
   return Date.now();
 }
 
@@ -239,6 +246,8 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
         this.outLView = null;
         this.outRView = null;
         this.cachedFrames = 0;
+        this.activeDurMs = 0;
+        this.strideBlockCount = 0;
         this.destroyed = true;
         break;
       case 'init':
