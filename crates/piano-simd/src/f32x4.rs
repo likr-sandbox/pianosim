@@ -98,6 +98,34 @@ mod imp {
     pub(crate) fn reduce_sum(a: Inner) -> f32 {
         a.reduce_sum()
     }
+    #[inline(always)]
+    pub(crate) fn splat_lane<const LANE: usize>(a: Inner) -> Inner {
+        a.splat_lane::<LANE>()
+    }
+    #[inline(always)]
+    pub(crate) fn reverse(a: Inner) -> Inner {
+        a.reverse()
+    }
+    #[inline(always)]
+    pub(crate) fn slide1(a: Inner, b: Inner) -> Inner {
+        a.slide1(b)
+    }
+    #[inline(always)]
+    pub(crate) fn slide2(a: Inner, b: Inner) -> Inner {
+        a.slide2(b)
+    }
+    #[inline(always)]
+    pub(crate) fn slide3(a: Inner, b: Inner) -> Inner {
+        a.slide3(b)
+    }
+    #[inline(always)]
+    pub(crate) fn unpack_lo(a: Inner, b: Inner) -> Inner {
+        a.unpack_lo(b)
+    }
+    #[inline(always)]
+    pub(crate) fn unpack_hi(a: Inner, b: Inner) -> Inner {
+        a.unpack_hi(b)
+    }
 }
 
 /// Portable 4-lane `f32` SIMD vector (`16` bytes, `16`-byte aligned).
@@ -267,6 +295,55 @@ impl F32x4 {
     #[inline(always)]
     pub fn reduce_sum(self) -> f32 {
         imp::reduce_sum(self.0)
+    }
+
+    /// Broadcasts `LANE` (`0..4`) into all four lanes.
+    #[must_use]
+    #[inline(always)]
+    pub fn splat_lane<const LANE: usize>(self) -> Self {
+        Self(imp::splat_lane::<LANE>(self.0))
+    }
+
+    /// Reverses lanes `[a0, a1, a2, a3] -> [a3, a2, a1, a0]`.
+    #[must_use]
+    #[inline(always)]
+    pub fn reverse(self) -> Self {
+        Self(imp::reverse(self.0))
+    }
+
+    /// Concatenates `self` and `rhs` and shifts right by 1 lane: `[a1, a2, a3, b0]`.
+    #[must_use]
+    #[inline(always)]
+    pub fn slide1(self, rhs: Self) -> Self {
+        Self(imp::slide1(self.0, rhs.0))
+    }
+
+    /// Concatenates `self` and `rhs` and shifts right by 2 lanes: `[a2, a3, b0, b1]`.
+    #[must_use]
+    #[inline(always)]
+    pub fn slide2(self, rhs: Self) -> Self {
+        Self(imp::slide2(self.0, rhs.0))
+    }
+
+    /// Concatenates `self` and `rhs` and shifts right by 3 lanes: `[a3, b0, b1, b2]`.
+    #[must_use]
+    #[inline(always)]
+    pub fn slide3(self, rhs: Self) -> Self {
+        Self(imp::slide3(self.0, rhs.0))
+    }
+
+    /// Interleaves low lanes `[a0, b0, a1, b1]`.
+    #[must_use]
+    #[inline(always)]
+    pub fn unpack_lo(self, rhs: Self) -> Self {
+        Self(imp::unpack_lo(self.0, rhs.0))
+    }
+
+    /// Interleaves high lanes `[a2, b2, a3, b3]`.
+    #[must_use]
+    #[inline(always)]
+    pub fn unpack_hi(self, rhs: Self) -> Self {
+        Self(imp::unpack_hi(self.0, rhs.0))
     }
 }
 

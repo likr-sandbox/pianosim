@@ -296,4 +296,20 @@ mod tests {
         state.reset();
         assert_eq!(state.process(&lut, 0.0), 0.0);
     }
+
+    #[test]
+    fn f32x4_lane_shuffles_and_unpacks() {
+        let a = F32x4::from_array([1.0, 2.0, 3.0, 4.0]);
+        let b = F32x4::from_array([5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(a.splat_lane::<0>().to_array(), [1.0; 4]);
+        assert_eq!(a.splat_lane::<1>().to_array(), [2.0; 4]);
+        assert_eq!(a.splat_lane::<2>().to_array(), [3.0; 4]);
+        assert_eq!(a.splat_lane::<3>().to_array(), [4.0; 4]);
+        assert_eq!(a.reverse().to_array(), [4.0, 3.0, 2.0, 1.0]);
+        assert_eq!(a.slide1(b).to_array(), [2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(a.slide2(b).to_array(), [3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(a.slide3(b).to_array(), [4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(a.unpack_lo(b).to_array(), [1.0, 5.0, 2.0, 6.0]);
+        assert_eq!(a.unpack_hi(b).to_array(), [3.0, 7.0, 4.0, 8.0]);
+    }
 }

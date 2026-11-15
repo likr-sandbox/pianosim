@@ -115,3 +115,53 @@ pub(crate) fn reduce_sum(a: Inner) -> f32 {
         _mm_cvtss_f32(_mm_add_ss(sum2, shuf))
     }
 }
+
+#[inline(always)]
+pub(crate) fn splat_lane<const LANE: usize>(v: Inner) -> Inner {
+    const { assert!(LANE < 4) };
+    // SAFETY: Baseline SSE `_mm_shuffle_ps`.
+    unsafe {
+        match LANE {
+            0 => Inner(_mm_shuffle_ps(v.0, v.0, 0x00)),
+            1 => Inner(_mm_shuffle_ps(v.0, v.0, 0x55)),
+            2 => Inner(_mm_shuffle_ps(v.0, v.0, 0xAA)),
+            _ => Inner(_mm_shuffle_ps(v.0, v.0, 0xFF)),
+        }
+    }
+}
+
+#[inline(always)]
+pub(crate) fn reverse(v: Inner) -> Inner {
+    Inner(unsafe { _mm_shuffle_ps(v.0, v.0, 0x1B) })
+}
+
+#[inline(always)]
+pub(crate) fn slide1(a: Inner, b: Inner) -> Inner {
+    unsafe {
+        let t = _mm_shuffle_ps(a.0, b.0, 0x0F);
+        Inner(_mm_shuffle_ps(a.0, t, 0x89))
+    }
+}
+
+#[inline(always)]
+pub(crate) fn slide2(a: Inner, b: Inner) -> Inner {
+    Inner(unsafe { _mm_shuffle_ps(a.0, b.0, 0x4E) })
+}
+
+#[inline(always)]
+pub(crate) fn slide3(a: Inner, b: Inner) -> Inner {
+    unsafe {
+        let t = _mm_shuffle_ps(a.0, b.0, 0x0F);
+        Inner(_mm_shuffle_ps(t, b.0, 0x98))
+    }
+}
+
+#[inline(always)]
+pub(crate) fn unpack_lo(a: Inner, b: Inner) -> Inner {
+    Inner(unsafe { _mm_unpacklo_ps(a.0, b.0) })
+}
+
+#[inline(always)]
+pub(crate) fn unpack_hi(a: Inner, b: Inner) -> Inner {
+    Inner(unsafe { _mm_unpackhi_ps(a.0, b.0) })
+}

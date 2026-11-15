@@ -110,3 +110,44 @@ pub(crate) fn reduce_sum(a: Inner) -> f32 {
     let sum4 = f32x4_add(sum2, shuf);
     f32x4_extract_lane::<0>(sum4)
 }
+
+#[inline(always)]
+pub(crate) fn splat_lane<const LANE: usize>(v: Inner) -> Inner {
+    const { assert!(LANE < 4) };
+    match LANE {
+        0 => Inner(i32x4_shuffle::<0, 0, 0, 0>(v.0, v.0)),
+        1 => Inner(i32x4_shuffle::<1, 1, 1, 1>(v.0, v.0)),
+        2 => Inner(i32x4_shuffle::<2, 2, 2, 2>(v.0, v.0)),
+        _ => Inner(i32x4_shuffle::<3, 3, 3, 3>(v.0, v.0)),
+    }
+}
+
+#[inline(always)]
+pub(crate) fn reverse(v: Inner) -> Inner {
+    Inner(i32x4_shuffle::<3, 2, 1, 0>(v.0, v.0))
+}
+
+#[inline(always)]
+pub(crate) fn slide1(a: Inner, b: Inner) -> Inner {
+    Inner(i32x4_shuffle::<1, 2, 3, 4>(a.0, b.0))
+}
+
+#[inline(always)]
+pub(crate) fn slide2(a: Inner, b: Inner) -> Inner {
+    Inner(i32x4_shuffle::<2, 3, 4, 5>(a.0, b.0))
+}
+
+#[inline(always)]
+pub(crate) fn slide3(a: Inner, b: Inner) -> Inner {
+    Inner(i32x4_shuffle::<3, 4, 5, 6>(a.0, b.0))
+}
+
+#[inline(always)]
+pub(crate) fn unpack_lo(a: Inner, b: Inner) -> Inner {
+    Inner(i32x4_shuffle::<0, 4, 1, 5>(a.0, b.0))
+}
+
+#[inline(always)]
+pub(crate) fn unpack_hi(a: Inner, b: Inner) -> Inner {
+    Inner(i32x4_shuffle::<2, 6, 3, 7>(a.0, b.0))
+}

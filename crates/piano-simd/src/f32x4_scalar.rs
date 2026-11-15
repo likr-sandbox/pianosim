@@ -129,4 +129,46 @@ impl ScalarF32x4 {
         let a = self.0;
         (a[0] + a[2]) + (a[1] + a[3])
     }
+
+    #[inline(always)]
+    pub(crate) const fn splat_lane<const LANE: usize>(self) -> Self {
+        const { assert!(LANE < 4) };
+        Self([self.0[LANE]; 4])
+    }
+
+    #[inline(always)]
+    pub(crate) const fn reverse(self) -> Self {
+        let a = self.0;
+        Self([a[3], a[2], a[1], a[0]])
+    }
+
+    #[inline(always)]
+    pub(crate) const fn slide1(self, rhs: Self) -> Self {
+        let (a, b) = (self.0, rhs.0);
+        Self([a[1], a[2], a[3], b[0]])
+    }
+
+    #[inline(always)]
+    pub(crate) const fn slide2(self, rhs: Self) -> Self {
+        let (a, b) = (self.0, rhs.0);
+        Self([a[2], a[3], b[0], b[1]])
+    }
+
+    #[inline(always)]
+    pub(crate) const fn slide3(self, rhs: Self) -> Self {
+        let (a, b) = (self.0, rhs.0);
+        Self([a[3], b[0], b[1], b[2]])
+    }
+
+    #[inline(always)]
+    pub(crate) const fn unpack_lo(self, rhs: Self) -> Self {
+        let (a, b) = (self.0, rhs.0);
+        Self([a[0], b[0], a[1], b[1]])
+    }
+
+    #[inline(always)]
+    pub(crate) const fn unpack_hi(self, rhs: Self) -> Self {
+        let (a, b) = (self.0, rhs.0);
+        Self([a[2], b[2], a[3], b[3]])
+    }
 }

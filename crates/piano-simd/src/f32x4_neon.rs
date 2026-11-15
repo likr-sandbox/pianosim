@@ -99,3 +99,49 @@ pub(crate) fn sqrt(a: Inner) -> Inner {
 pub(crate) fn reduce_sum(a: Inner) -> f32 {
     unsafe { vaddvq_f32(a.0) }
 }
+
+#[inline(always)]
+pub(crate) fn splat_lane<const LANE: usize>(v: Inner) -> Inner {
+    const { assert!(LANE < 4) };
+    unsafe {
+        match LANE {
+            0 => Inner(vdupq_laneq_f32::<0>(v.0)),
+            1 => Inner(vdupq_laneq_f32::<1>(v.0)),
+            2 => Inner(vdupq_laneq_f32::<2>(v.0)),
+            _ => Inner(vdupq_laneq_f32::<3>(v.0)),
+        }
+    }
+}
+
+#[inline(always)]
+pub(crate) fn reverse(v: Inner) -> Inner {
+    unsafe {
+        let r = vrev64q_f32(v.0);
+        Inner(vextq_f32::<2>(r, r))
+    }
+}
+
+#[inline(always)]
+pub(crate) fn slide1(a: Inner, b: Inner) -> Inner {
+    Inner(unsafe { vextq_f32::<1>(a.0, b.0) })
+}
+
+#[inline(always)]
+pub(crate) fn slide2(a: Inner, b: Inner) -> Inner {
+    Inner(unsafe { vextq_f32::<2>(a.0, b.0) })
+}
+
+#[inline(always)]
+pub(crate) fn slide3(a: Inner, b: Inner) -> Inner {
+    Inner(unsafe { vextq_f32::<3>(a.0, b.0) })
+}
+
+#[inline(always)]
+pub(crate) fn unpack_lo(a: Inner, b: Inner) -> Inner {
+    Inner(unsafe { vzip1q_f32(a.0, b.0) })
+}
+
+#[inline(always)]
+pub(crate) fn unpack_hi(a: Inner, b: Inner) -> Inner {
+    Inner(unsafe { vzip2q_f32(a.0, b.0) })
+}
