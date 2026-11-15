@@ -1,88 +1,121 @@
-import { PEDAL_SUSTAIN, u7ToU16, type PianoDiagnostics } from '../audio/abi';
-import { formatPeakDb, type TelemetryClient } from '../audio/telemetry-client';
+/** Root application shell orchestrating audio host, MIDI player, input devices, and UI panels. */
+
+import {
+  u7ToU16,
+  type LidState,
+  type ListenerPerspective,
+  type PedalKind,
+} from '../audio/abi';
+import type { TelemetryClient } from '../audio/telemetry-client';
 import type { WasmAudioHost } from '../audio/wasm-host';
-import { TestKeyboardWidget } from './keyboard-widget';
+import { PcKeyboard } from '../input/pc-keyboard';
+import { PedalController } from '../input/pedal-controller';
+import { getDemoScore } from '../midi/demo-scores';
+import { MidiPlayer } from '../midi/midi-player';
+import { parseSmf } from '../midi/smf-parser';
+import { WebMidiManager } from '../midi/web-midi';
+import { KeyboardView } from './keyboard-view';
+import { PedalBar } from './pedal-bar';
+import { SpacePanel } from './space-panel';
+import { TransportBar } from './transport-bar';
+import { VoicingPanel, type VoicingState } from './voicing-panel';
 
 const A4_MIDI = 69;
 const A4_TEST_DURATION_MS = 750;
 
-function formatEngineStatus(diag: PianoDiagnostics): string {
-  switch (diag.status) {
-    case 'locked':
-      return 'Locked';
-    case 'initializing':
-      return 'Initializing...';
-    case 'ready':
-      return diag.contextState === 'running' ? 'Ready' : `Ready (${diag.contextState})`;
-    case 'error':
-      return `Error: ${diag.error ?? 'Unknown'}`;
-  }
-}
-
-/** Responsive M1 studio shell with audio unlock, C4-C5 keyboard, sustain, and HUD. */
 export class AppShell {
+  private readonly root: HTMLElement;
   private readonly host: WasmAudioHost;
   private readonly telemetry: TelemetryClient;
-  private readonly root: HTMLElement;
-  private readonly activeSources = new Map<number, number>();
-  private readonly keyboard: TestKeyboardWidget;
+  private readonly midiManager: WebMidiManager;
+  private readonly midiPlayer: MidiPlayer;
+  private readonly pedalController: PedalController;
+
+  private keyboardView!: KeyboardView;
+  private pedalBar!: PedalBar;
+  private voicingPanel!: VoicingPanel;
+  private spacePanel!: SpacePanel;
+  private transportBar!: TransportBar;
+  private pcKeyboard!: PcKeyboard;
 
   private unlockBtn!: HTMLButtonElement;
   private a4Btn!: HTMLButtonElement;
-  private sustainBtn!: HTMLButtonElement;
   private panicBtn!: HTMLButtonElement;
-  private velocityInput!: HTMLInputElement;
-  private velocityValueEl!: HTMLElement;
-  private statusEl!: HTMLElement;
-  private sampleRateEl!: HTMLElement;
-  private voicesEl!: HTMLElement;
-  private peakDbEl!: HTMLElement;
-  private callbackUsEl!: HTMLElement;
+  private velocitySlider!: HTMLInputElement;
+  private velocityValEl!: HTMLElement;
   private errorBannerEl!: HTMLElement;
 
-  private sustainDown = false;
   private velocity7 = 100;
-  private a4PulseActive = false;
   private a4PulseTimer: number | null = null;
-  private unsubscribeTelemetry: (() => void) | null = null;
   private readonly cleanupHandlers: Array<() => void> = [];
 
-  constructor(root: HTMLElement, host: WasmAudioHost, telemetry: TelemetryClient) {
+  constructor(
+    root: HTMLElement,
+    host: WasmAudioHost,
+    telemetry: TelemetryClient,
+    midiManager?: WebMidiManager,
+    midiPlayer?: MidiPlayer,
+  ) {
     this.root = root;
     this.host = host;
     this.telemetry = telemetry;
-    this.renderLayout();
-    const keyboardContainer = this.requireEl<HTMLDivElement>('#octave-keyboard');
-    this.keyboard = new TestKeyboardWidget(keyboardContainer, {
-      onPress: (midi) => void this.acquireNote(midi),
-      onRelease: (midi) => this.releaseNote(midi),
-      onToggleSustain: () => void this.toggleSustain(),
-      onBlurReset: () => this.releaseAllInputs(),
+    this.midiManager = midiManager ?? new WebMidiManager(host);
+    this.midiPlayer = midiPlayer ?? new MidiPlayer(host);
+
+    this.pedalController = new PedalController({
+      onPedalChange: (kind: PedalKind, valU16: number) => {
+        this.host.pedal(kind, valU16, 0);
+      },
+      onStateUpdate: (st) => {
+        this.pedalBar?.updateState(st.sustain, st.sostenuto, st.unaCorda);
+      },
     });
+
+    this.render();
+    this.bindComponents();
     this.bindControls();
-    this.unsubscribeTelemetry = this.telemetry.subscribe((diag) => this.updateHud(diag));
+
+    // Load initial Bach Prelude demo score
+    const initialScore = getDemoScore('bach-prelude');
+    this.midiPlayer.load(initialScore);
+  }
+
+  showError(message: string): void {
+    if (this.errorBannerEl) {
+      this.errorBannerEl.hidden = false;
+      this.errorBannerEl.textContent = `Error: ${message}`;
+    }
+  }
+
+  clearError(): void {
+    if (this.errorBannerEl) {
+      this.errorBannerEl.hidden = true;
+      this.errorBannerEl.textContent = '';
+    }
   }
 
   destroy(): void {
     this.clearA4Pulse();
-    this.keyboard.destroy();
-    if (this.unsubscribeTelemetry) {
-      this.unsubscribeTelemetry();
-      this.unsubscribeTelemetry = null;
-    }
+    this.keyboardView?.destroy();
+    this.pedalBar?.destroy();
+    this.voicingPanel?.destroy();
+    this.spacePanel?.destroy();
+    this.transportBar?.destroy();
+    this.pcKeyboard?.destroy();
     for (const off of this.cleanupHandlers) {
       off();
     }
     this.cleanupHandlers.length = 0;
+    this.root.innerHTML = '';
   }
 
-  private renderLayout(): void {
+  private render(): void {
     this.root.innerHTML = `
       <main class="studio-shell">
         <header class="studio-header">
-          <div>
-            <p class="eyebrow">M1 Web AudioWorklet + Pure-Rust Wasm Shell</p>
-            <h1>PianoSim Studio</h1>
+          <div class="header-titles">
+            <p class="eyebrow">Milestone 7 &middot; Pure-Rust Wasm SIMD128 Physical Engine</p>
+            <h1 class="studio-title">PianoSim Web Studio</h1>
           </div>
           <div class="header-actions">
             <button id="btn-unlock" data-testid="unlock-audio" type="button" class="btn btn-primary">
@@ -91,162 +124,190 @@ export class AppShell {
             <button id="btn-a4-trigger" data-testid="trigger-a4" type="button" class="btn btn-accent">
               A4 = 440 Hz
             </button>
+            <button id="btn-panic" data-testid="panic-btn" type="button" class="btn btn-ghost">
+              All Notes Off
+            </button>
           </div>
         </header>
 
         <p id="error-banner" data-testid="error-banner" class="error-banner" hidden></p>
 
-        <section class="hud-grid" data-testid="telemetry-hud" aria-label="Engine Telemetry">
-          <div class="hud-card">
-            <span class="hud-label">Engine</span>
-            <strong id="hud-status" data-testid="hud-status" class="hud-value">Locked</strong>
-          </div>
-          <div class="hud-card">
-            <span class="hud-label">Sample Rate</span>
-            <strong id="hud-sample-rate" data-testid="hud-sample-rate" class="hud-value">-- Hz</strong>
-          </div>
-          <div class="hud-card">
-            <span class="hud-label">Active Voices</span>
-            <strong id="hud-voices" data-testid="hud-voices" class="hud-value">0</strong>
-          </div>
-          <div class="hud-card">
-            <span class="hud-label">Peak Level</span>
-            <strong id="hud-peak-db" data-testid="hud-peak-db" class="hud-value">-inf dB</strong>
-          </div>
-          <div class="hud-card">
-            <span class="hud-label">Callback Time</span>
-            <strong id="hud-callback-us" data-testid="hud-callback-us" class="hud-value">0.0 us</strong>
+        <!-- Real-time Diagnostics HUD & Spectrum Canvas Slot -->
+        <section class="viz-section" aria-label="Audio Visualizer and Telemetry HUD">
+          <div id="hud-mount" class="hud-slot"></div>
+          <div class="canvas-card">
+            <canvas
+              id="spectrum-canvas"
+              data-testid="spectrum-canvas"
+              class="spectrum-canvas"
+              width="600"
+              height="120"
+            ></canvas>
           </div>
         </section>
 
-        <section class="control-strip" aria-label="Performance Controls">
-          <div class="control-group">
-            <button
-              id="btn-sustain"
-              data-testid="sustain-toggle"
-              type="button"
-              class="btn btn-toggle"
-              aria-pressed="false"
-            >
-              Sustain Pedal (Space): OFF
-            </button>
-            <button id="btn-panic" data-testid="panic-btn" type="button" class="btn btn-ghost">
-              All Notes Off
-            </button>
-          </div>
+        <!-- Velocity & Performance Control Bar -->
+        <section class="performance-controls" aria-label="Input Velocity and Pedals">
           <label class="velocity-control" for="velocity-slider">
-            <span>Velocity</span>
-            <input id="velocity-slider" data-testid="velocity-slider" type="range" min="1" max="127" value="100" />
-            <span id="velocity-value" class="mono">100</span>
+            <span class="control-label">Strike Velocity</span>
+            <input
+              id="velocity-slider"
+              data-testid="velocity-slider"
+              type="range"
+              min="1"
+              max="127"
+              value="100"
+              class="velocity-slider"
+            />
+            <span id="velocity-value" class="val-mono">100</span>
           </label>
+          <div id="pedal-mount" class="pedal-slot"></div>
         </section>
 
-        <section class="keyboard-stage" aria-label="Test Keyboard C4 to C5">
-          <div class="keyboard-meta">
-            <span>C4 - C5 Test Octave</span>
-            <span class="hint">Keys: A S D F G H J K (white) &middot; W E T Y U (black) &middot; Space (sustain)</span>
-          </div>
-          <div id="octave-keyboard" class="octave-keyboard" role="group" aria-label="Piano Keys C4 to C5"></div>
+        <!-- Responsive 88-Key Piano Keyboard -->
+        <section class="keyboard-stage" aria-label="88-Key Concert Grand Piano Keyboard">
+          <div id="keyboard-mount" class="keyboard-mount"></div>
         </section>
+
+        <!-- MIDI Transport & Scoring -->
+        <div id="transport-mount" class="transport-slot"></div>
+
+        <!-- Voicing & Space Panels -->
+        <div class="studio-panels-row">
+          <div id="voicing-mount" class="panel-slot"></div>
+          <div id="space-mount" class="panel-slot"></div>
+        </div>
       </main>
     `;
 
-    this.unlockBtn = this.requireEl('#btn-unlock');
-    this.a4Btn = this.requireEl('#btn-a4-trigger');
-    this.sustainBtn = this.requireEl('#btn-sustain');
-    this.panicBtn = this.requireEl('#btn-panic');
-    this.velocityInput = this.requireEl('#velocity-slider');
-    this.velocityValueEl = this.requireEl('#velocity-value');
-    this.statusEl = this.requireEl('#hud-status');
-    this.sampleRateEl = this.requireEl('#hud-sample-rate');
-    this.voicesEl = this.requireEl('#hud-voices');
-    this.peakDbEl = this.requireEl('#hud-peak-db');
-    this.callbackUsEl = this.requireEl('#hud-callback-us');
-    this.errorBannerEl = this.requireEl('#error-banner');
+    this.unlockBtn = this.root.querySelector('#btn-unlock')!;
+    this.a4Btn = this.root.querySelector('#btn-a4-trigger')!;
+    this.panicBtn = this.root.querySelector('#btn-panic')!;
+    this.velocitySlider = this.root.querySelector('#velocity-slider')!;
+    this.velocityValEl = this.root.querySelector('#velocity-value')!;
+    this.errorBannerEl = this.root.querySelector('#error-banner')!;
+  }
+
+  private bindComponents(): void {
+    // 88-Key Piano Keyboard
+    const keyboardContainer = this.root.querySelector<HTMLElement>('#keyboard-mount')!;
+    this.keyboardView = new KeyboardView(keyboardContainer, {
+      onPress: (midi) => this.acquireNote(midi),
+      onRelease: (midi) => this.releaseNote(midi),
+    });
+
+    // Three-pedal Bar
+    const pedalContainer = this.root.querySelector<HTMLElement>('#pedal-mount')!;
+    this.pedalBar = new PedalBar(pedalContainer, this.pedalController);
+
+    // Voicing Panel
+    const voicingContainer = this.root.querySelector<HTMLElement>('#voicing-mount')!;
+    this.voicingPanel = new VoicingPanel(voicingContainer, (st: VoicingState) => {
+      this.host.setVoicing(
+        st.hammerHardness,
+        st.unisonDetune,
+        st.stretchTuning,
+        st.stringLengthScale,
+      );
+    });
+
+    // Space Panel
+    const spaceContainer = this.root.querySelector<HTMLElement>('#space-mount')!;
+    this.spacePanel = new SpacePanel(spaceContainer, (persp: ListenerPerspective, lid: LidState) => {
+      this.host.setSpace(persp, lid);
+    });
+
+    // Transport Bar
+    const transportContainer = this.root.querySelector<HTMLElement>('#transport-mount')!;
+    this.transportBar = new TransportBar(
+      transportContainer,
+      this.midiPlayer,
+      this.midiManager,
+      {
+        onSelectDemo: (demoId) => {
+          this.clearError();
+          const score = getDemoScore(demoId);
+          this.midiPlayer.load(score);
+        },
+        onUploadMidi: (bytes) => {
+          this.clearError();
+          try {
+            const score = parseSmf(bytes);
+            this.midiPlayer.load(score);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.showError(msg);
+          }
+        },
+      },
+    );
+
+    // PC Keyboard
+    this.pcKeyboard = new PcKeyboard({
+      onPress: (midi) => this.acquireNote(midi),
+      onRelease: (midi) => this.releaseNote(midi),
+      onToggleSustain: () => this.pedalController.toggleSustain(),
+    });
   }
 
   private bindControls(): void {
-    const onUnlock = () => void this.host.unlock().catch(() => undefined);
-    const onTriggerA4 = () => void this.triggerA4Pulse();
-    const onSustainClick = () => void this.toggleSustain();
-    const onPanic = () => this.releaseAllInputs();
-    const onVelocity = () => {
-      const next = Number(this.velocityInput.value);
-      if (Number.isFinite(next)) {
-        this.velocity7 = Math.max(1, Math.min(127, Math.trunc(next)));
-        this.velocityValueEl.textContent = String(this.velocity7);
-      }
+    const onUnlockClick = async () => {
+      await this.host.unlock();
+      await this.midiManager.refresh();
+      this.unlockBtn.classList.add('is-ready');
     };
 
-    this.unlockBtn.addEventListener('click', onUnlock);
-    this.a4Btn.addEventListener('click', onTriggerA4);
-    this.sustainBtn.addEventListener('click', onSustainClick);
-    this.panicBtn.addEventListener('click', onPanic);
-    this.velocityInput.addEventListener('input', onVelocity);
+    const onA4Click = () => {
+      this.triggerA4Pulse();
+    };
 
-    this.cleanupHandlers.push(
-      () => this.unlockBtn.removeEventListener('click', onUnlock),
-      () => this.a4Btn.removeEventListener('click', onTriggerA4),
-      () => this.sustainBtn.removeEventListener('click', onSustainClick),
-      () => this.panicBtn.removeEventListener('click', onPanic),
-      () => this.velocityInput.removeEventListener('input', onVelocity),
-    );
+    const onPanicClick = () => {
+      this.panicAll();
+    };
+
+    const onVelocityInput = () => {
+      const v = parseInt(this.velocitySlider.value, 10);
+      this.velocity7 = Number.isFinite(v) ? Math.max(1, Math.min(127, v)) : 100;
+      this.velocityValEl.textContent = String(this.velocity7);
+    };
+
+    const onErrorClick = () => {
+      this.clearError();
+    };
+
+    this.unlockBtn.addEventListener('click', onUnlockClick);
+    this.a4Btn.addEventListener('click', onA4Click);
+    this.panicBtn.addEventListener('click', onPanicClick);
+    this.velocitySlider.addEventListener('input', onVelocityInput);
+    this.errorBannerEl.addEventListener('click', onErrorClick);
+
+    this.cleanupHandlers.push(() => {
+      this.unlockBtn.removeEventListener('click', onUnlockClick);
+      this.a4Btn.removeEventListener('click', onA4Click);
+      this.panicBtn.removeEventListener('click', onPanicClick);
+      this.velocitySlider.removeEventListener('input', onVelocityInput);
+      this.errorBannerEl.removeEventListener('click', onErrorClick);
+    });
   }
 
-  private async ensureUnlocked(): Promise<boolean> {
-    if (this.host.isReady()) {
-      return true;
-    }
-    try {
-      await this.host.unlock();
-      return this.host.isReady();
-    } catch {
-      return false;
-    }
+  private acquireNote(midiKey: number, velocity7?: number): void {
+    const vel = velocity7 ?? this.velocity7;
+    const u16 = u7ToU16(vel);
+    this.host.noteOn(midiKey, u16, 0);
+    this.keyboardView.setKeyActive(midiKey, true);
   }
 
-  private async acquireNote(midi: number): Promise<void> {
-    const prevCount = this.activeSources.get(midi) ?? 0;
-    this.activeSources.set(midi, prevCount + 1);
-    this.keyboard.setKeyActive(midi, true);
-    if (prevCount > 0) {
-      return;
-    }
-    const unlocked = await this.ensureUnlocked();
-    if (!unlocked) {
-      return;
-    }
-    if ((this.activeSources.get(midi) ?? 0) > 0) {
-      this.host.noteOn(midi, u7ToU16(this.velocity7), 0);
-    }
+  private releaseNote(midiKey: number): void {
+    this.host.noteOff(midiKey, 0, 0);
+    this.keyboardView.setKeyActive(midiKey, false);
   }
 
-  private releaseNote(midi: number): void {
-    const prevCount = this.activeSources.get(midi) ?? 0;
-    if (prevCount <= 0) {
-      return;
-    }
-    if (prevCount === 1) {
-      this.activeSources.delete(midi);
-      this.keyboard.setKeyActive(midi, false);
-      if (this.host.isReady()) {
-        this.host.noteOff(midi, 0, 0);
-      }
-    } else {
-      this.activeSources.set(midi, prevCount - 1);
-    }
-  }
-
-  private async triggerA4Pulse(): Promise<void> {
-    const unlocked = await this.ensureUnlocked();
-    if (!unlocked) {
-      return;
-    }
+  private triggerA4Pulse(): void {
     this.clearA4Pulse();
-    this.a4PulseActive = true;
-    await this.acquireNote(A4_MIDI);
+    this.acquireNote(A4_MIDI, 100);
     this.a4PulseTimer = window.setTimeout(() => {
-      this.clearA4Pulse();
+      this.releaseNote(A4_MIDI);
+      this.a4PulseTimer = null;
     }, A4_TEST_DURATION_MS);
   }
 
@@ -254,62 +315,35 @@ export class AppShell {
     if (this.a4PulseTimer !== null) {
       window.clearTimeout(this.a4PulseTimer);
       this.a4PulseTimer = null;
-    }
-    if (this.a4PulseActive) {
-      this.a4PulseActive = false;
       this.releaseNote(A4_MIDI);
     }
   }
 
-  private async toggleSustain(): Promise<void> {
-    this.sustainDown = !this.sustainDown;
-    this.sustainBtn.setAttribute('aria-pressed', String(this.sustainDown));
-    this.sustainBtn.classList.toggle('is-active', this.sustainDown);
-    this.sustainBtn.textContent = `Sustain Pedal (Space): ${this.sustainDown ? 'ON' : 'OFF'}`;
-    if (await this.ensureUnlocked()) {
-      this.host.pedal(PEDAL_SUSTAIN, this.sustainDown ? 65535 : 0, 0);
-    }
-  }
-
-  private releaseAllInputs(): void {
+  private panicAll(): void {
     this.clearA4Pulse();
-    this.keyboard.clearInputs();
-    this.activeSources.clear();
-    if (this.host.isReady()) {
-      this.host.allNotesOff();
-    }
+    this.midiPlayer.stop();
+    this.host.allNotesOff();
+    this.keyboardView.clearActiveKeys();
+    this.pedalController.reset();
   }
 
-  private updateHud(diag: PianoDiagnostics): void {
-    this.statusEl.textContent = formatEngineStatus(diag);
-    this.sampleRateEl.textContent = diag.sampleRate > 0 ? `${diag.sampleRate} Hz` : '-- Hz';
-    this.voicesEl.textContent = String(Math.round(diag.telemetry.activeVoices));
-    this.peakDbEl.textContent = formatPeakDb(diag.telemetry.peakL, diag.telemetry.peakR);
-    this.callbackUsEl.textContent = `${diag.telemetry.callbackUs.toFixed(1)} us`;
-
-    this.unlockBtn.disabled = diag.status === 'initializing';
-    this.unlockBtn.textContent =
-      diag.status === 'ready'
-        ? 'Audio Ready'
-        : diag.status === 'initializing'
-          ? 'Starting...'
-          : 'Unlock Audio';
-    this.unlockBtn.classList.toggle('is-ready', diag.status === 'ready');
-
-    if (diag.error) {
-      this.errorBannerEl.hidden = false;
-      this.errorBannerEl.textContent = diag.error;
-    } else {
-      this.errorBannerEl.hidden = true;
-      this.errorBannerEl.textContent = '';
-    }
+  getKeyboardView(): KeyboardView {
+    return this.keyboardView;
   }
 
-  private requireEl<T extends Element>(selector: string): T {
-    const el = this.root.querySelector<T>(selector);
-    if (!el) {
-      throw new Error(`Missing required UI element: ${selector}`);
-    }
-    return el;
+  getPedalBar(): PedalBar {
+    return this.pedalBar;
+  }
+
+  getTransportBar(): TransportBar {
+    return this.transportBar;
+  }
+
+  getHost(): WasmAudioHost {
+    return this.host;
+  }
+
+  getTelemetry(): TelemetryClient {
+    return this.telemetry;
   }
 }
