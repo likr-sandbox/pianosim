@@ -12,7 +12,7 @@ use crate::math::{
     sqrt_f64, tan_f64, PI,
 };
 use crate::nupols_tests::test_preset;
-use crate::RadiatorBank;
+use crate::{RadiatorBank, CONCERT_GRAND_PRESET_BYTES};
 
 fn fft_mag_sq(signal: &[f32], fft_len: usize) -> Vec<f64> {
     let mut padded = vec![0.0_f32; fft_len];
@@ -456,4 +456,30 @@ fn safety_limiter_clamps_and_sanitizes_non_finite() {
     assert_eq!(out_l[1], 0.0);
     assert_eq!(out_l[2], 0.0);
     assert!(out_l[5].abs() > 0.01);
+}
+
+#[test]
+fn player_perspective_bass_and_treble_stereo_separation() {
+    let preset = BodyPreset::decode(CONCERT_GRAND_PRESET_BYTES).expect("valid baked preset");
+    let irs = RadiatorBank::synthesize_ir_for_test(
+        &preset,
+        48_000.0,
+        ListenerPerspective::Player,
+        LidState::Open,
+    );
+    let rms = |xs: &[f32]| -> f64 {
+        let e: f64 = xs.iter().map(|&v| (v as f64) * (v as f64)).sum();
+        sqrt_f64(e / (xs.len().max(1) as f64))
+    };
+    let z0_ratio = rms(&irs[0][0]) / rms(&irs[0][1]).max(1e-20);
+    let z7_ratio = rms(&irs[7][1]) / rms(&irs[7][0]).max(1e-20);
+    eprintln!("Player stereo separation: Zone 0 L/R={z0_ratio:.3}, Zone 7 R/L={z7_ratio:.3}");
+    assert!(
+        z0_ratio >= 1.30,
+        "expected bass Zone 0 L/R >= 1.30, got {z0_ratio:.3}"
+    );
+    assert!(
+        z7_ratio >= 1.30,
+        "expected treble Zone 7 R/L >= 1.30, got {z7_ratio:.3}"
+    );
 }
