@@ -181,7 +181,7 @@ fn hertz_contact_potential_and_conservation() {
 
 #[test]
 fn lossless_energy_conservation_across_sample_rates() {
-    let freqs = [89.0_f64, 218.0_f64, 425.0_f64];
+    let freqs = [89.0_f64, 212.0_f64, 405.0_f64];
     let drive_keys = [18_usize, 32, 48];
     for sr in SAMPLE_RATES {
         let ts = 1.0 / f64::from(sr);
