@@ -364,6 +364,104 @@ pub(crate) fn step_string_subblock_3(
     }
 }
 
+/// Steps batched non-contiguous uncoupled tail vectors across `out_l`/`out_r` in L1-resident
+/// `CHUNK = 64` or `128` passes, rotating 3 vectors simultaneously per inner loop.
+#[inline(never)]
+pub(crate) fn step_tails_flat_3vec(
+    soa: &mut ModalSoa,
+    c_l: &[F32x4],
+    c_r: &[F32x4],
+    indices: &[u16],
+    out_l: &mut [f32],
+    out_r: &mut [f32],
+) {
+    let total = out_l.len().min(out_r.len());
+    if total == 0 || indices.is_empty() {
+        return;
+    }
+    let (u, v, d, s) = (
+        soa.u.as_f32x4_slice_mut(),
+        soa.v.as_f32x4_slice_mut(),
+        soa.d_coeff.as_f32x4_slice(),
+        soa.s_coeff.as_f32x4_slice(),
+    );
+    let min_len = u
+        .len()
+        .min(v.len())
+        .min(d.len())
+        .min(s.len())
+        .min(c_l.len())
+        .min(c_r.len());
+    if total <= 64 {
+        step_tails_flat_chunk::<64>(u, v, d, s, c_l, c_r, min_len, indices, out_l, out_r, total);
+    } else {
+        step_tails_flat_chunk::<128>(u, v, d, s, c_l, c_r, min_len, indices, out_l, out_r, total);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn step_tails_flat_chunk<const CHUNK: usize>(
+    u: &mut [F32x4],
+    v: &mut [F32x4],
+    d: &[F32x4],
+    s: &[F32x4],
+    c_l: &[F32x4],
+    c_r: &[F32x4],
+    min_len: usize,
+    indices: &[u16],
+    out_l: &mut [f32],
+    out_r: &mut [f32],
+    total: usize,
+) {
+    let mut base = 0usize;
+    while base < total {
+        let c_len = (total - base).min(CHUNK);
+        let mut acc_l = [F32x4::zero(); CHUNK];
+        let mut acc_r = [F32x4::zero(); CHUNK];
+        let mut chunks = indices.chunks_exact(3);
+        for tri in chunks.by_ref() {
+            let (i0, i1, i2) = (
+                usize::from(tri[0]),
+                usize::from(tri[1]),
+                usize::from(tri[2]),
+            );
+            assert!(i0 < min_len && i1 < min_len && i2 < min_len);
+            let (mut u0, mut v0, d0, s0, cl0, cr0) = (u[i0], v[i0], d[i0], s[i0], c_l[i0], c_r[i0]);
+            let (mut u1, mut v1, d1, s1, cl1, cr1) = (u[i1], v[i1], d[i1], s[i1], c_l[i1], c_r[i1]);
+            let (mut u2, mut v2, d2, s2, cl2, cr2) = (u[i2], v[i2], d[i2], s[i2], c_l[i2], c_r[i2]);
+            for (al, ar) in acc_l[..c_len].iter_mut().zip(&mut acc_r[..c_len]) {
+                (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+                (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+                (u2, v2) = zoh_rotate(u2, v2, d2, s2);
+                *al = v0.mul_add(cl0, v1.mul_add(cl1, v2.mul_add(cl2, *al)));
+                *ar = v0.mul_add(cr0, v1.mul_add(cr1, v2.mul_add(cr2, *ar)));
+            }
+            (u[i0], v[i0], u[i1], v[i1], u[i2], v[i2]) = (u0, v0, u1, v1, u2, v2);
+        }
+        for &raw in chunks.remainder() {
+            let i0 = usize::from(raw);
+            assert!(i0 < min_len);
+            let (mut u0, mut v0, d0, s0, cl0, cr0) = (u[i0], v[i0], d[i0], s[i0], c_l[i0], c_r[i0]);
+            for (al, ar) in acc_l[..c_len].iter_mut().zip(&mut acc_r[..c_len]) {
+                (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+                *al = v0.mul_add(cl0, *al);
+                *ar = v0.mul_add(cr0, *ar);
+            }
+            (u[i0], v[i0]) = (u0, v0);
+        }
+        for ((al, ar), (ol, or)) in acc_l[..c_len].iter().zip(&acc_r[..c_len]).zip(
+            out_l[base..base + c_len]
+                .iter_mut()
+                .zip(&mut out_r[base..base + c_len]),
+        ) {
+            *ol += al.reduce_sum();
+            *or += ar.reduce_sum();
+        }
+        base += c_len;
+    }
+}
+
 /// Steps all 230 strings across an uncoupled audio subblock in `TILE`-sample tiles.
 #[cfg(test)]
 pub(crate) fn step_all_tiles(

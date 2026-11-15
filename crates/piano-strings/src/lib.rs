@@ -177,6 +177,7 @@ impl StringBank {
     pub fn reset(&mut self) {
         self.soa.reset_resting();
         self.ports.reset_resting();
+        self.bridge_ports.reset_resting();
         self.sav.reset_all();
     }
 
@@ -419,7 +420,7 @@ impl StringBank {
         bridge_coupled::render_subblock_bridge_coupled_core(
             &mut self.soa,
             &mut self.ports,
-            &self.bridge_ports,
+            &mut self.bridge_ports,
             &self.long_bank,
             &mut self.sav,
             &self.choir_map,
