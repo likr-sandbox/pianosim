@@ -9,8 +9,10 @@
 extern crate alloc;
 
 pub mod bridge_coupled;
+mod bridge_diag;
 pub(crate) mod bridge_kernels;
 pub(crate) mod bridge_port;
+pub(crate) mod bridge_sav;
 pub(crate) mod bridge_tails;
 pub mod choir_map;
 pub mod contact;
@@ -54,6 +56,8 @@ pub struct StringBank {
     sav: SavBank,
     longitudinal_enabled: bool,
     sav_phantom_enabled: bool,
+    soa_dirty: bool,
+    bp_dirty: bool,
 }
 
 impl StringBank {
@@ -89,6 +93,8 @@ impl StringBank {
             sav,
             longitudinal_enabled: true,
             sav_phantom_enabled: true,
+            soa_dirty: false,
+            bp_dirty: false,
         }
     }
 
@@ -119,14 +125,11 @@ impl StringBank {
     /// `0.5 * beta_s * (sum(u^2 + v^2) + r_s^2 - C_0)`.
     #[must_use]
     pub fn string_sav_energy_joules(&self, s_idx: usize) -> f64 {
-        let Some(entry) = self.choir_map.strings().get(s_idx) else {
+        if s_idx >= TOTAL_STRINGS {
             return 0.0;
-        };
-        let h_lin = self
-            .ports
-            .linear_energy_joules(s_idx, &self.soa, entry.all_vecs());
+        }
         let r = self.sav.r_sav[s_idx];
-        h_lin + 0.5 * self.ports.beta_s[s_idx] * (r * r - C0_SAV)
+        self.string_linear_energy_joules(s_idx) + 0.5 * self.ports.beta_s[s_idx] * (r * r - C0_SAV)
     }
 
     /// Returns summed physical SAV Hamiltonian of all strings belonging to `key_idx` in Joules.
@@ -162,13 +165,22 @@ impl StringBank {
             .string_range
             .clone()
             .map(|s_idx| {
-                self.sav.string_nonlinear_energy_joules(
-                    s_idx,
-                    &strings[s_idx],
-                    &self.soa,
-                    self.ports.beta_s[s_idx],
-                    self.longitudinal_enabled,
-                )
+                if self.soa_dirty {
+                    self.sav.string_nonlinear_energy_joules_bp(
+                        s_idx,
+                        &self.bridge_ports,
+                        self.ports.beta_s[s_idx],
+                        self.longitudinal_enabled,
+                    )
+                } else {
+                    self.sav.string_nonlinear_energy_joules(
+                        s_idx,
+                        &strings[s_idx],
+                        &self.soa,
+                        self.ports.beta_s[s_idx],
+                        self.longitudinal_enabled,
+                    )
+                }
             })
             .sum()
     }
@@ -179,6 +191,8 @@ impl StringBank {
         self.ports.reset_resting();
         self.bridge_ports.reset_resting();
         self.sav.reset_all();
+        self.soa_dirty = false;
+        self.bp_dirty = false;
     }
 
     /// Returns the configured sample rate in Hz.
@@ -237,16 +251,18 @@ impl StringBank {
         string_weights: [f32; 3],
         force: f32,
     ) {
-        let Some(key_entry) = self.choir_map.key(key_idx) else {
+        let Some(string_range) = self.choir_map.key(key_idx).map(|k| k.string_range.clone()) else {
             return;
         };
         if !force.is_finite() || force == 0.0 {
             return;
         }
+        self.ensure_soa_mode();
+        self.bp_dirty = true;
         let total_vecs = self.choir_map.total_vecs();
         let u_vecs = &mut self.soa.u.as_f32x4_slice_mut()[..total_vecs];
         let b_vecs = &self.soa.b_exc.as_f32x4_slice()[..total_vecs];
-        for (str_in_choir, str_idx) in key_entry.string_range.clone().enumerate() {
+        for (str_in_choir, str_idx) in string_range.enumerate() {
             let w = string_weights[str_in_choir];
             if w.is_finite() && w != 0.0 {
                 let range = self.choir_map.strings()[str_idx].all_vecs();
@@ -264,6 +280,8 @@ impl StringBank {
     #[must_use]
     #[inline]
     pub fn render_frame(&mut self) -> (f32, f32) {
+        self.ensure_soa_mode();
+        self.bp_dirty = true;
         if !self.sav_phantom_enabled && self.longitudinal_enabled {
             let frame = step_all_strings(&mut self.soa, &self.choir_map);
             for (s_idx, flag) in self.ports.ports_synced.iter_mut().enumerate() {
@@ -301,6 +319,7 @@ impl StringBank {
     /// Flushes subnormals (`< 1e-20`) in `u` and `v` and clears dormant string flags.
     #[inline]
     pub fn flush_subnormals(&mut self) {
+        self.ensure_soa_mode();
         for (s_idx, entry) in self.choir_map.strings().iter().enumerate() {
             if !flush_subnormals_range(&mut self.soa, entry.all_vecs()) {
                 self.ports.clear_string_state(s_idx);
@@ -312,6 +331,8 @@ impl StringBank {
     /// Renders an uncoupled stereo subblock across all 230 strings in `SUB = 128` mode
     /// and flushes subnormals once at the end of the subblock.
     pub fn render_subblock(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
+        self.ensure_soa_mode();
+        self.bp_dirty = true;
         let frames = out_l.len().min(out_r.len());
         out_l.fill(0.0);
         out_r.fill(0.0);
@@ -358,6 +379,8 @@ impl StringBank {
         out_l: &mut [f32],
         out_r: &mut [f32],
     ) {
+        self.ensure_soa_mode();
+        self.bp_dirty = true;
         let frames = out_l.len().min(out_r.len());
         if out_l.len() > frames {
             out_l[frames..].fill(0.0);
@@ -379,28 +402,6 @@ impl StringBank {
         );
     }
 
-    /// Per-string WDF mechanical port resistances `R_0,s > 0` (`N*s/m`).
-    #[must_use]
-    pub fn bridge_port_resistances(&self) -> &[f32; TOTAL_STRINGS] {
-        &self.bridge_ports.r0
-    }
-
-    /// Wave-link stored energy (`0.0` for instantaneous memoryless WDF port scattering).
-    #[must_use]
-    pub fn bridge_link_energy_joules(&self, _r0: &[f32; TOTAL_STRINGS]) -> f64 {
-        0.0
-    }
-
-    /// Returns instantaneous linear modal energy `0.5 * beta_s * sum(u^2 + v^2)` for string `s_idx`.
-    #[must_use]
-    pub fn string_linear_energy_joules(&self, s_idx: usize) -> f64 {
-        let Some(entry) = self.choir_map.strings().get(s_idx) else {
-            return 0.0;
-        };
-        self.ports
-            .linear_energy_joules(s_idx, &self.soa, entry.all_vecs())
-    }
-
     /// Steps all 88 keys / 230 strings unconditionally across `out_l`/`out_r` with
     /// Stage 1 action coupling and Stage 3 per-sample WDF bridge scattering.
     pub fn render_subblock_bridge_coupled(
@@ -417,8 +418,13 @@ impl StringBank {
         if out_r.len() > frames {
             out_r[frames..].fill(0.0);
         }
+        if self.bp_dirty {
+            self.bridge_ports
+                .pack_all_from_soa(&self.soa, self.choir_map.strings());
+            self.bp_dirty = false;
+        }
+        self.soa_dirty = true;
         bridge_coupled::render_subblock_bridge_coupled_core(
-            &mut self.soa,
             &mut self.ports,
             &mut self.bridge_ports,
             &self.long_bank,
@@ -428,41 +434,10 @@ impl StringBank {
             bridge,
             self.longitudinal_enabled,
             self.sav_phantom_enabled,
+            true,
             &mut out_l[..frames],
             &mut out_r[..frames],
         );
-    }
-
-    /// Diagnostic helper returning `(vert_rms, horiz_rms)` of modal bridge velocity
-    /// `v * c_bridge` across `key_idx`'s strings at the current instant.
-    #[must_use]
-    pub fn measure_key_polarization_rms(&self, key_idx: usize) -> (f32, f32) {
-        let Some(key_entry) = self.choir_map.key(key_idx) else {
-            return (0.0, 0.0);
-        };
-        let v = self.soa.v.as_f32x4_slice();
-        let c = self.soa.c_bridge.as_f32x4_slice();
-        let strings = &self.choir_map.strings()[key_entry.string_range.clone()];
-        let calc = |sel: fn(&choir_map::StringMapEntry) -> core::ops::Range<usize>| {
-            let (mut sum, mut cnt) = (0.0_f64, 0usize);
-            for entry in strings {
-                for idx in sel(entry) {
-                    for val in (v[idx] * c[idx]).to_array() {
-                        sum += f64::from(val) * f64::from(val);
-                    }
-                    cnt += 4;
-                }
-            }
-            if cnt > 0 {
-                crate::modal_soa::sqrt_f64(sum / cnt as f64) as f32
-            } else {
-                0.0
-            }
-        };
-        (
-            calc(|e| e.vert_vecs.clone()),
-            calc(|e| e.horiz_vecs.clone()),
-        )
     }
 }
 

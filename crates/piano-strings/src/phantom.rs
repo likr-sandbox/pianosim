@@ -129,77 +129,49 @@ pub(crate) fn accum_phantom_grad_d<const N: usize, const ARR: usize>(
 }
 
 #[inline(always)]
-fn v_rev(x: piano_simd::F32x4) -> piano_simd::F32x4 {
-    let [a, b, c, d] = x.to_array();
-    piano_simd::F32x4::from_array([d, c, b, a])
-}
-
-#[inline(always)]
-fn slide1(x: piano_simd::F32x4, y: piano_simd::F32x4) -> piano_simd::F32x4 {
-    let [_, x1, x2, x3] = x.to_array();
-    let [y0, _, _, _] = y.to_array();
-    piano_simd::F32x4::from_array([x1, x2, x3, y0])
-}
-
-#[inline(always)]
-fn slide2(x: piano_simd::F32x4, y: piano_simd::F32x4) -> piano_simd::F32x4 {
-    let [_, _, x2, x3] = x.to_array();
-    let [y0, y1, _, _] = y.to_array();
-    piano_simd::F32x4::from_array([x2, x3, y0, y1])
-}
-
-#[inline(always)]
-fn slide3(x: piano_simd::F32x4, y: piano_simd::F32x4) -> piano_simd::F32x4 {
-    let [_, _, _, x3] = x.to_array();
-    let [y0, y1, y2, _] = y.to_array();
-    piano_simd::F32x4::from_array([x3, y0, y1, y2])
-}
-
-#[inline(always)]
 fn convolve_pol_n<const NL: usize>(
     p0: piano_simd::F32x4,
     p1: piano_simd::F32x4,
 ) -> [piano_simd::F32x4; NL] {
     use piano_simd::F32x4;
-    let [x0, x1, x2, x3] = p0.to_array();
-    let [x4, x5, x6, x7] = p1.to_array();
     let z = F32x4::zero();
-    let (s1_01, s2_01, s3_01) = (slide1(p0, p1), slide2(p0, p1), slide3(p0, p1));
-    let (s1_1z, s2_1z, s3_1z) = (slide1(p1, z), slide2(p1, z), slide3(p1, z));
+    let (s1_01, s2_01, s3_01) = (p0.slide1(p1), p0.slide2(p1), p0.slide3(p1));
+    let (s1_1z, s2_1z, s3_1z) = (p1.slide1(z), p1.slide2(z), p1.slide3(z));
     let (vx0, vx1, vx2, vx3) = (
-        F32x4::splat(x0),
-        F32x4::splat(x1),
-        F32x4::splat(x2),
-        F32x4::splat(x3),
+        p0.splat_lane::<0>(),
+        p0.splat_lane::<1>(),
+        p0.splat_lane::<2>(),
+        p0.splat_lane::<3>(),
     );
-    let (vx4, vx5, vx6) = (F32x4::splat(x4), F32x4::splat(x5), F32x4::splat(x6));
+    let (vx4, vx5, vx6) = (
+        p1.splat_lane::<0>(),
+        p1.splat_lane::<1>(),
+        p1.splat_lane::<2>(),
+    );
+    let p0_sq = p0 * p0;
 
-    let d0 = vx0 * s1_01
+    let d0 = vx0 * (s1_01 + z.slide2(s1_01))
         + vx1 * s2_01
         + vx2 * s3_01
         + vx3 * p1
         + vx4 * s1_1z
         + vx5 * s2_1z
         + vx6 * s3_1z;
-    let v0 = (d0 + d0) + F32x4::from_array([0.0, x0 * x0, 2.0 * x0 * x1, x1 * x1 + 2.0 * x0 * x2]);
+    let v0 = (d0 + d0) + z.unpack_lo(p0_sq);
     let mut out = [v0; NL];
     if NL >= 2 {
-        let d1 = vx0 * s1_1z + vx1 * s2_1z + vx2 * s3_1z;
-        let two_sum1 = vx0 * s3_01 + vx1 * s2_01 + vx2 * slide2(z, s3_01);
-        let t = d1 + two_sum1;
-        out[1] = (t + t) + F32x4::from_array([0.0, x2 * x2, 0.0, x3 * x3]);
+        let t = vx0 * (s1_1z + s3_01) + vx1 * (s2_1z + s2_01) + vx2 * (s3_1z + z.slide2(s3_01));
+        out[1] = (t + t) + z.unpack_hi(p0_sq);
     }
     if NL >= 3 {
-        let two_sum2 = vx0 * s3_1z + vx1 * s2_1z + vx2 * s1_1z + vx3 * p1 + vx4 * slide2(z, s1_1z);
-        out[2] = (two_sum2 + two_sum2) + F32x4::from_array([0.0, x4 * x4, 0.0, x5 * x5]);
-    }
-    if NL >= 4 {
-        out[3] = F32x4::from_array([
-            2.0 * (x4 * x7 + x5 * x6),
-            2.0 * x5 * x7 + x6 * x6,
-            2.0 * x6 * x7,
-            x7 * x7,
-        ]);
+        let p1_sq = p1 * p1;
+        let two_sum2 = vx0 * s3_1z + vx1 * s2_1z + vx2 * s1_1z + vx3 * p1 + vx4 * z.slide2(s1_1z);
+        out[2] = (two_sum2 + two_sum2) + z.unpack_lo(p1_sq);
+        if NL >= 4 {
+            let vx7 = p1.splat_lane::<3>();
+            let t3 = vx7 * z.slide3(p1).slide1(z) + vx5 * s2_1z.reverse().slide3(z);
+            out[3] = (t3 + t3) + z.unpack_hi(p1_sq);
+        }
     }
     out
 }
@@ -243,25 +215,17 @@ pub(crate) fn accum_phantom_grad_vh_simd_n<const NL: usize>(
     let q1 = if NL >= 2 { c_phi4[1] } else { z };
     let q2 = if NL >= 3 { c_phi4[2] } else { z };
     let q3 = if NL >= 4 { c_phi4[3] } else { z };
-    let [p1, p2, _, _] = q0.to_array();
-    let r0 = v_rev(q0);
-    let r1 = v_rev(q1);
-
-    let [v0, v1, v2, v3] = dv4[0].to_array();
-    let [v4, v5, v6, v7] = dv4[1].to_array();
-    let dv = [v0, v1, v2, v3, v4, v5, v6, v7];
-    let [h0, h1, h2, h3] = dh4[0].to_array();
-    let [h4, h5, h6, h7] = dh4[1].to_array();
-    let dh = [h0, h1, h2, h3, h4, h5, h6, h7];
+    let r0 = q0.reverse();
+    let r1 = q1.reverse();
 
     let c_sum4 = F32x4::splat(c_sum);
     let (mut gv0, mut gv1) = (c_sum4 * dv4[0], c_sum4 * dv4[1]);
     let (mut gh0, mut gh1) = (c_sum4 * dh4[0], c_sum4 * dh4[1]);
 
     macro_rules! step_col {
-        ($b:expr, $k0:expr, $k1:expr) => {{
-            let dvb = F32x4::splat(dv[$b]);
-            let dhb = F32x4::splat(dh[$b]);
+        ($vec_idx:expr, $lane:tt, $k0:expr, $k1:expr) => {{
+            let dvb = dv4[$vec_idx].splat_lane::<$lane>();
+            let dhb = dh4[$vec_idx].splat_lane::<$lane>();
             let k0b = $k0;
             let k1b = $k1;
             gv0 = k0b.mul_add(dvb, gv0);
@@ -270,25 +234,26 @@ pub(crate) fn accum_phantom_grad_vh_simd_n<const NL: usize>(
             gh1 = k1b.mul_add(dhb, gh1);
         }};
     }
-    let q0_s1 = slide1(q0, q1);
-    let q0_s2 = slide2(q0, q1);
-    let q0_s3 = slide3(q0, q1);
-    let q12_s1 = slide1(q1, q2);
-    let q12_s2 = slide2(q1, q2);
-    let q12_s3 = slide3(q1, q2);
-    let t0 = slide3(z, q0);
-    let t1 = F32x4::from_array([p1, 0.0, p1, p2]);
-    let t2 = F32x4::from_array([p2, p1, 0.0, p1]);
-    let t3 = slide1(r0, z);
+    let q0_s1 = q0.slide1(q1);
+    let q0_s2 = q0.slide2(q1);
+    let q0_s3 = q0.slide3(q1);
+    let q12_s1 = q1.slide1(q2);
+    let q12_s2 = q1.slide2(q2);
+    let q12_s3 = q1.slide3(q2);
+    let p1_0 = r0.slide3(z);
+    let t0 = z.slide3(q0);
+    let t1 = p1_0 + z.slide2(q0);
+    let t2 = r0.slide2(z) + p1_0.reverse();
+    let t3 = r0.slide1(z);
 
-    step_col!(0, t0 + q0_s1, q0_s3 + q12_s1);
-    step_col!(1, t1 + q0_s2, q0_s2 + q12_s2);
-    step_col!(2, t2 + q0_s3, q0_s1 + q12_s3);
-    step_col!(3, t3 + q1, q0 + q2);
-    step_col!(4, r0 + q12_s1, t0 + slide1(q2, q3));
-    step_col!(5, slide3(r1, r0) + q12_s2, t1 + slide2(q2, q3));
-    step_col!(6, slide2(r1, r0) + q12_s3, t2 + slide3(q2, q3));
-    step_col!(7, slide1(r1, r0) + q2, t3 + q3);
+    step_col!(0, 0, t0 + q0_s1, q0_s3 + q12_s1);
+    step_col!(0, 1, t1 + q0_s2, q0_s2 + q12_s2);
+    step_col!(0, 2, t2 + q0_s3, q0_s1 + q12_s3);
+    step_col!(0, 3, t3 + q1, q0 + q2);
+    step_col!(1, 0, r0 + q12_s1, t0 + q2.slide1(q3));
+    step_col!(1, 1, r1.slide3(r0) + q12_s2, t1 + q2.slide2(q3));
+    step_col!(1, 2, r1.slide2(r0) + q12_s3, t2 + q2.slide3(q3));
+    step_col!(1, 3, r1.slide1(r0) + q2, t3 + q3);
 
     ([gv0, gv1], [gh0, gh1])
 }

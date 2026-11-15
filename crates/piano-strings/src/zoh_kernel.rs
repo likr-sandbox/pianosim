@@ -364,101 +364,84 @@ pub(crate) fn step_string_subblock_3(
     }
 }
 
-/// Steps batched non-contiguous uncoupled tail vectors across `out_l`/`out_r` in L1-resident
-/// `CHUNK = 64` or `128` passes, rotating 3 vectors simultaneously per inner loop.
-#[inline(never)]
-pub(crate) fn step_tails_flat_3vec(
-    soa: &mut ModalSoa,
-    c_l: &[F32x4],
-    c_r: &[F32x4],
-    indices: &[u16],
-    out_l: &mut [f32],
-    out_r: &mut [f32],
-) {
-    let total = out_l.len().min(out_r.len());
-    if total == 0 || indices.is_empty() {
-        return;
+/// Branchlessly flushes `< 1e-20` and non-finite entries across raw `(u, v)` slices.
+#[inline]
+pub(crate) fn flush_subnormals_slices(u: &mut [f32], v: &mut [f32]) -> bool {
+    const RANGE: u32 = FINITE_EXP_BITS - SUBNORMAL_FLUSH_BITS;
+    #[inline(always)]
+    fn flush_f32(x: &mut f32, nz: &mut u32) {
+        let bits = x.to_bits();
+        let abs_bits = bits & 0x7fff_ffff;
+        let keep = abs_bits.wrapping_sub(SUBNORMAL_FLUSH_BITS) < RANGE;
+        let kept = bits & 0_u32.wrapping_sub(u32::from(keep));
+        *x = f32::from_bits(kept);
+        *nz |= kept;
     }
-    let (u, v, d, s) = (
-        soa.u.as_f32x4_slice_mut(),
-        soa.v.as_f32x4_slice_mut(),
-        soa.d_coeff.as_f32x4_slice(),
-        soa.s_coeff.as_f32x4_slice(),
-    );
-    let min_len = u
-        .len()
-        .min(v.len())
-        .min(d.len())
-        .min(s.len())
-        .min(c_l.len())
-        .min(c_r.len());
-    if total <= 64 {
-        step_tails_flat_chunk::<64>(u, v, d, s, c_l, c_r, min_len, indices, out_l, out_r, total);
-    } else {
-        step_tails_flat_chunk::<128>(u, v, d, s, c_l, c_r, min_len, indices, out_l, out_r, total);
+    #[inline(always)]
+    fn flush_4x(slice: &mut [f32]) -> u32 {
+        let (mut nz0, mut nz1, mut nz2, mut nz3) = (0_u32, 0_u32, 0_u32, 0_u32);
+        let mut chunks = slice.chunks_exact_mut(4);
+        for c in chunks.by_ref() {
+            flush_f32(&mut c[0], &mut nz0);
+            flush_f32(&mut c[1], &mut nz1);
+            flush_f32(&mut c[2], &mut nz2);
+            flush_f32(&mut c[3], &mut nz3);
+        }
+        for x in chunks.into_remainder() {
+            flush_f32(x, &mut nz0);
+        }
+        nz0 | nz1 | nz2 | nz3
     }
+    ((flush_4x(u) | flush_4x(v)) & 0x7fff_ffff) != 0
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Accumulates ZOH-stepped `v_next * c` of `vr` into caller-provided `acc[..c_len]` (`<= 128`).
 #[inline(always)]
-fn step_tails_flat_chunk<const CHUNK: usize>(
-    u: &mut [F32x4],
-    v: &mut [F32x4],
-    d: &[F32x4],
-    s: &[F32x4],
-    c_l: &[F32x4],
-    c_r: &[F32x4],
-    min_len: usize,
-    indices: &[u16],
-    out_l: &mut [f32],
-    out_r: &mut [f32],
-    total: usize,
-) {
-    let mut base = 0usize;
-    while base < total {
-        let c_len = (total - base).min(CHUNK);
-        let mut acc_l = [F32x4::zero(); CHUNK];
-        let mut acc_r = [F32x4::zero(); CHUNK];
-        let mut chunks = indices.chunks_exact(3);
-        for tri in chunks.by_ref() {
-            let (i0, i1, i2) = (
-                usize::from(tri[0]),
-                usize::from(tri[1]),
-                usize::from(tri[2]),
-            );
-            assert!(i0 < min_len && i1 < min_len && i2 < min_len);
-            let (mut u0, mut v0, d0, s0, cl0, cr0) = (u[i0], v[i0], d[i0], s[i0], c_l[i0], c_r[i0]);
-            let (mut u1, mut v1, d1, s1, cl1, cr1) = (u[i1], v[i1], d[i1], s[i1], c_l[i1], c_r[i1]);
-            let (mut u2, mut v2, d2, s2, cl2, cr2) = (u[i2], v[i2], d[i2], s[i2], c_l[i2], c_r[i2]);
-            for (al, ar) in acc_l[..c_len].iter_mut().zip(&mut acc_r[..c_len]) {
-                (u0, v0) = zoh_rotate(u0, v0, d0, s0);
-                (u1, v1) = zoh_rotate(u1, v1, d1, s1);
-                (u2, v2) = zoh_rotate(u2, v2, d2, s2);
-                *al = v0.mul_add(cl0, v1.mul_add(cl1, v2.mul_add(cl2, *al)));
-                *ar = v0.mul_add(cr0, v1.mul_add(cr1, v2.mul_add(cr2, *ar)));
-            }
-            (u[i0], v[i0], u[i1], v[i1], u[i2], v[i2]) = (u0, v0, u1, v1, u2, v2);
+pub(crate) fn accum_soa_range_in(soa: &mut ModalSoa, vr: Range<usize>, acc: &mut [F32x4]) {
+    let c_len = acc.len();
+    if c_len == 0 || vr.is_empty() {
+        return;
+    }
+    let (u, v, d, s, c) = (
+        &mut soa.u.as_f32x4_slice_mut()[vr.clone()],
+        &mut soa.v.as_f32x4_slice_mut()[vr.clone()],
+        &soa.d_coeff.as_f32x4_slice()[vr.clone()],
+        &soa.s_coeff.as_f32x4_slice()[vr.clone()],
+        &soa.c_bridge.as_f32x4_slice()[vr],
+    );
+    let n = u.len();
+    assert!(v.len() == n && d.len() == n && s.len() == n && c.len() == n);
+    let mut idx = 0usize;
+    while idx + 2 < n {
+        let (mut u0, mut v0, d0, s0, c0) = (u[idx], v[idx], d[idx], s[idx], c[idx]);
+        let (mut u1, mut v1, d1, s1, c1) =
+            (u[idx + 1], v[idx + 1], d[idx + 1], s[idx + 1], c[idx + 1]);
+        let (mut u2, mut v2, d2, s2, c2) =
+            (u[idx + 2], v[idx + 2], d[idx + 2], s[idx + 2], c[idx + 2]);
+        for slot in &mut acc[..c_len] {
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            (u1, v1) = zoh_rotate(u1, v1, d1, s1);
+            (u2, v2) = zoh_rotate(u2, v2, d2, s2);
+            *slot = v0.mul_add(c0, v1.mul_add(c1, v2.mul_add(c2, *slot)));
         }
-        for &raw in chunks.remainder() {
-            let i0 = usize::from(raw);
-            assert!(i0 < min_len);
-            let (mut u0, mut v0, d0, s0, cl0, cr0) = (u[i0], v[i0], d[i0], s[i0], c_l[i0], c_r[i0]);
-            for (al, ar) in acc_l[..c_len].iter_mut().zip(&mut acc_r[..c_len]) {
-                (u0, v0) = zoh_rotate(u0, v0, d0, s0);
-                *al = v0.mul_add(cl0, *al);
-                *ar = v0.mul_add(cr0, *ar);
-            }
-            (u[i0], v[i0]) = (u0, v0);
+        (
+            u[idx],
+            v[idx],
+            u[idx + 1],
+            v[idx + 1],
+            u[idx + 2],
+            v[idx + 2],
+        ) = (u0, v0, u1, v1, u2, v2);
+        idx += 3;
+    }
+    while idx < n {
+        let (mut u0, mut v0, d0, s0, c0) = (u[idx], v[idx], d[idx], s[idx], c[idx]);
+        for slot in &mut acc[..c_len] {
+            (u0, v0) = zoh_rotate(u0, v0, d0, s0);
+            *slot = v0.mul_add(c0, *slot);
         }
-        for ((al, ar), (ol, or)) in acc_l[..c_len].iter().zip(&acc_r[..c_len]).zip(
-            out_l[base..base + c_len]
-                .iter_mut()
-                .zip(&mut out_r[base..base + c_len]),
-        ) {
-            *ol += al.reduce_sum();
-            *or += ar.reduce_sum();
-        }
-        base += c_len;
+        (u[idx], v[idx]) = (u0, v0);
+        idx += 1;
     }
 }
 
