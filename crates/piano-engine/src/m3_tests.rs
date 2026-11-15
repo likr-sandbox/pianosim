@@ -42,7 +42,7 @@ pub(crate) fn slice_rms(samples: &[f32]) -> f64 {
     (sum_sq / (samples.len().max(1) as f64)).sqrt()
 }
 
-fn hann_windowed_spectrum(samples: &[f32]) -> Vec<Complex> {
+pub(crate) fn hann_windowed_spectrum(samples: &[f32]) -> Vec<Complex> {
     let n = samples.len();
     assert!(n.is_power_of_two());
     let mut windowed = vec![0.0_f32; n];
@@ -57,7 +57,7 @@ fn hann_windowed_spectrum(samples: &[f32]) -> Vec<Complex> {
     spec
 }
 
-fn spectral_centroid_hz(samples: &[f32], sr: f64) -> f64 {
+pub(crate) fn spectral_centroid_hz(samples: &[f32], sr: f64) -> f64 {
     let spec = hann_windowed_spectrum(samples);
     let bin_hz = sr / (samples.len() as f64);
     let mut num = 0.0_f64;
@@ -74,7 +74,7 @@ fn spectral_centroid_hz(samples: &[f32], sr: f64) -> f64 {
     }
 }
 
-fn band_power(spec: &[Complex], n_fft: usize, sr: f64, lo_hz: f64, hi_hz: f64) -> f64 {
+pub(crate) fn band_power(spec: &[Complex], n_fft: usize, sr: f64, lo_hz: f64, hi_hz: f64) -> f64 {
     let bin_hz = sr / (n_fft as f64);
     let lo_bin = ((lo_hz / bin_hz).floor() as usize).max(1);
     let hi_bin = ((hi_hz / bin_hz).ceil() as usize).min(spec.len() - 1);

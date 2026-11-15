@@ -16,6 +16,9 @@ mod m3_tests;
 mod m4_tests;
 
 #[cfg(test)]
+mod m5_tests;
+
+#[cfg(test)]
 mod tests {
     use core::f64::consts::TAU;
 

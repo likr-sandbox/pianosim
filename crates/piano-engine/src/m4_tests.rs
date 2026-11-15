@@ -15,7 +15,7 @@ use crate::PianoEngine;
 const SR: f32 = 48_000.0;
 const SR64: f64 = 48_000.0;
 
-fn note_on(midi_key: u8, velocity_u16: u16, sample_offset: u32) -> SampleEvent {
+pub(crate) fn note_on(midi_key: u8, velocity_u16: u16, sample_offset: u32) -> SampleEvent {
     SampleEvent {
         sample_offset,
         kind: EventKind::NoteOn {
@@ -25,7 +25,7 @@ fn note_on(midi_key: u8, velocity_u16: u16, sample_offset: u32) -> SampleEvent {
     }
 }
 
-fn note_off(midi_key: u8, release_vel_u16: u16, sample_offset: u32) -> SampleEvent {
+pub(crate) fn note_off(midi_key: u8, release_vel_u16: u16, sample_offset: u32) -> SampleEvent {
     SampleEvent {
         sample_offset,
         kind: EventKind::NoteOff {
