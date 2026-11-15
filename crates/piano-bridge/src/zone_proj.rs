@@ -119,7 +119,7 @@ pub fn zone_stereo_pan(zone_idx: usize) -> (f32, f32) {
     (cos_a as f32, sin_a as f32)
 }
 
-const MAX_ZONE_RUNS: usize = 16;
+pub(crate) const MAX_ZONE_RUNS: usize = 16;
 const _: () = assert!(TOTAL_STRINGS <= u8::MAX as usize);
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]

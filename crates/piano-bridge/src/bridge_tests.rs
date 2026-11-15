@@ -4,6 +4,7 @@ use piano_spec::{CHOIR_LAYOUTS, NUM_KEYS, TOTAL_STRINGS};
 
 use crate::duplex::NUM_DUPLEX_MODES;
 use crate::hertz_contact::{hertz_potential_f32, DEFAULT_HERTZ_K3, DEFAULT_HERTZ_K4};
+use crate::zone_proj::zone_stereo_pan;
 use crate::{
     BridgeBank, DuplexBank, HertzBridgeContact, KEYBED_ZONE_IDX, NUM_BRIDGE_ZONES,
     NUM_RADIATOR_ZONES, NUM_REDUCED_MODES, TREBLE_DUPLEX_ZONE_START,
@@ -414,4 +415,70 @@ fn non_finite_inputs_are_sanitized_without_panic() {
     assert!(bridge.total_energy_joules().is_finite());
     assert!(b.iter().all(|v| v.is_finite()));
     assert!(z.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn duplex_zones_match_stereo_pan_and_overwrite_input() {
+    const FREQS: [f64; 8] = [
+        120.0, 210.0, 1_800.0, 2_400.0, 3_500.0, 5_200.0, 6_800.0, 8_900.0,
+    ];
+    let (mut dup_a, mut dup_b) = (DuplexBank::new(48_000.0), DuplexBank::new(48_000.0));
+    let mut dup_zones = [999.0_f32; NUM_BRIDGE_ZONES];
+    let mut max_treble = 0.0_f32;
+
+    for n in 0..256 {
+        let t = (n as f64) / 48_000.0;
+        let mut v = [0.0_f32; NUM_BRIDGE_ZONES];
+        for (dst, &f) in v.iter_mut().zip(&FREQS) {
+            *dst = 0.04 * (TAU * f * t).sin() as f32;
+        }
+        let (la, ra) = dup_a.step_with_zone_velocities(&v);
+        let (lb, rb) = dup_b.step_with_zone_velocities_and_zones(&v, &mut dup_zones);
+        assert_eq!((la, ra), (lb, rb));
+        assert_eq!(&dup_zones[..TREBLE_DUPLEX_ZONE_START], &[0.0, 0.0]);
+        let (mut sum_l, mut sum_r) = (0.0_f32, 0.0_f32);
+        for (z, &val) in dup_zones.iter().enumerate().skip(TREBLE_DUPLEX_ZONE_START) {
+            let (pl, pr) = zone_stereo_pan(z);
+            sum_l += val * pl;
+            sum_r += val * pr;
+            max_treble = max_treble.max(val.abs());
+        }
+        assert!((sum_l - lb).abs() <= 1.0e-7 && (sum_r - rb).abs() <= 1.0e-7);
+    }
+    assert!(max_treble > 1.0e-6);
+
+    let mut bad_v = [0.0_f32; NUM_BRIDGE_ZONES];
+    (bad_v[0], bad_v[1], bad_v[2]) = (f32::NAN, f32::INFINITY, f32::NEG_INFINITY);
+    let (l, r) = dup_b.step_with_zone_velocities_and_zones(&bad_v, &mut dup_zones);
+    assert!(l.is_finite() && r.is_finite() && dup_zones.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn bridge_step_with_duplex_zones_and_per_run_sanitization() {
+    let (mut b1, mut b2) = (BridgeBank::new(48_000.0), BridgeBank::new(48_000.0));
+    let mut a = [0.0_f32; TOTAL_STRINGS];
+    (a[120], a[180]) = (0.35, -0.25);
+    let audio = [0.1, -0.2, 0.05, 0.12, -0.08, 0.03, 0.01, -0.02];
+
+    let (mut bw1, mut bw2) = ([0.0_f32; TOTAL_STRINGS], [0.0_f32; TOTAL_STRINGS]);
+    let (mut z1, mut z2) = ([0.0_f32; NUM_BRIDGE_ZONES], [0.0_f32; NUM_BRIDGE_ZONES]);
+    let mut dz2 = [77.0_f32; NUM_BRIDGE_ZONES];
+    for _ in 0..8 {
+        assert_eq!(
+            b1.step_bridge_sample(&a, &audio, &mut bw1, &mut z1),
+            b2.step_bridge_sample_with_duplex_zones(&a, &audio, &mut bw2, &mut z2, &mut dz2)
+        );
+        assert!(bw1 == bw2 && z1 == z2);
+    }
+    assert_eq!(&dz2[..TREBLE_DUPLEX_ZONE_START], &[0.0, 0.0]);
+    assert!(dz2[TREBLE_DUPLEX_ZONE_START..].iter().any(|&v| v != 0.0));
+
+    let mut bad_r0 = *b2.port_resistances();
+    bad_r0[0] = 0.0;
+    b2.set_port_resistances(&bad_r0);
+    (a[0], a[5], a[150], a[TOTAL_STRINGS - 1]) =
+        (f32::INFINITY, f32::NEG_INFINITY, f32::NAN, f32::INFINITY);
+    let (l, r) = b2.step_bridge_sample_with_duplex_zones(&a, &audio, &mut bw2, &mut z2, &mut dz2);
+    assert!(l.is_finite() && r.is_finite() && bw2.iter().all(|v| v.is_finite()));
+    assert!(z2.iter().all(|v| v.is_finite()) && dz2.iter().all(|v| v.is_finite()));
 }

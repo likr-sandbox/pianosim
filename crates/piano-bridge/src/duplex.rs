@@ -180,10 +180,15 @@ impl DuplexBank {
         f_free
     }
 
-    /// Steps all 64 SIMD duplex modes coupled to solved bridge zone velocities `v_zone[2..8]`
-    /// and returns the new `(left, right)` stereo output.
+    /// Steps all 64 SIMD duplex modes coupled to solved bridge zone velocities `v_zone[2..8]`,
+    /// writes finite per-zone duplex contributions into `dup_zone_out` (with bass Zones `0..2`
+    /// strictly `0.0`), and returns the new `(left, right)` stereo output.
     #[inline]
-    pub fn step_with_zone_velocities(&mut self, v_zone: &[f32; NUM_BRIDGE_ZONES]) -> (f32, f32) {
+    pub fn step_with_zone_velocities_and_zones(
+        &mut self,
+        v_zone: &[f32; NUM_BRIDGE_ZONES],
+        dup_zone_out: &mut [f32; NUM_BRIDGE_ZONES],
+    ) -> (f32, f32) {
         let mut zone_acc = [0.0_f32; NUM_BRIDGE_ZONES];
         for (vec_idx, &z) in DUPLEX_VEC_ZONES.iter().enumerate() {
             let vz = v_zone[z];
@@ -203,14 +208,30 @@ impl DuplexBank {
             zone_acc[z] += (vn * self.c_audio[vec_idx]).reduce_sum();
         }
 
+        dup_zone_out[..TREBLE_DUPLEX_ZONE_START].fill(0.0);
         let (mut out_l, mut out_r) = (0.0_f32, 0.0_f32);
-        for (z, &acc) in zone_acc.iter().enumerate().skip(TREBLE_DUPLEX_ZONE_START) {
+        for (z, (&acc, dst)) in zone_acc
+            .iter()
+            .zip(dup_zone_out.iter_mut())
+            .enumerate()
+            .skip(TREBLE_DUPLEX_ZONE_START)
+        {
+            let safe_acc = if acc.is_finite() { acc } else { 0.0 };
+            *dst = safe_acc;
             let (pan_l, pan_r) = zone_stereo_pan(z);
-            out_l += acc * pan_l;
-            out_r += acc * pan_r;
+            out_l += safe_acc * pan_l;
+            out_r += safe_acc * pan_r;
         }
         self.last_stereo = (out_l, out_r);
         (out_l, out_r)
+    }
+
+    /// Steps all 64 SIMD duplex modes coupled to solved bridge zone velocities `v_zone[2..8]`
+    /// and returns the new `(left, right)` stereo output.
+    #[inline]
+    pub fn step_with_zone_velocities(&mut self, v_zone: &[f32; NUM_BRIDGE_ZONES]) -> (f32, f32) {
+        let mut unused_zones = [0.0_f32; NUM_BRIDGE_ZONES];
+        self.step_with_zone_velocities_and_zones(v_zone, &mut unused_zones)
     }
 
     /// Returns the most recent `(left, right)` stereo duplex output.
