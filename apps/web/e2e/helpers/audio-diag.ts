@@ -10,12 +10,25 @@ export interface AudioSampleStats {
   readonly highFreqRatio: number;
 }
 
+export interface AudioSampleOptions {
+  minFreq?: number;
+  maxFreq?: number;
+}
+
 /** Samples real destination audio directly from window.__PIANO_DIAG__.analyser tap. */
 export async function sampleDestinationAudio(
   page: Page,
-  minFreqHz = 0,
+  minFreqOrOptions: number | AudioSampleOptions = 0,
   maxFreqHz = Infinity,
 ): Promise<AudioSampleStats> {
+  let minFreq = 0;
+  let maxFreq = maxFreqHz;
+  if (typeof minFreqOrOptions === 'object' && minFreqOrOptions !== null) {
+    minFreq = minFreqOrOptions.minFreq ?? 0;
+    maxFreq = minFreqOrOptions.maxFreq ?? Infinity;
+  } else {
+    minFreq = minFreqOrOptions;
+  }
   return page.evaluate(
     ({ minFreq, maxFreq }) => {
       const diag = window.__PIANO_DIAG__;
@@ -103,7 +116,7 @@ export async function sampleDestinationAudio(
         highFreqRatio,
       };
     },
-    { minFreq: minFreqHz, maxFreq: maxFreqHz },
+    { minFreq, maxFreq },
   );
 }
 

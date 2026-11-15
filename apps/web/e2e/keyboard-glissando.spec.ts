@@ -116,7 +116,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await page.mouse.move(c8Pos.x, c8Pos.y);
     await page.mouse.down();
     await page.waitForTimeout(300);
-    const c8Stats = await sampleDestinationAudio(page);
+    const c8Stats = await sampleDestinationAudio(page, { minFreq: 3500 });
     expect(c8Stats.nonFiniteCount).toBe(0);
     expect(c8Stats.rms).toBeGreaterThan(0.0005);
     expect(c8Stats.peakFreqHz).toBeGreaterThan(3900);

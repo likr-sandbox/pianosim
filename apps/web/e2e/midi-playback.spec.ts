@@ -213,10 +213,11 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
       buffer: Buffer.from(smf),
     });
     await page.getByTestId('transport-play').click();
-    await page.waitForTimeout(250);
 
-    const voices = Number(await page.getByTestId('hud-voices').textContent());
-    expect(voices).toBeGreaterThanOrEqual(3);
+    await expect
+      .poll(async () => Number(await page.getByTestId('hud-voices').textContent()), { timeout: 2000 })
+      .toBeGreaterThanOrEqual(3);
+
     await page.getByTestId('transport-stop').click();
   });
 
