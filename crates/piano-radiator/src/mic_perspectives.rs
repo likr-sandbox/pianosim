@@ -96,16 +96,14 @@ fn piano_bounds(preset: &BodyPreset) -> PianoBounds {
     let mut y_min = preset.zone_pos_m[0][1] as f64;
     let mut z_sum = 0.0_f64;
     let mut z = 0;
-    while z < PRESET_RADIATOR_ZONES {
+    while z < 8 {
         let px = preset.zone_pos_m[z][0] as f64;
         let py = preset.zone_pos_m[z][1] as f64;
         let pz = preset.zone_pos_m[z][2] as f64;
         x_min = min_f64(x_min, px);
         x_max = max_f64(x_max, px);
         y_min = min_f64(y_min, py);
-        if z < 8 {
-            z_sum += pz;
-        }
+        z_sum += pz;
         z += 1;
     }
     PianoBounds {
@@ -120,16 +118,16 @@ fn stereo_rigs(perspective: ListenerPerspective, b: &PianoBounds) -> (CapsuleRig
     match perspective {
         ListenerPerspective::Player => (
             CapsuleRig {
-                pos: [b.x_center - 0.11, b.y_front - 0.36, b.z_board + 0.44],
-                aim: normalize3([-0.38, 0.86, -0.34]),
-                cardioid: 0.38,
+                pos: [b.x_center - 0.17, b.y_front - 0.30, b.z_board + 0.42],
+                aim: normalize3([-0.58, 0.75, -0.32]),
+                cardioid: 0.52,
                 r_ref: 0.90,
                 persp_trim: 1.00,
             },
             CapsuleRig {
-                pos: [b.x_center + 0.11, b.y_front - 0.36, b.z_board + 0.44],
-                aim: normalize3([0.38, 0.86, -0.34]),
-                cardioid: 0.38,
+                pos: [b.x_center + 0.17, b.y_front - 0.30, b.z_board + 0.42],
+                aim: normalize3([0.58, 0.75, -0.32]),
+                cardioid: 0.52,
                 r_ref: 0.90,
                 persp_trim: 1.00,
             },
@@ -281,7 +279,7 @@ fn build_channel_spec(
             } else {
                 0.18
             };
-            let g = scale * (rig.r_ref / max_f64(r_refl, 0.28));
+            let g = scale * polar_w * (rig.r_ref / max_f64(r_refl, 0.28));
             (dt, g as f32)
         }
     };

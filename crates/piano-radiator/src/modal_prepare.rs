@@ -12,6 +12,9 @@ use crate::mic_perspectives::ZonePathPair;
 use crate::modal_synth::{path_index, NUM_IR_PATHS, TILE};
 use crate::subrate_upsample::{DECIM, PAD_LEFT};
 
+/// Global scalar gain applied after `2 * zeta` Q-factor modal-sum normalization.
+pub(crate) const MODAL_BODY_BLEND: f64 = 2.0;
+
 #[derive(Clone, Copy)]
 pub(crate) struct PreparedMode {
     pub(crate) c: f64,
@@ -66,13 +69,18 @@ pub(crate) fn prepare_modes_split(
 
         let omega = 2.0 * PI * freq;
         let sqrt_1mz2 = sqrt_f64(max_f64(1.0e-8, 1.0 - zeta * zeta));
-        let amp = (ts * omega / sqrt_1mz2) * nyq_scale;
+        let amp = (MODAL_BODY_BLEND * 2.0 * zeta * ts * omega / sqrt_1mz2) * nyq_scale;
 
         let mut weights = [0.0_f32; NUM_IR_PATHS];
         let mut max_w = 0.0_f64;
         let mut z = 0;
         while z < PRESET_RADIATOR_ZONES {
-            let zd = m.zone_drive[z] as f64;
+            let baffle_eff = if z < 8 {
+                freq / sqrt_f64(freq * freq + 90.0 * 90.0)
+            } else {
+                1.0
+            };
+            let zd = (m.zone_drive[z] as f64) * baffle_eff;
             if zd.is_finite() && zd != 0.0 {
                 let wl = zd * dot5(&m.rad_coeffs, &paths[z].left.mode_proj);
                 let wr = zd * dot5(&m.rad_coeffs, &paths[z].right.mode_proj);
