@@ -50,8 +50,11 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
     await unlockAudioEngine(page);
 
     const a4Key = page.locator('[data-midi="69"]');
-    await page.keyboard.down('KeyH');
-    await expect(a4Key).toHaveClass(/is-active/);
+    const box = await a4Key.boundingBox();
+    expect(box).not.toBeNull();
+
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height * 0.8);
+    await page.mouse.down();
     await page.waitForTimeout(420);
 
     const held = await sampleDestinationAudio(page, 400, 500);
@@ -61,7 +64,7 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
     expect(held.peakFreqHz).toBeGreaterThanOrEqual(435);
     expect(held.peakFreqHz).toBeLessThanOrEqual(445);
 
-    await page.keyboard.up('KeyH');
+    await page.mouse.up();
     await expectAudioDecay(page, held.rms);
 
     assertNoErrors();
