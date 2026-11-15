@@ -200,25 +200,34 @@ pub(crate) fn accum_tile_stereo(
 #[inline]
 pub(crate) fn flush_subnormals_range(soa: &mut ModalSoa, vec_range: Range<usize>) -> bool {
     const RANGE: u32 = FINITE_EXP_BITS - SUBNORMAL_FLUSH_BITS;
+    #[inline(always)]
+    fn flush_f32(x: &mut f32, nz: &mut u32) {
+        let bits = x.to_bits();
+        let abs_bits = bits & 0x7fff_ffff;
+        let keep = abs_bits.wrapping_sub(SUBNORMAL_FLUSH_BITS) < RANGE;
+        let kept = bits & 0_u32.wrapping_sub(u32::from(keep));
+        *x = f32::from_bits(kept);
+        *nz |= kept;
+    }
+    #[inline(always)]
+    fn flush_slice_4x(slice: &mut [f32]) -> u32 {
+        let (mut nz0, mut nz1, mut nz2, mut nz3) = (0_u32, 0_u32, 0_u32, 0_u32);
+        let mut chunks = slice.chunks_exact_mut(4);
+        for c in chunks.by_ref() {
+            flush_f32(&mut c[0], &mut nz0);
+            flush_f32(&mut c[1], &mut nz1);
+            flush_f32(&mut c[2], &mut nz2);
+            flush_f32(&mut c[3], &mut nz3);
+        }
+        for x in chunks.into_remainder() {
+            flush_f32(x, &mut nz0);
+        }
+        nz0 | nz1 | nz2 | nz3
+    }
     let slot_range = (vec_range.start * 4)..(vec_range.end * 4);
-    let mut nonzero_bits = 0_u32;
-    for x in &mut soa.u.as_mut_slice()[slot_range.clone()] {
-        let bits = x.to_bits();
-        let abs_bits = bits & 0x7fff_ffff;
-        let keep = abs_bits.wrapping_sub(SUBNORMAL_FLUSH_BITS) < RANGE;
-        let kept = bits & 0_u32.wrapping_sub(u32::from(keep));
-        *x = f32::from_bits(kept);
-        nonzero_bits |= kept;
-    }
-    for x in &mut soa.v.as_mut_slice()[slot_range] {
-        let bits = x.to_bits();
-        let abs_bits = bits & 0x7fff_ffff;
-        let keep = abs_bits.wrapping_sub(SUBNORMAL_FLUSH_BITS) < RANGE;
-        let kept = bits & 0_u32.wrapping_sub(u32::from(keep));
-        *x = f32::from_bits(kept);
-        nonzero_bits |= kept;
-    }
-    (nonzero_bits & 0x7fff_ffff) != 0
+    let nz_u = flush_slice_4x(&mut soa.u.as_mut_slice()[slot_range.clone()]);
+    let nz_v = flush_slice_4x(&mut soa.v.as_mut_slice()[slot_range]);
+    ((nz_u | nz_v) & 0x7fff_ffff) != 0
 }
 
 /// Branchless flush of subnormals across the entire `ModalSoa` buffer.
@@ -242,34 +251,21 @@ pub(crate) fn step_string_subblock(
     step_string_subblock_3(soa, [vr, 0..0, 0..0], pan_l, pan_r, out_l, out_r);
 }
 
-/// Advances up to three modal ranges of one linear string across `out_l`/`out_r` in `CHUNK = 128`
-/// L1-resident passes, accumulating stereo once per sample across all ranges.
-#[inline(never)]
-pub(crate) fn step_string_subblock_3(
-    soa: &mut ModalSoa,
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn step_ranges_chunk<const CHUNK: usize>(
+    u: &mut [F32x4],
+    v: &mut [F32x4],
+    d: &[F32x4],
+    s: &[F32x4],
+    c: &[F32x4],
     ranges: [Range<usize>; 3],
     pan_l: f32,
     pan_r: f32,
     out_l: &mut [f32],
     out_r: &mut [f32],
+    total: usize,
 ) {
-    const CHUNK: usize = 128;
-    let total = out_l.len().min(out_r.len());
-    if total == 0 || ranges.iter().all(Range::is_empty) {
-        return;
-    }
-    let (u, v, d, s, c) = (
-        soa.u.as_f32x4_slice_mut(),
-        soa.v.as_f32x4_slice_mut(),
-        soa.d_coeff.as_f32x4_slice(),
-        soa.s_coeff.as_f32x4_slice(),
-        soa.c_bridge.as_f32x4_slice(),
-    );
-    let min_len = u.len().min(v.len()).min(d.len()).min(s.len()).min(c.len());
-    for r in &ranges {
-        assert!(r.start <= r.end && r.end <= min_len);
-    }
-
     let mut base = 0usize;
     while base < total {
         let c_len = (total - base).min(CHUNK);
@@ -334,6 +330,40 @@ pub(crate) fn step_string_subblock_3(
     }
 }
 
+/// Advances up to three modal ranges of one linear string across `out_l`/`out_r` in L1-resident
+/// passes (`CHUNK = 64` or `128`), accumulating stereo once per sample across all ranges.
+#[inline(never)]
+pub(crate) fn step_string_subblock_3(
+    soa: &mut ModalSoa,
+    ranges: [Range<usize>; 3],
+    pan_l: f32,
+    pan_r: f32,
+    out_l: &mut [f32],
+    out_r: &mut [f32],
+) {
+    let total = out_l.len().min(out_r.len());
+    if total == 0 || ranges.iter().all(Range::is_empty) {
+        return;
+    }
+    let (u, v, d, s, c) = (
+        soa.u.as_f32x4_slice_mut(),
+        soa.v.as_f32x4_slice_mut(),
+        soa.d_coeff.as_f32x4_slice(),
+        soa.s_coeff.as_f32x4_slice(),
+        soa.c_bridge.as_f32x4_slice(),
+    );
+    let min_len = u.len().min(v.len()).min(d.len()).min(s.len()).min(c.len());
+    for r in &ranges {
+        assert!(r.start <= r.end && r.end <= min_len);
+    }
+
+    if total <= 64 {
+        step_ranges_chunk::<64>(u, v, d, s, c, ranges, pan_l, pan_r, out_l, out_r, total);
+    } else {
+        step_ranges_chunk::<128>(u, v, d, s, c, ranges, pan_l, pan_r, out_l, out_r, total);
+    }
+}
+
 /// Steps all 230 strings across an uncoupled audio subblock in `TILE`-sample tiles.
 #[cfg(test)]
 pub(crate) fn step_all_tiles(
@@ -367,124 +397,5 @@ pub(crate) fn step_all_tiles(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::StringBank;
-    use piano_simd::{Complex, RealFft};
-    use piano_spec::{build_scale_design, VoicingSpec};
-
-    #[test]
-    fn tiled_kernel_matches_single_sample_across_partial_tiles() {
-        const FRAMES: usize = 13; // 1 full tile (8) + 1 partial tail (5)
-        let voicing = VoicingSpec::default();
-        let specs = build_scale_design(&voicing);
-        let map = ChoirMap::build_with_specs(&specs, &voicing);
-        let mut tiled_soa = ModalSoa::build(48_000.0, &voicing, &specs, &map);
-        let mut ref_soa = tiled_soa.clone();
-
-        for s_idx in [0usize, 120, 229] {
-            let r = map.strings()[s_idx].all_vecs();
-            inject_excitation(
-                &mut tiled_soa.u.as_f32x4_slice_mut()[r.clone()],
-                &tiled_soa.b_exc.as_f32x4_slice()[r.clone()],
-                1.0,
-            );
-            inject_excitation(
-                &mut ref_soa.u.as_f32x4_slice_mut()[r.clone()],
-                &ref_soa.b_exc.as_f32x4_slice()[r],
-                1.0,
-            );
-        }
-
-        let (mut tl, mut tr) = (vec![0.0_f32; FRAMES], vec![0.0_f32; FRAMES]);
-        step_all_tiles(&mut tiled_soa, &map, &mut tl, &mut tr);
-
-        for f in 0..FRAMES {
-            let (rl, rr) = step_all_strings(&mut ref_soa, &map);
-            assert!((tl[f] - rl).abs() < 1e-6 && (tr[f] - rr).abs() < 1e-6);
-        }
-        flush_subnormals_soa(&mut ref_soa);
-        for (a, b) in tiled_soa
-            .u
-            .as_mut_slice()
-            .iter()
-            .zip(ref_soa.u.as_mut_slice())
-        {
-            assert!((*a - *b).abs() < 1e-6);
-        }
-    }
-
-    #[test]
-    fn a4_fundamental_dominates_second_partial() {
-        const N: usize = 32_768;
-        let mut bank = StringBank::new(48_000.0, &VoicingSpec::default());
-        bank.apply_excitation_sample(48, [1.0; 3], 1.0);
-        let (mut out_l, mut out_r) = (vec![0.0_f32; N], vec![0.0_f32; N]);
-        bank.render_key_subblock(48, &mut out_l, &mut out_r);
-        let mono: Vec<f32> = out_l.iter().zip(&out_r).map(|(l, r)| l + r).collect();
-        let mut rfft = RealFft::new(N);
-        let mut spec = vec![Complex::ZERO; rfft.spectrum_len()];
-        rfft.forward(&mono, &mut spec);
-
-        let max_bin = (1..spec.len())
-            .max_by(|&a, &b| spec[a].norm_sq().total_cmp(&spec[b].norm_sq()))
-            .unwrap();
-        let peak_hz = (max_bin as f64) * 48_000.0 / (N as f64);
-        let band_max = |lo: usize, hi: usize| {
-            spec[lo..=hi]
-                .iter()
-                .fold(0.0_f32, |m, c| m.max(c.norm_sq()))
-        };
-        let db_margin = 10.0 * (band_max(290, 310) / band_max(590, 615).max(1e-20)).log10();
-        eprintln!("A4 peak_hz={peak_hz:.2} Hz, fund_vs_2nd={db_margin:.2} dB");
-        assert!((435.0..=445.0).contains(&peak_hz) && db_margin > 3.9);
-    }
-
-    #[test]
-    fn subblock_kernel_matches_tiled_128_frames() {
-        const FRAMES: usize = 131; // 1 full CHUNK=128 + partial tail=3
-        let voicing = VoicingSpec::default();
-        let specs = build_scale_design(&voicing);
-        let map = ChoirMap::build_with_specs(&specs, &voicing);
-        let mut sub_soa = ModalSoa::build(48_000.0, &voicing, &specs, &map);
-        let mut tile_soa = sub_soa.clone();
-        for s_idx in [0usize, 120, 229] {
-            let r = map.strings()[s_idx].all_vecs();
-            inject_excitation(
-                &mut sub_soa.u.as_f32x4_slice_mut()[r.clone()],
-                &sub_soa.b_exc.as_f32x4_slice()[r.clone()],
-                1.5,
-            );
-            inject_excitation(
-                &mut tile_soa.u.as_f32x4_slice_mut()[r.clone()],
-                &tile_soa.b_exc.as_f32x4_slice()[r],
-                1.5,
-            );
-        }
-        let (mut sl, mut sr_v) = (vec![0.0_f32; FRAMES], vec![0.0_f32; FRAMES]);
-        for e in map.strings() {
-            step_string_subblock(
-                &mut sub_soa,
-                e.all_vecs(),
-                e.pan_l,
-                e.pan_r,
-                &mut sl,
-                &mut sr_v,
-            );
-        }
-        flush_subnormals_soa(&mut sub_soa);
-        let (mut tl, mut tr) = (vec![0.0_f32; FRAMES], vec![0.0_f32; FRAMES]);
-        step_all_tiles(&mut tile_soa, &map, &mut tl, &mut tr);
-        for f in 0..FRAMES {
-            assert!((sl[f] - tl[f]).abs() < 1e-5 && (sr_v[f] - tr[f]).abs() < 1e-5);
-        }
-        for (a, b) in sub_soa
-            .u
-            .as_mut_slice()
-            .iter()
-            .zip(tile_soa.u.as_mut_slice())
-        {
-            assert!((*a - *b).abs() < 1e-5);
-        }
-    }
-}
+#[path = "zoh_kernel_tests.rs"]
+mod tests;

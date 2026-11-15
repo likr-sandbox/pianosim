@@ -39,6 +39,7 @@ pub(crate) struct ContactPorts {
     pub y_dh: [f32; TOTAL_STRINGS],
     pub v_dh: [f32; TOTAL_STRINGS],
     pub may_be_nonzero: [bool; TOTAL_STRINGS],
+    pub tail_nonzero: [bool; TOTAL_STRINGS],
     pub struck_active: [bool; TOTAL_STRINGS],
     pub ports_synced: [bool; TOTAL_STRINGS],
     pub y_clear_scratch: alloc::vec::Vec<[f32; 128]>,
@@ -72,6 +73,7 @@ impl ContactPorts {
             y_dh: [0.0; TOTAL_STRINGS],
             v_dh: [0.0; TOTAL_STRINGS],
             may_be_nonzero: [false; TOTAL_STRINGS],
+            tail_nonzero: [false; TOTAL_STRINGS],
             struck_active: [false; TOTAL_STRINGS],
             ports_synced: [true; TOTAL_STRINGS],
             y_clear_scratch: alloc::vec![[0.0_f32; 128]; NUM_KEYS],
@@ -90,6 +92,7 @@ impl ContactPorts {
         self.y_dh.fill(0.0);
         self.v_dh.fill(0.0);
         self.may_be_nonzero.fill(false);
+        self.tail_nonzero.fill(false);
         self.struck_active.fill(false);
         self.ports_synced.fill(true);
     }
@@ -97,6 +100,7 @@ impl ContactPorts {
     #[inline]
     pub fn clear_string_state(&mut self, s_idx: usize) {
         self.may_be_nonzero[s_idx] = false;
+        self.tail_nonzero[s_idx] = false;
         self.struck_active[s_idx] = false;
         self.y_h[s_idx] = 0.0;
         self.v_h[s_idx] = 0.0;
@@ -309,7 +313,7 @@ fn accum_pol_damp_ports(soa: &ModalSoa, ports: &ContactPorts, vr: Range<usize>) 
     (ayd.reduce_sum(), avd.reduce_sum())
 }
 
-/// Recomputes cached damper port `(y_dv, v_dv, y_dh, v_dh)` over L1 `< 5,500 Hz` prefixes only.
+/// Recomputes cached damper port `(y_dv, v_dv, y_dh, v_dh)` over L1 `< 4,500 Hz` prefixes only.
 #[inline]
 pub(crate) fn refresh_prefix_damp_ports(
     soa: &ModalSoa,
@@ -326,4 +330,16 @@ pub(crate) fn refresh_prefix_damp_ports(
     ports.y_dh[s_idx] = ydh;
     ports.v_dh[s_idx] = alpha * vdh;
     ports.ports_synced[s_idx] = true;
+}
+
+/// Accumulates raw damper modal velocity dot product `sum(u * b_damp)` over `vr`.
+#[inline]
+pub(crate) fn accum_pol_damp_vel(soa: &ModalSoa, ports: &ContactPorts, vr: Range<usize>) -> f32 {
+    let u = soa.u.as_f32x4_slice();
+    let bd = ports.b_damp.as_f32x4_slice();
+    let mut avd = F32x4::zero();
+    for i in vr {
+        avd = u[i].mul_add(bd[i], avd);
+    }
+    avd.reduce_sum()
 }

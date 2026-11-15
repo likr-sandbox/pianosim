@@ -170,7 +170,9 @@ fn step_string_coupled<const HAS_DAMPER: bool>(
     if HAS_DAMPER {
         (p.y_dv[s], p.v_dv[s], p.y_dh[s], p.v_dh[s]) = (ydv, alpha * vdv, ydh, alpha * vdh);
     }
-    p.may_be_nonzero[s] |= f_h != 0.0 || fd_v != 0.0 || fd_h != 0.0;
+    let excited = f_h != 0.0 || fd_v != 0.0 || fd_h != 0.0;
+    p.may_be_nonzero[s] |= excited;
+    p.tail_nonzero[s] |= excited;
     p.ports_synced[s] = true;
     tv + th + if r.long_on { tl } else { 0.0 }
 }

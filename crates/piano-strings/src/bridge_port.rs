@@ -1,5 +1,5 @@
 //! Stage 2 <-> Stage 3 Wave Digital Filter (WDF) displacement-bridge port
-//! precomputation and `< 5,500 Hz` SIMD prefix stepping (`no_std`).
+//! precomputation and compact `< 4,500 Hz` prefix table packing (`no_std`).
 
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -14,10 +14,9 @@ use crate::choir_map::ChoirMap;
 use crate::contact_ports::ContactPorts;
 use crate::modal_soa::{sqrt_f64, ModalSoa, C_HORIZ, C_VERT, NYQUIST_CUTOFF_RATIO};
 use crate::phantom::MAX_PHANTOM_TRANSVERSE_VECS;
-use crate::zoh_kernel::zoh_rotate;
 
 /// Upper frequency cutoff (Hz) for sample-by-sample WDF bridge prefix modes.
-pub const BRIDGE_PREFIX_CUTOFF_HZ: f64 = 5_500.0;
+pub const BRIDGE_PREFIX_CUTOFF_HZ: f64 = 4_500.0;
 
 /// Stage 3 bidirectional reduced bridge and duplex scale driver (`0` runtime allocs).
 pub trait BridgePortDriver {
@@ -63,10 +62,13 @@ impl StringBridgeMeta {
     }
 }
 
-/// Precomputed compact WDF bridge port couplings for `< 5,500 Hz` string prefixes.
+/// Precomputed compact WDF bridge port couplings and packed ZOH tables for string prefixes.
 #[derive(Clone, Debug)]
 pub(crate) struct BridgePorts {
     pub beta_br: AlignedBuf,
+    pub d_br: AlignedBuf,
+    pub s_br: AlignedBuf,
+    pub c_br: AlignedBuf,
     pub r0: [f32; TOTAL_STRINGS],
     pub r_damp_prefix_v: [f32; TOTAL_STRINGS],
     pub r_damp_prefix_h: [f32; TOTAL_STRINGS],
@@ -86,7 +88,7 @@ fn count_prefix_modes(
     let mut n = 0usize;
     for j in 1..=modes {
         let f_j = partial_frequency_hz(f0, inharmonicity_b, j);
-        if f_j > 0.0 && f_j < lim {
+        if f_j > 0.0 && f_j < lim && (f_j < 1_800.0 || j <= 24) {
             n = j;
         } else {
             break;
@@ -114,7 +116,7 @@ fn fill_pol_beta(
 }
 
 impl BridgePorts {
-    /// Precomputes masked per-prefix-vec `beta_br` and exact WDF port resistances `R_0,s`.
+    /// Precomputes masked per-prefix-vec `beta_br` and packed prefix ZOH arrays `(d_br, s_br, c_br)`.
     #[must_use]
     pub fn build(
         sample_rate: f64,
@@ -122,6 +124,7 @@ impl BridgePorts {
         specs: &[StringPhysicalParams; NUM_KEYS],
         map: &ChoirMap,
         ports: &ContactPorts,
+        soa: &ModalSoa,
     ) -> Self {
         let ts = 1.0 / sample_rate;
         let nyquist = NYQUIST_CUTOFF_RATIO * sample_rate;
@@ -167,6 +170,12 @@ impl BridgePorts {
 
         let mut beta_vals: Vec<f32> = Vec::with_capacity(total_prefix_vecs * 4);
         beta_vals.resize(total_prefix_vecs * 4, 0.0);
+        let mut d_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
+        let mut s_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
+        let mut c_br = AlignedBuf::zeroed(total_prefix_vecs.max(1) * 4);
+        let d_src = soa.d_coeff.as_f32x4_slice();
+        let s_src = soa.s_coeff.as_f32x4_slice();
+        let c_src = soa.c_bridge.as_f32x4_slice();
         let mut vec_cursor = 0usize;
 
         for (s_idx, entry) in map.strings().iter().enumerate() {
@@ -230,6 +239,20 @@ impl BridgePorts {
             meta[s_idx].beta_v_off = beta_v_off;
             meta[s_idx].beta_h_off = beta_h_off;
 
+            let (v_br, h_br) = (meta[s_idx].v_br.clone(), meta[s_idx].h_br.clone());
+            d_br.as_f32x4_slice_mut()[beta_v_off..beta_v_off + nv_vecs]
+                .copy_from_slice(&d_src[v_br.clone()]);
+            s_br.as_f32x4_slice_mut()[beta_v_off..beta_v_off + nv_vecs]
+                .copy_from_slice(&s_src[v_br.clone()]);
+            c_br.as_f32x4_slice_mut()[beta_v_off..beta_v_off + nv_vecs]
+                .copy_from_slice(&c_src[v_br.clone()]);
+            d_br.as_f32x4_slice_mut()[beta_h_off..beta_h_off + nh_vecs]
+                .copy_from_slice(&d_src[h_br.clone()]);
+            s_br.as_f32x4_slice_mut()[beta_h_off..beta_h_off + nh_vecs]
+                .copy_from_slice(&s_src[h_br.clone()]);
+            c_br.as_f32x4_slice_mut()[beta_h_off..beta_h_off + nh_vecs]
+                .copy_from_slice(&c_src[h_br]);
+
             // Prefix damper port resistances match `r_port_damp_v/h` (`alpha * sum(b_damp^2)`)
             // so `1 + 0.5 * rp * c` preserves exact discrete passivity on `< 5,500 Hz` prefixes.
             if entry.has_damper {
@@ -249,6 +272,9 @@ impl BridgePorts {
         beta_br.as_mut_slice()[..beta_vals.len()].copy_from_slice(&beta_vals);
         Self {
             beta_br,
+            d_br,
+            s_br,
+            c_br,
             r0,
             r_damp_prefix_v,
             r_damp_prefix_h,
@@ -289,153 +315,4 @@ fn dot_beta_v(v: &[F32x4], beta: &[F32x4], vr: Range<usize>, beta_off: usize) ->
         acc = vs[i].mul_add(bs[i], acc);
     }
     acc.reduce_sum()
-}
-
-/// Applies `v -= beta_br * v_br`, steps prefix ZOH rotation, accumulates `c_bridge` audio
-/// readout, and computes the next-sample `beta_br . v_next` dot product in a single SIMD pass.
-#[inline(always)]
-pub(crate) fn step_pol_prefix_wdf(
-    soa: &mut ModalSoa,
-    beta_buf: &[F32x4],
-    vr: Range<usize>,
-    beta_off: usize,
-    neg_vbr: F32x4,
-) -> (f32, f32) {
-    let n = vr.end - vr.start;
-    let (u_all, v_all) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
-    let u = &mut u_all[vr.clone()];
-    let v = &mut v_all[vr.clone()];
-    let d = &soa.d_coeff.as_f32x4_slice()[vr.clone()];
-    let s = &soa.s_coeff.as_f32x4_slice()[vr.clone()];
-    let c = &soa.c_bridge.as_f32x4_slice()[vr];
-    let beta = &beta_buf[beta_off..beta_off + n];
-
-    let (mut acc_c, mut acc_br) = (F32x4::zero(), F32x4::zero());
-    for i in 0..n {
-        let vc = beta[i].mul_add(neg_vbr, v[i]);
-        let (un, vn) = zoh_rotate(u[i], vc, d[i], s[i]);
-        u[i] = un;
-        v[i] = vn;
-        acc_c = vn.mul_add(c[i], acc_c);
-        acc_br = vn.mul_add(beta[i], acc_br);
-    }
-    (acc_c.reduce_sum(), acc_br.reduce_sum())
-}
-
-/// Same as [`step_pol_prefix_wdf`] with simultaneous hammer/damper force injection into `u`.
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn step_pol_prefix_wdf_inj(
-    soa: &mut ModalSoa,
-    ports: &ContactPorts,
-    beta_buf: &[F32x4],
-    vr: Range<usize>,
-    beta_off: usize,
-    neg_vbr: F32x4,
-    f_h: f32,
-    f_d: f32,
-    has_damper: bool,
-) -> (f32, f32) {
-    let n = vr.end - vr.start;
-    let u = &mut soa.u.as_f32x4_slice_mut()[vr.clone()];
-    let v = &mut soa.v.as_f32x4_slice_mut()[vr.clone()];
-    let d = &soa.d_coeff.as_f32x4_slice()[vr.clone()];
-    let s = &soa.s_coeff.as_f32x4_slice()[vr.clone()];
-    let c = &soa.c_bridge.as_f32x4_slice()[vr.clone()];
-    let bh = &ports.b_strike.as_f32x4_slice()[vr.clone()];
-    let bd = &ports.b_damp.as_f32x4_slice()[vr];
-    let beta = &beta_buf[beta_off..beta_off + n];
-    let (fh_v, fd_v) = (F32x4::splat(f_h), F32x4::splat(f_d));
-
-    let (mut acc_c, mut acc_br) = (F32x4::zero(), F32x4::zero());
-    for i in 0..n {
-        let u_inj = if has_damper {
-            fd_v.mul_add(bd[i], fh_v.mul_add(bh[i], u[i]))
-        } else {
-            fh_v.mul_add(bh[i], u[i])
-        };
-        let bi = beta[i];
-        let vc = bi.mul_add(neg_vbr, v[i]);
-        let (un, vn) = zoh_rotate(u_inj, vc, d[i], s[i]);
-        u[i] = un;
-        v[i] = vn;
-        acc_c = vn.mul_add(c[i], acc_c);
-        acc_br = vn.mul_add(bi, acc_br);
-    }
-    (acc_c.reduce_sum(), acc_br.reduce_sum())
-}
-
-/// Single-pass prefix WDF step for damped sympathetic strings (`KeyCat::DampedSymp`):
-/// injects optional `f_d * b_damp` into `u`, couples `-beta_br * v_br` onto `v`,
-/// advances ZOH rotation, and accumulates `(y_d, v_d)` alongside `(acc_c, acc_br)` in registers.
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn step_pol_prefix_wdf_symp_damp(
-    soa: &mut ModalSoa,
-    ports: &ContactPorts,
-    beta_buf: &[F32x4],
-    vr: Range<usize>,
-    beta_off: usize,
-    neg_vbr: F32x4,
-    f_d: f32,
-) -> (f32, f32, f32, f32) {
-    if f_d != 0.0 {
-        step_pol_prefix_wdf_symp_damp_inner::<true>(
-            soa, ports, beta_buf, vr, beta_off, neg_vbr, f_d,
-        )
-    } else {
-        step_pol_prefix_wdf_symp_damp_inner::<false>(
-            soa, ports, beta_buf, vr, beta_off, neg_vbr, 0.0,
-        )
-    }
-}
-
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn step_pol_prefix_wdf_symp_damp_inner<const HAS_FD: bool>(
-    soa: &mut ModalSoa,
-    ports: &ContactPorts,
-    beta_buf: &[F32x4],
-    vr: Range<usize>,
-    beta_off: usize,
-    neg_vbr: F32x4,
-    f_d: f32,
-) -> (f32, f32, f32, f32) {
-    let n = vr.end - vr.start;
-    let (u_all, v_all) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
-    let u = &mut u_all[vr.clone()];
-    let v = &mut v_all[vr.clone()];
-    let d = &soa.d_coeff.as_f32x4_slice()[vr.clone()];
-    let s = &soa.s_coeff.as_f32x4_slice()[vr.clone()];
-    let c = &soa.c_bridge.as_f32x4_slice()[vr.clone()];
-    let bd = &ports.b_damp.as_f32x4_slice()[vr.clone()];
-    let ad = &ports.a_damp.as_f32x4_slice()[vr];
-    let beta = &beta_buf[beta_off..beta_off + n];
-    let fd_v = F32x4::splat(f_d);
-
-    let (mut acc_c, mut acc_br, mut acc_yd, mut acc_vd) =
-        (F32x4::zero(), F32x4::zero(), F32x4::zero(), F32x4::zero());
-    for i in 0..n {
-        let bdi = bd[i];
-        let u_inj = if HAS_FD {
-            fd_v.mul_add(bdi, u[i])
-        } else {
-            u[i]
-        };
-        let bi = beta[i];
-        let vc = bi.mul_add(neg_vbr, v[i]);
-        let (un, vn) = zoh_rotate(u_inj, vc, d[i], s[i]);
-        u[i] = un;
-        v[i] = vn;
-        acc_c = vn.mul_add(c[i], acc_c);
-        acc_br = vn.mul_add(bi, acc_br);
-        acc_yd = vn.mul_add(ad[i], acc_yd);
-        acc_vd = un.mul_add(bdi, acc_vd);
-    }
-    (
-        acc_c.reduce_sum(),
-        acc_br.reduce_sum(),
-        acc_yd.reduce_sum(),
-        acc_vd.reduce_sum(),
-    )
 }
