@@ -198,6 +198,93 @@ pub extern "C" fn piano_set_hammer_hardness(ctx: *mut WasmContext, hammer_hardne
     0
 }
 
+/// Returns mutable pointer to pre-allocated staging memory at `off_f32`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_staging_offset_ptr(
+    ctx: *mut WasmContext,
+    off_f32: usize,
+    len_f32: usize,
+) -> *mut f32 {
+    if ctx.is_null() {
+        return ptr::null_mut();
+    }
+    let ctx = unsafe { &mut *ctx };
+    ctx.staging_offset_mut_ptr(off_f32, len_f32)
+}
+
+/// Streams a precomputed space blob chunk from `staging[0..chunk_len]` into standby.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_stage_space_chunk(
+    ctx: *mut WasmContext,
+    perspective: u32,
+    lid: u32,
+    blob_off: usize,
+    chunk_len: usize,
+    total_len: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return -1;
+    }
+    let Some(persp) = u8::try_from(perspective)
+        .ok()
+        .and_then(piano_spec::ListenerPerspective::from_u8)
+    else {
+        return -2;
+    };
+    let Some(lid_state) = u8::try_from(lid)
+        .ok()
+        .and_then(piano_spec::LidState::from_u8)
+    else {
+        return -2;
+    };
+    let ctx = unsafe { &mut *ctx };
+    if ctx.stage_space_chunk(persp, lid_state, blob_off, chunk_len, total_len) {
+        0
+    } else {
+        -3
+    }
+}
+
+/// Commits pre-staged spatial radiator standby via instant swap or 8 ms crossfade.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_commit_space(ctx: *mut WasmContext, perspective: u32, lid: u32) -> i32 {
+    if ctx.is_null() {
+        return -1;
+    }
+    let Some(persp) = u8::try_from(perspective)
+        .ok()
+        .and_then(piano_spec::ListenerPerspective::from_u8)
+    else {
+        return -2;
+    };
+    let Some(lid_state) = u8::try_from(lid)
+        .ok()
+        .and_then(piano_spec::LidState::from_u8)
+    else {
+        return -2;
+    };
+    let ctx = unsafe { &mut *ctx };
+    if ctx.commit_space(persp, lid_state) {
+        0
+    } else {
+        -3
+    }
+}
+
+/// Returns 1 while a spatial 8 ms crossfade is active, else 0.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_is_space_crossfading(ctx: *const WasmContext) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    let ctx = unsafe { &*ctx };
+    i32::from(ctx.is_space_crossfading())
+}
+
 /// Returns mutable pointer to pre-allocated staging memory for zero-alloc blob transfer.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]

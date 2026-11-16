@@ -118,10 +118,54 @@ impl WasmContext {
     /// Returns mutable pointer to pre-allocated staging buffer if `len_f32` fits.
     #[inline]
     pub fn staging_mut_ptr(&mut self, len_f32: usize) -> *mut f32 {
-        if len_f32 == 0 || len_f32 > self.staging.len() {
+        self.staging_offset_mut_ptr(0, len_f32)
+    }
+
+    /// Returns mutable pointer to `staging[off_f32..]` if `[off_f32..off_f32 + len_f32]` fits.
+    #[inline]
+    pub fn staging_offset_mut_ptr(&mut self, off_f32: usize, len_f32: usize) -> *mut f32 {
+        let Some(end) = off_f32.checked_add(len_f32) else {
+            return core::ptr::null_mut();
+        };
+        if len_f32 == 0 || end > self.staging.len() {
             return core::ptr::null_mut();
         }
-        self.staging.as_mut_ptr()
+        // SAFETY: `off_f32 < end <= self.staging.len()`.
+        unsafe { self.staging.as_mut_ptr().add(off_f32) }
+    }
+
+    /// Streams one slice from `staging[0..chunk_len]` into the standby spatial radiator.
+    pub fn stage_space_chunk(
+        &mut self,
+        perspective: ListenerPerspective,
+        lid: LidState,
+        blob_off: usize,
+        chunk_len: usize,
+        total_len: usize,
+    ) -> bool {
+        if chunk_len == 0 || chunk_len > self.staging.len() {
+            return false;
+        }
+        self.engine.stage_precomputed_space_chunk(
+            perspective,
+            lid,
+            blob_off,
+            &self.staging[..chunk_len],
+            total_len,
+        )
+    }
+
+    /// Commits the streamed standby spatial radiator.
+    #[inline]
+    pub fn commit_space(&mut self, perspective: ListenerPerspective, lid: LidState) -> bool {
+        self.engine.commit_precomputed_space(perspective, lid)
+    }
+
+    /// Returns `true` if a spatial crossfade is currently in flight.
+    #[inline]
+    #[must_use]
+    pub fn is_space_crossfading(&self) -> bool {
+        self.engine.space_guard().is_crossfading()
     }
 
     /// Applies an off-thread precomputed spatial FIR + NUPOLS blob from staging memory.

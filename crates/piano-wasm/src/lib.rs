@@ -5,11 +5,12 @@ pub mod prep_ipc;
 pub mod ring_ipc;
 
 pub use exports::{
-    piano_all_notes_off, piano_apply_space_blob, piano_apply_voicing_blob, piano_destroy,
-    piano_init, piano_note_off, piano_note_on, piano_out_l_ptr, piano_out_r_ptr, piano_pedal,
-    piano_prep_destroy, piano_prep_init, piano_prep_out_ptr, piano_prep_space, piano_prep_voicing,
-    piano_render, piano_set_hammer_hardness, piano_set_space, piano_set_voicing, piano_staging_ptr,
-    piano_telemetry_ptr,
+    piano_all_notes_off, piano_apply_space_blob, piano_apply_voicing_blob, piano_commit_space,
+    piano_destroy, piano_init, piano_is_space_crossfading, piano_note_off, piano_note_on,
+    piano_out_l_ptr, piano_out_r_ptr, piano_pedal, piano_prep_destroy, piano_prep_init,
+    piano_prep_out_ptr, piano_prep_space, piano_prep_voicing, piano_render,
+    piano_set_hammer_hardness, piano_set_space, piano_set_voicing, piano_stage_space_chunk,
+    piano_staging_offset_ptr, piano_staging_ptr, piano_telemetry_ptr,
 };
 pub use prep_ipc::PrepContext;
 pub use ring_ipc::{WasmContext, MAX_BLOCK, TELEMETRY_LEN};
