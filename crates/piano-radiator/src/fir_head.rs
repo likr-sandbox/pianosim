@@ -117,8 +117,12 @@ impl FirHead {
 
             let mut acc_l0 = F32x4::zero();
             let mut acc_l1 = F32x4::zero();
+            let mut acc_l2 = F32x4::zero();
+            let mut acc_l3 = F32x4::zero();
             let mut acc_r0 = F32x4::zero();
             let mut acc_r1 = F32x4::zero();
+            let mut acc_r2 = F32x4::zero();
+            let mut acc_r3 = F32x4::zero();
 
             let mut z = 0;
             while z < PRESET_RADIATOR_ZONES {
@@ -162,21 +166,21 @@ impl FirHead {
 
                     acc_l0 = s0.mul_add(cl_v.splat_lane::<0>(), acc_l0);
                     acc_l1 = s1.mul_add(cl_v.splat_lane::<1>(), acc_l1);
-                    acc_l0 = s2.mul_add(cl_v.splat_lane::<2>(), acc_l0);
-                    acc_l1 = s3.mul_add(cl_v.splat_lane::<3>(), acc_l1);
+                    acc_l2 = s2.mul_add(cl_v.splat_lane::<2>(), acc_l2);
+                    acc_l3 = s3.mul_add(cl_v.splat_lane::<3>(), acc_l3);
 
                     acc_r0 = s0.mul_add(cr_v.splat_lane::<0>(), acc_r0);
                     acc_r1 = s1.mul_add(cr_v.splat_lane::<1>(), acc_r1);
-                    acc_r0 = s2.mul_add(cr_v.splat_lane::<2>(), acc_r0);
-                    acc_r1 = s3.mul_add(cr_v.splat_lane::<3>(), acc_r1);
+                    acc_r2 = s2.mul_add(cr_v.splat_lane::<2>(), acc_r2);
+                    acc_r3 = s3.mul_add(cr_v.splat_lane::<3>(), acc_r3);
 
                     v += 1;
                 }
                 z += 1;
             }
 
-            (acc_l0 + acc_l1).write_to_slice(&mut out_l[i..i + 4]);
-            (acc_r0 + acc_r1).write_to_slice(&mut out_r[i..i + 4]);
+            ((acc_l0 + acc_l1) + (acc_l2 + acc_l3)).write_to_slice(&mut out_l[i..i + 4]);
+            ((acc_r0 + acc_r1) + (acc_r2 + acc_r3)).write_to_slice(&mut out_r[i..i + 4]);
             w = (w + 4) & RING_MASK;
             i += 4;
         }
