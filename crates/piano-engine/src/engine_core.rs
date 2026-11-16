@@ -11,7 +11,7 @@ use piano_strings::StringBank;
 use crate::drivers::{ActionDriver, BridgeDriver};
 use crate::param_smooth::{apply_raised_cosine_crossfade, SpaceCrossfadeGuard};
 
-const KEY_SILENCE_RMS_THRESHOLD: f32 = 1.0e-4;
+const KEY_SILENCE_RMS_THRESHOLD: f32 = 2.5e-4;
 const DAMPER_ACTIVE_HOLD_CLEARANCE_M: f32 = 0.5e-3;
 const RENDER_CHUNK: usize = 128;
 
@@ -295,6 +295,9 @@ impl EngineCore {
     }
 
     pub fn retire_silent_keys(&mut self) {
+        if self.action.sustain() > 0.0 {
+            return;
+        }
         for k in 0..NUM_KEYS {
             if !self.ringing[k] || self.key_down[k] || self.action.is_hammer_active(k) {
                 continue;
@@ -306,6 +309,7 @@ impl EngineCore {
             let (v_rms, h_rms) = self.bank.measure_key_polarization_rms(k);
             if v_rms.max(h_rms) < KEY_SILENCE_RMS_THRESHOLD {
                 self.ringing[k] = false;
+                self.bank.retire_key_struck_contact(k);
             }
         }
     }

@@ -208,6 +208,13 @@ impl ActionBank {
         self.pedals.damper_clearance_m(key_idx)
     }
 
+    /// Current continuous sustain pedal position (`0.0..=1.0`).
+    #[must_use]
+    #[inline]
+    pub fn sustain(&self) -> f32 {
+        self.pedals.sustain()
+    }
+
     /// Una Corda choir strike weights `[w0, w1, w2]` for `key_idx`.
     #[must_use]
     #[inline]
@@ -471,18 +478,14 @@ mod escapement_tests {
         };
 
         let (dur_nom, cent_nom) = strike_stats(&mut bank);
-        let soft = VoicingSpec {
-            hammer_hardness: 0.1,
+        let vspec = |h: f32| VoicingSpec {
+            hammer_hardness: h,
             ..VoicingSpec::default()
         };
-        let hard = VoicingSpec {
-            hammer_hardness: 0.9,
-            ..VoicingSpec::default()
-        };
-        bank.update_voicing_in_place(&soft);
+        bank.update_voicing_in_place(&vspec(0.1));
         assert_eq!(bank.keys[48].felt_spec.exponent_p, orig_p);
         let (dur_soft, cent_soft) = strike_stats(&mut bank);
-        bank.update_voicing_in_place(&hard);
+        bank.update_voicing_in_place(&vspec(0.9));
         assert_eq!(bank.keys[48].felt_spec.exponent_p, orig_p);
         let (dur_hard, cent_hard) = strike_stats(&mut bank);
         assert!(dur_hard < dur_soft && cent_hard > cent_soft);
