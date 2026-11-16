@@ -1,6 +1,7 @@
 import './styles/base.css';
 import './styles/keyboard.css';
 import './styles/panels.css';
+import './styles/presets.css';
 import { TelemetryClient } from './audio/telemetry-client';
 import { WasmAudioHost } from './audio/wasm-host';
 import { MidiPlayer } from './midi/midi-player';

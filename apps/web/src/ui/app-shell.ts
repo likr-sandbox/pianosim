@@ -18,6 +18,7 @@ import { PerfMeter } from '../viz/perf-meter';
 import { SpectrumCanvas } from '../viz/spectrum-canvas';
 import { KeyboardView } from './keyboard-view';
 import { PedalBar } from './pedal-bar';
+import { PresetBar } from './preset-bar';
 import { SpacePanel } from './space-panel';
 import { TransportBar } from './transport-bar';
 import { VoicingPanel, type VoicingState } from './voicing-panel';
@@ -35,6 +36,7 @@ export class AppShell {
 
   private keyboardView!: KeyboardView;
   private pedalBar!: PedalBar;
+  private presetBar!: PresetBar;
   private voicingPanel!: VoicingPanel;
   private spacePanel!: SpacePanel;
   private transportBar!: TransportBar;
@@ -104,6 +106,7 @@ export class AppShell {
     this.clearA4Pulse();
     this.keyboardView?.destroy();
     this.pedalBar?.destroy();
+    this.presetBar?.destroy();
     this.voicingPanel?.destroy();
     this.spacePanel?.destroy();
     this.transportBar?.destroy();
@@ -180,6 +183,9 @@ export class AppShell {
         <!-- MIDI Transport & Scoring -->
         <div id="transport-mount" class="transport-slot"></div>
 
+        <!-- Acoustic Parameter Presets Bar -->
+        <div id="preset-mount" class="preset-slot"></div>
+
         <!-- Voicing & Space Panels -->
         <div class="studio-panels-row">
           <div id="voicing-mount" class="panel-slot"></div>
@@ -220,6 +226,7 @@ export class AppShell {
     const voicingContainer = this.root.querySelector<HTMLElement>('#voicing-mount')!;
     this.voicingPanel = new VoicingPanel(voicingContainer, (st: VoicingState) => {
       this.ensureUnlocked();
+      this.presetBar?.setCustom();
       this.host.setVoicing(
         st.hammerHardness,
         st.unisonDetune,
@@ -232,7 +239,43 @@ export class AppShell {
     const spaceContainer = this.root.querySelector<HTMLElement>('#space-mount')!;
     this.spacePanel = new SpacePanel(spaceContainer, (persp: ListenerPerspective, lid: LidState) => {
       this.ensureUnlocked();
+      this.presetBar?.setCustom();
       this.host.setSpace(persp, lid);
+    });
+
+    // Parameter Preset Bar
+    const presetContainer = this.root.querySelector<HTMLElement>('#preset-mount')!;
+    this.presetBar = new PresetBar(presetContainer, {
+      onSelectPreset: (preset) => {
+        this.ensureUnlocked();
+        this.voicingPanel.setState(preset.voicing);
+        this.spacePanel.setSpace(preset.space.perspective, preset.space.lidState);
+        this.host.setVoicing(
+          preset.voicing.hammerHardness,
+          preset.voicing.unisonDetune,
+          preset.voicing.stretchTuning,
+          preset.voicing.stringLengthScale,
+        );
+        this.host.setSpace(preset.space.perspective, preset.space.lidState);
+      },
+    });
+
+    // Wire MIDI Player feedback callbacks for keyboard animation and seek progress
+    this.midiPlayer.setCallbacks({
+      onNotePress: (midiKey) => {
+        this.keyboardView?.setKeyActive(midiKey, true);
+      },
+      onNoteRelease: (midiKey) => {
+        this.keyboardView?.setKeyActive(midiKey, false);
+      },
+      onProgress: (currentSec, totalSec) => {
+        this.transportBar?.updateProgress(currentSec, totalSec);
+      },
+      onStateChange: (isPlaying) => {
+        if (!isPlaying) {
+          this.keyboardView?.clearActiveKeys();
+        }
+      },
     });
 
     // Transport Bar
