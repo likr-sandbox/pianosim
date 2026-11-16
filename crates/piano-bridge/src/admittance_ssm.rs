@@ -103,6 +103,7 @@ pub struct AdmittanceSsm {
     g_total: [[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
     solve_8x8: [[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
     solve_abr: [[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+    solve_phi: [[f64; NUM_BRIDGE_ZONES]; NUM_REDUCED_MODES],
 }
 
 impl AdmittanceSsm {
@@ -214,6 +215,7 @@ impl AdmittanceSsm {
             g_total: [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
             solve_8x8: ident,
             solve_abr: a_br,
+            solve_phi: phi,
         }
     }
 
@@ -258,6 +260,15 @@ impl AdmittanceSsm {
 
         let inv = invert_8x8(&sys);
         let solve_abr = matmul_8x8(&inv, &self.a_br);
+        for (dst_row, phi_row) in self.solve_phi.iter_mut().zip(self.phi.iter()) {
+            for (dst, inv_row) in dst_row.iter_mut().zip(inv.iter()) {
+                let mut sum = 0.0_f64;
+                for (&inv_ij, &phi_j) in inv_row.iter().zip(phi_row.iter()) {
+                    sum += inv_ij * phi_j;
+                }
+                *dst = sum;
+            }
+        }
         self.g_total = g_tot;
         self.solve_8x8 = inv;
         self.solve_abr = solve_abr;
@@ -330,6 +341,32 @@ impl AdmittanceSsm {
         (qd_free, v_free)
     }
 
+    /// Evaluates free modal midpoint velocities and pre-solved linear zone velocity
+    /// `v0_free = solve_8x8 * v_free` using precomputed `solve_phi = solve_8x8 * phi`.
+    #[must_use]
+    #[inline]
+    pub fn free_v0(&self) -> ([f64; NUM_REDUCED_MODES], [f64; NUM_BRIDGE_ZONES]) {
+        let mut qd_free = [0.0_f64; NUM_REDUCED_MODES];
+        let mut v0_free = [0.0_f64; NUM_BRIDGE_ZONES];
+        let inv_h = 1.0 / self.half_ts;
+        for (m, qdf_slot) in qd_free.iter_mut().enumerate() {
+            let rhs = (self.m_m[m] * inv_h) * self.q_dot[m] - self.k_m[m] * self.q[m];
+            let qdf = self.y_m[m] * rhs;
+            *qdf_slot = qdf;
+            for (vf, &sp_mz) in v0_free.iter_mut().zip(self.solve_phi[m].iter()) {
+                *vf += sp_mz * qdf;
+            }
+        }
+        (qd_free, v0_free)
+    }
+
+    /// Returns `true` when all modal displacements and velocities are zero.
+    #[must_use]
+    #[inline]
+    pub fn is_quiescent(&self) -> bool {
+        self.q.iter().all(|&v| v == 0.0) && self.q_dot.iter().all(|&v| v == 0.0)
+    }
+
     /// Commits one exact trapezoidal discrete integration step using `f_zone_ssm` (`[N]`).
     #[inline]
     pub fn commit_step(
@@ -339,10 +376,12 @@ impl AdmittanceSsm {
     ) {
         let mut diss = 0.0_f64;
         for (m, &qdf) in q_dot_free.iter().enumerate() {
-            let mut gen_force = 0.0_f64;
-            for (&phi_mz, &fz) in self.phi[m].iter().zip(f_zone_ssm.iter()) {
-                gen_force += phi_mz * fz;
-            }
+            let pm = &self.phi[m];
+            let p01 = pm[0] * f_zone_ssm[0] + pm[1] * f_zone_ssm[1];
+            let p23 = pm[2] * f_zone_ssm[2] + pm[3] * f_zone_ssm[3];
+            let p45 = pm[4] * f_zone_ssm[4] + pm[5] * f_zone_ssm[5];
+            let p67 = pm[6] * f_zone_ssm[6] + pm[7] * f_zone_ssm[7];
+            let gen_force = (p01 + p23) + (p45 + p67);
             let qd_mid = qdf + self.y_m[m] * gen_force;
             let qd_next = 2.0 * qd_mid - self.q_dot[m];
             let q_next = self.q[m] + self.ts * qd_mid;

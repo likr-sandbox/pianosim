@@ -44,6 +44,7 @@ pub struct DuplexBank {
     alpha_dup: f64,
     ts: f64,
     last_stereo: (f32, f32),
+    active: bool,
 }
 
 impl DuplexBank {
@@ -151,6 +152,7 @@ impl DuplexBank {
             alpha_dup,
             ts,
             last_stereo: (0.0, 0.0),
+            active: false,
         }
     }
 
@@ -159,6 +161,14 @@ impl DuplexBank {
         self.u = [F32x4::zero(); NUM_DUPLEX_VECS];
         self.v = [F32x4::zero(); NUM_DUPLEX_VECS];
         self.last_stereo = (0.0, 0.0);
+        self.active = false;
+    }
+
+    /// Returns `true` while all 64 duplex modes remain strictly unexcited at zero.
+    #[must_use]
+    #[inline]
+    pub const fn is_quiescent(&self) -> bool {
+        !self.active
     }
 
     /// Returns passive WDF port resistances on the 8 bridge zones (`0.0` on bass Zones 0..2).
@@ -173,9 +183,16 @@ impl DuplexBank {
     #[inline]
     pub fn free_forces(&self) -> [f64; NUM_BRIDGE_ZONES] {
         let mut f_free = [0.0_f64; NUM_BRIDGE_ZONES];
+        if !self.active {
+            return f_free;
+        }
+        let mut z_acc = [F32x4::zero(); 6];
         for (vec_idx, &z) in DUPLEX_VEC_ZONES.iter().enumerate() {
-            let sum = (self.v[vec_idx] * self.beta[vec_idx]).reduce_sum();
-            f_free[z] += self.alpha_dup * f64::from(sum);
+            let slot = z - TREBLE_DUPLEX_ZONE_START;
+            z_acc[slot] = self.v[vec_idx].mul_add(self.beta[vec_idx], z_acc[slot]);
+        }
+        for (slot, acc) in z_acc.iter().enumerate() {
+            f_free[TREBLE_DUPLEX_ZONE_START + slot] = self.alpha_dup * f64::from(acc.reduce_sum());
         }
         f_free
     }
@@ -189,11 +206,24 @@ impl DuplexBank {
         v_zone: &[f32; NUM_BRIDGE_ZONES],
         dup_zone_out: &mut [f32; NUM_BRIDGE_ZONES],
     ) -> (f32, f32) {
-        let mut zone_acc = [0.0_f32; NUM_BRIDGE_ZONES];
+        if !self.active
+            && v_zone[TREBLE_DUPLEX_ZONE_START..]
+                .iter()
+                .all(|&vz| vz == 0.0)
+        {
+            dup_zone_out.fill(0.0);
+            self.last_stereo = (0.0, 0.0);
+            return (0.0, 0.0);
+        }
+        self.active = true;
+        let mut v_br_z = [F32x4::zero(); 6];
+        for (slot, &vz) in v_zone[TREBLE_DUPLEX_ZONE_START..].iter().enumerate() {
+            v_br_z[slot] = F32x4::splat(if vz.is_finite() { vz } else { 0.0 });
+        }
+        let mut zone_vec_acc = [F32x4::zero(); 6];
         for (vec_idx, &z) in DUPLEX_VEC_ZONES.iter().enumerate() {
-            let vz = v_zone[z];
-            let v_br = F32x4::splat(if vz.is_finite() { vz } else { 0.0 });
-            let v_coupled = self.v[vec_idx] - self.beta[vec_idx] * v_br;
+            let slot = z - TREBLE_DUPLEX_ZONE_START;
+            let v_coupled = self.v[vec_idx] - self.beta[vec_idx] * v_br_z[slot];
 
             let u0 = self.u[vec_idx];
             let d0 = self.d[vec_idx];
@@ -205,19 +235,16 @@ impl DuplexBank {
             self.u[vec_idx] = un;
             self.v[vec_idx] = vn;
 
-            zone_acc[z] += (vn * self.c_audio[vec_idx]).reduce_sum();
+            zone_vec_acc[slot] = vn.mul_add(self.c_audio[vec_idx], zone_vec_acc[slot]);
         }
 
         dup_zone_out[..TREBLE_DUPLEX_ZONE_START].fill(0.0);
         let (mut out_l, mut out_r) = (0.0_f32, 0.0_f32);
-        for (z, (&acc, dst)) in zone_acc
-            .iter()
-            .zip(dup_zone_out.iter_mut())
-            .enumerate()
-            .skip(TREBLE_DUPLEX_ZONE_START)
-        {
+        for (slot, acc_v) in zone_vec_acc.iter().enumerate() {
+            let z = TREBLE_DUPLEX_ZONE_START + slot;
+            let acc = acc_v.reduce_sum();
             let safe_acc = if acc.is_finite() { acc } else { 0.0 };
-            *dst = safe_acc;
+            dup_zone_out[z] = safe_acc;
             let (pan_l, pan_r) = zone_stereo_pan(z);
             out_l += safe_acc * pan_l;
             out_r += safe_acc * pan_r;

@@ -17,7 +17,7 @@ pub use f32x4::F32x4;
 pub use fft_radix2::{Complex, Radix2Fft};
 pub use lut_adaa::{AdaaPowerLut, AdaaState, ADAA_DIFF_EPS};
 pub use real_fft::RealFft;
-pub use split_complex::{complex_fma_accumulate, SplitComplexBuf};
+pub use split_complex::{complex_fma_accumulate, complex_fma_accumulate_lr, SplitComplexBuf};
 
 #[cfg(test)]
 mod tests {

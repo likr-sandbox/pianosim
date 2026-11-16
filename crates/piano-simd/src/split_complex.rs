@@ -178,6 +178,19 @@ impl SplitComplexBuf {
         let (h_re, h_im) = h.padded_planes();
         complex_fma_accumulate(acc_re, acc_im, x_re, x_im, h_re, h_im);
     }
+
+    /// Accumulates both `acc_l += x * hl` and `acc_r += x * hr` sharing one load of `x`.
+    #[inline]
+    pub fn fma_accumulate_lr(acc_l: &mut Self, acc_r: &mut Self, x: &Self, hl: &Self, hr: &Self) {
+        let (al_re, al_im) = acc_l.padded_planes_mut();
+        let (ar_re, ar_im) = acc_r.padded_planes_mut();
+        let (x_re, x_im) = x.padded_planes();
+        let (hl_re, hl_im) = hl.padded_planes();
+        let (hr_re, hr_im) = hr.padded_planes();
+        complex_fma_accumulate_lr(
+            al_re, al_im, ar_re, ar_im, x_re, x_im, hl_re, hl_im, hr_re, hr_im,
+        );
+    }
 }
 
 /// Accumulates complex products `acc += x * h` over 4 frequency bins per `F32x4` step:
@@ -228,6 +241,72 @@ pub fn complex_fma_accumulate(
         let hi = h_im[i];
         acc_re[i] += xr * hr - xi * hi;
         acc_im[i] += xr * hi + xi * hr;
+        i += 1;
+    }
+}
+
+/// Accumulates stereo products `acc_l += x * hl` and `acc_r += x * hr` sharing one load of `x`.
+#[allow(clippy::too_many_arguments)]
+pub fn complex_fma_accumulate_lr(
+    al_re: &mut [f32],
+    al_im: &mut [f32],
+    ar_re: &mut [f32],
+    ar_im: &mut [f32],
+    x_re: &[f32],
+    x_im: &[f32],
+    hl_re: &[f32],
+    hl_im: &[f32],
+    hr_re: &[f32],
+    hr_im: &[f32],
+) {
+    let n = al_re
+        .len()
+        .min(al_im.len())
+        .min(ar_re.len())
+        .min(ar_im.len())
+        .min(x_re.len())
+        .min(x_im.len())
+        .min(hl_re.len())
+        .min(hl_im.len())
+        .min(hr_re.len())
+        .min(hr_im.len());
+    let simd_len = n & !3;
+    let mut i = 0;
+
+    while i < simd_len {
+        // SAFETY: `i + 4 <= simd_len <= n` for every slice; mutable accumulators cannot alias inputs.
+        unsafe {
+            let xr = F32x4::load_unaligned(x_re.as_ptr().add(i));
+            let xi = F32x4::load_unaligned(x_im.as_ptr().add(i));
+
+            let alr = F32x4::load_unaligned(al_re.as_ptr().add(i));
+            let ali = F32x4::load_unaligned(al_im.as_ptr().add(i));
+            let hlr = F32x4::load_unaligned(hl_re.as_ptr().add(i));
+            let hli = F32x4::load_unaligned(hl_im.as_ptr().add(i));
+            (alr + (xr * hlr - xi * hli)).store_unaligned(al_re.as_mut_ptr().add(i));
+            xr.mul_add(hli, xi.mul_add(hlr, ali))
+                .store_unaligned(al_im.as_mut_ptr().add(i));
+
+            let arr = F32x4::load_unaligned(ar_re.as_ptr().add(i));
+            let ari = F32x4::load_unaligned(ar_im.as_ptr().add(i));
+            let hrr = F32x4::load_unaligned(hr_re.as_ptr().add(i));
+            let hri = F32x4::load_unaligned(hr_im.as_ptr().add(i));
+            (arr + (xr * hrr - xi * hri)).store_unaligned(ar_re.as_mut_ptr().add(i));
+            xr.mul_add(hri, xi.mul_add(hrr, ari))
+                .store_unaligned(ar_im.as_mut_ptr().add(i));
+        }
+        i += 4;
+    }
+
+    while i < n {
+        let xr = x_re[i];
+        let xi = x_im[i];
+        let (hlr, hli) = (hl_re[i], hl_im[i]);
+        al_re[i] += xr * hlr - xi * hli;
+        al_im[i] += xr * hli + xi * hlr;
+        let (hrr, hri) = (hr_re[i], hr_im[i]);
+        ar_re[i] += xr * hrr - xi * hri;
+        ar_im[i] += xr * hri + xi * hrr;
         i += 1;
     }
 }

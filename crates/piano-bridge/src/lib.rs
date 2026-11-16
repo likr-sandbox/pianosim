@@ -50,13 +50,37 @@ fn mat8_vec(
 ) -> [f64; NUM_BRIDGE_ZONES] {
     let mut out = [0.0_f64; NUM_BRIDGE_ZONES];
     for (dst, row) in out.iter_mut().zip(m.iter()) {
-        let mut acc = 0.0_f64;
-        for (&m_ij, &v_j) in row.iter().zip(v.iter()) {
-            acc += m_ij * v_j;
-        }
-        *dst = acc;
+        let p01 = row[0] * v[0] + row[1] * v[1];
+        let p23 = row[2] * v[2] + row[3] * v[3];
+        let p45 = row[4] * v[4] + row[5] * v[5];
+        let p67 = row[6] * v[6] + row[7] * v[7];
+        *dst = (p01 + p23) + (p45 + p67);
     }
     out
+}
+
+#[inline]
+fn mat8_vec2(
+    m: &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+    v1: &[f64; NUM_BRIDGE_ZONES],
+    v2: &[f64; NUM_BRIDGE_ZONES],
+) -> ([f64; NUM_BRIDGE_ZONES], [f64; NUM_BRIDGE_ZONES]) {
+    let mut o1 = [0.0_f64; NUM_BRIDGE_ZONES];
+    let mut o2 = [0.0_f64; NUM_BRIDGE_ZONES];
+    for i in 0..NUM_BRIDGE_ZONES {
+        let row = &m[i];
+        let a01 = row[0] * v1[0] + row[1] * v1[1];
+        let a23 = row[2] * v1[2] + row[3] * v1[3];
+        let a45 = row[4] * v1[4] + row[5] * v1[5];
+        let a67 = row[6] * v1[6] + row[7] * v1[7];
+        o1[i] = (a01 + a23) + (a45 + a67);
+        let b01 = row[0] * v2[0] + row[1] * v2[1];
+        let b23 = row[2] * v2[2] + row[3] * v2[3];
+        let b45 = row[4] * v2[4] + row[5] * v2[5];
+        let b67 = row[6] * v2[6] + row[7] * v2[7];
+        o2[i] = (b01 + b23) + (b45 + b67);
+    }
+    (o1, o2)
 }
 
 /// Integrated Stage 3 bidirectional bridge bank coupling all 230 strings, 10 reduced
@@ -265,7 +289,7 @@ impl BridgeBank {
     /// Advances the Stage 3 bidirectional bridge junction by one audio sample and writes
     /// unpanned per-zone treble duplex contributions (`Zones 2..8`) into `dup_zone_out`
     /// (`Zones 0..2` strictly `0.0`) for Stage 4 convolution without stereo-pan bypass.
-    #[inline]
+    #[inline(never)]
     pub fn step_bridge_sample_with_duplex_zones(
         &mut self,
         a_waves: &[f32; TOTAL_STRINGS],
@@ -310,45 +334,77 @@ impl BridgeBank {
             f_inc_str[z1] += acc1;
         }
 
+        if run_a_finite[..n_runs].iter().all(|&ok| ok)
+            && f_inc_str.iter().all(|&f| f == 0.0)
+            && self.ssm.is_quiescent()
+            && self.duplex.is_quiescent()
+            && self.hertz.is_quiescent()
+        {
+            if a_waves.iter().all(|&a| a == 0.0) {
+                b_waves_out.fill(0.0);
+            } else {
+                for (dst, &a) in b_waves_out.iter_mut().zip(a_waves.iter()) {
+                    *dst = -a;
+                }
+            }
+            let y_inf = self.ssm.y_inf();
+            for z in 0..NUM_BRIDGE_ZONES {
+                let f_audio = if zone_str_audio[z].is_finite() {
+                    zone_str_audio[z]
+                } else {
+                    0.0
+                };
+                let out_v = y_inf[z] * f_audio;
+                zone_out[z] = if out_v.is_finite() { out_v } else { 0.0 };
+            }
+            dup_zone_out.fill(0.0);
+            return (0.0, 0.0);
+        }
+
         let f_dup_free = self.duplex.free_forces();
-        let (qd_free, v_free) = self.ssm.free_velocities();
+        let (qd_free, v0_free) = self.ssm.free_v0();
         let g = self.hertz.eval_sav_gradient();
-        let r_h = self.hertz.r_sav();
+        let g_nz = g.iter().any(|&gz| gz != 0.0);
 
         let mut f_inc_wdf = [0.0_f64; NUM_BRIDGE_ZONES];
-        let mut f_rhs_eff = [0.0_f64; NUM_BRIDGE_ZONES];
         for z in 0..NUM_BRIDGE_ZONES {
-            let f_wdf = f_inc_str[z] + f_dup_free[z];
-            f_inc_wdf[z] = f_wdf;
-            f_rhs_eff[z] = f_wdf - r_h * g[z];
+            f_inc_wdf[z] = f_inc_str[z] + f_dup_free[z];
         }
 
-        let a_f = mat8_vec(self.ssm.a_br(), &f_rhs_eff);
-        let mut rhs = [0.0_f64; NUM_BRIDGE_ZONES];
-        for i in 0..NUM_BRIDGE_ZONES {
-            rhs[i] = v_free[i] + a_f[i];
-        }
-        let v0 = mat8_vec(self.ssm.solve_8x8(), &rhs);
-        let s_g = mat8_vec(self.ssm.solve_abr(), &g);
-
-        let half_ts = 0.5 * self.ts;
-        let mut u_sm = [0.0_f64; NUM_BRIDGE_ZONES];
-        let (mut denom, mut g_dot_v0) = (1.0_f64, 0.0_f64);
-        for i in 0..NUM_BRIDGE_ZONES {
-            let ui = half_ts * s_g[i];
-            u_sm[i] = ui;
-            denom += g[i] * ui;
-            g_dot_v0 += g[i] * v0[i];
-        }
-        let alpha_sm = if denom > 1.0e-12 {
-            g_dot_v0 / denom
+        let v_zone_f64 = if g_nz {
+            let r_h = self.hertz.r_sav();
+            let (s_wdf, s_g) = mat8_vec2(self.ssm.solve_abr(), &f_inc_wdf, &g);
+            let mut v0 = [0.0_f64; NUM_BRIDGE_ZONES];
+            for i in 0..NUM_BRIDGE_ZONES {
+                v0[i] = v0_free[i] + s_wdf[i] - r_h * s_g[i];
+            }
+            let half_ts = 0.5 * self.ts;
+            let mut u_sm = [0.0_f64; NUM_BRIDGE_ZONES];
+            let (mut denom, mut g_dot_v0) = (1.0_f64, 0.0_f64);
+            for i in 0..NUM_BRIDGE_ZONES {
+                let ui = half_ts * s_g[i];
+                u_sm[i] = ui;
+                denom += g[i] * ui;
+                g_dot_v0 += g[i] * v0[i];
+            }
+            let alpha_sm = if denom > 1.0e-12 {
+                g_dot_v0 / denom
+            } else {
+                0.0
+            };
+            let mut out = [0.0_f64; NUM_BRIDGE_ZONES];
+            for i in 0..NUM_BRIDGE_ZONES {
+                out[i] = v0[i] - alpha_sm * u_sm[i];
+            }
+            out
         } else {
-            0.0
+            let s_wdf = mat8_vec(self.ssm.solve_abr(), &f_inc_wdf);
+            let mut out = [0.0_f64; NUM_BRIDGE_ZONES];
+            for i in 0..NUM_BRIDGE_ZONES {
+                out[i] = v0_free[i] + s_wdf[i];
+            }
+            out
         };
-        let mut v_zone_f64 = [0.0_f64; NUM_BRIDGE_ZONES];
-        for i in 0..NUM_BRIDGE_ZONES {
-            v_zone_f64[i] = v0[i] - alpha_sm * u_sm[i];
-        }
 
         let f_hertz_on_br = self.hertz.commit_step(&g, &v_zone_f64);
         let g_v = mat8_vec(self.ssm.g_total(), &v_zone_f64);

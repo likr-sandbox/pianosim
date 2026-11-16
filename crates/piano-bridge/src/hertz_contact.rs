@@ -85,6 +85,16 @@ impl HertzBridgeContact {
         self.r_sav = sqrt_f64(C_HERTZ_SAV);
     }
 
+    /// Returns `true` when zone compressions and prior velocities are identically zero.
+    #[must_use]
+    #[inline]
+    pub fn is_quiescent(&self) -> bool {
+        self.x[0].to_array() == [0.0; 4]
+            && self.x[1].to_array() == [0.0; 4]
+            && self.v_prev[0].to_array() == [0.0; 4]
+            && self.v_prev[1].to_array() == [0.0; 4]
+    }
+
     /// Evaluates the midpoint-predicted normalized SAV gradient vector `g = dV/dx / r_sav`
     /// using `F32x4` lane operations across all 8 zones.
     #[must_use]
