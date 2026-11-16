@@ -181,6 +181,11 @@ impl PianoEngine {
         (0..NUM_KEYS).any(|k| self.core.action.is_hammer_active(k))
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_duplex_gain(&mut self, gain: f32) {
+        self.core.bridge.set_duplex_gain(gain);
+    }
+
     /// Processes sample-accurate `events` and renders Stage 4 acoustic sound into `out_l`/`out_r`
     /// with zero heap allocations.
     pub fn render_block(&mut self, events: &[SampleEvent], out_l: &mut [f32], out_r: &mut [f32]) {

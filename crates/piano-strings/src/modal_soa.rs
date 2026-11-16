@@ -199,6 +199,20 @@ impl ModalSoa {
         map: &ChoirMap,
         lossless: bool,
     ) -> Self {
+        Self::build_with_mode(sample_rate, voicing, specs, map, lossless, false)
+    }
+
+    /// Allocates and initializes SoA mode tables choosing between standalone string damping and
+    /// intrinsic wire/air damping (`bridge_coupled = true`) when coupled to Stage 3 `BridgeBank`.
+    #[must_use]
+    pub(crate) fn build_with_mode(
+        sample_rate: f64,
+        voicing: &VoicingSpec,
+        specs: &[StringPhysicalParams; NUM_KEYS],
+        map: &ChoirMap,
+        lossless: bool,
+        bridge_coupled: bool,
+    ) -> Self {
         let len = map.total_padded_modes();
         let mut soa = Self {
             u: AlignedBuf::zeroed(len),
@@ -209,7 +223,15 @@ impl ModalSoa {
             b_exc: AlignedBuf::zeroed(len),
         };
         for entry in map.strings() {
-            populate_string_modes(&mut soa, entry, sample_rate, voicing, specs, lossless);
+            populate_string_modes_with_mode(
+                &mut soa,
+                entry,
+                sample_rate,
+                voicing,
+                specs,
+                lossless,
+                bridge_coupled,
+            );
         }
         soa
     }
@@ -242,12 +264,18 @@ struct PolParams {
     c_bridge: f32,
     exc_scale: f64,
     lossless: bool,
+    bridge_coupled: bool,
 }
 
 #[inline]
 pub(crate) fn t60_vert_fundamental(key_idx: usize) -> f64 {
     let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
     30.0 * exp_f64(-0.45 * x - 4.35 * x * x + 1.50 * x * x * x)
+}
+
+#[inline]
+fn t60_wire_fundamental(key_idx: usize) -> f64 {
+    t60_vert_fundamental(key_idx).max(1.85)
 }
 
 #[inline]
@@ -287,19 +315,25 @@ pub(crate) fn coupled_pole_f32(
     Some((d_f32, s_f32))
 }
 
-pub(crate) fn populate_string_modes(
+pub(crate) fn populate_string_modes_with_mode(
     soa: &mut ModalSoa,
     entry: &StringMapEntry,
     sample_rate: f64,
     voicing: &VoicingSpec,
     specs: &[StringPhysicalParams; NUM_KEYS],
     lossless: bool,
+    bridge_coupled: bool,
 ) {
     let k = entry.key_idx as usize;
     let s_choir = entry.string_in_choir as usize;
     let spec = specs[k];
     let b_inharm = spec.inharmonicity_b;
-    let t60_v_base = t60_vert_fundamental(k);
+    let t60_v_base = if bridge_coupled {
+        t60_wire_fundamental(k)
+    } else {
+        t60_vert_fundamental(k)
+    };
+    let h_mult = 2.8;
 
     let f0_vert = effective_string_f0_hz(k, s_choir, Polarization::Vertical, specs, voicing);
     let f0_horiz = effective_string_f0_hz(k, s_choir, Polarization::Horizontal, specs, voicing);
@@ -350,6 +384,7 @@ pub(crate) fn populate_string_modes(
             c_bridge: C_VERT,
             exc_scale: norm,
             lossless,
+            bridge_coupled,
         },
     );
     populate_transverse_pol(
@@ -363,10 +398,11 @@ pub(crate) fn populate_string_modes(
             b_inharm,
             sample_rate,
             t60_v_base,
-            hold_mult: 2.8,
+            hold_mult: h_mult,
             c_bridge: C_HORIZ,
             exc_scale: 0.85 * norm,
             lossless,
+            bridge_coupled,
         },
     );
 
@@ -395,6 +431,10 @@ fn populate_transverse_pol(soa: &mut ModalSoa, p: &PolParams) {
         let f_j = partial_frequency_hz(p.f0_hz, p.b_inharm, j);
         let t60_h = if p.lossless {
             f64::INFINITY
+        } else if p.bridge_coupled {
+            let f_norm = f_j / 20_000.0;
+            let loss_scale = 1.0 + 0.04 * ((j - 1) as f64) + 1.5 * f_norm * f_norm;
+            (p.t60_v_base / loss_scale).max(0.45) * p.hold_mult
         } else {
             let f_norm = f_j / 20_000.0;
             let loss_scale = 1.0 + 0.05 * ((j - 1) as f64) + 1.5 * f_norm * f_norm;
@@ -415,55 +455,5 @@ fn populate_transverse_pol(soa: &mut ModalSoa, p: &PolParams) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use piano_spec::build_scale_design;
-
-    #[test]
-    fn nostd_math_matches_std_and_poles_preserve_padding_invariants() {
-        for i in -32..=32 {
-            let a = f64::from(i) * 0.413_789_123;
-            let (s, c) = sin_cos_f64(a);
-            assert!((s - a.sin()).abs() < 1e-14 && (c - a.cos()).abs() < 1e-14);
-        }
-        for &y in &[-25.0_f64, -1.5, -1e-6, 0.0, 1.5, 10.0] {
-            assert!((exp_f64(y) - y.exp()).abs() <= 1e-13 * y.exp().max(1.0));
-        }
-        for &alpha in &[1.0e-7_f64, 2.4e-6, 5.0e-4, 2.0e-2] {
-            assert!((one_minus_exp_neg_f64(alpha) - (1.0 - (-alpha).exp())).abs() < 1e-15);
-        }
-
-        let voicing = VoicingSpec::default();
-        let specs = build_scale_design(&voicing);
-        let map = ChoirMap::build_with_specs(&specs, &voicing);
-        let soa = ModalSoa::build(96_000.0, &voicing, &specs, &map);
-        assert_eq!(soa.u.as_ptr() as usize % 64, 0);
-        assert_eq!(soa.d_coeff.as_ptr() as usize % 64, 0);
-
-        let a0 = &map.strings()[0];
-        for slot in (a0.vert_vecs.start * 4 + a0.vert_modes)..(a0.vert_vecs.end * 4) {
-            assert_eq!(
-                (
-                    soa.d_coeff[slot],
-                    soa.s_coeff[slot],
-                    soa.c_bridge[slot],
-                    soa.b_exc[slot]
-                ),
-                (1.0, 0.0, 0.0, 0.0)
-            );
-        }
-        assert!(soa.d_coeff[a0.vert_vecs.start * 4] > 0.0);
-        assert!(soa.d_coeff[a0.vert_vecs.start * 4] < 1.0e-3);
-        assert!(soa.s_coeff[a0.vert_vecs.start * 4] > 0.0);
-
-        for &sr in &[44_100.0_f64, 48_000.0, 96_000.0] {
-            for &freq in &[27.5_f64, 65.406, 130.813, 200.0, 261.626, 440.0] {
-                let (d, s) =
-                    coupled_pole_f32(freq, sr, f64::INFINITY).expect("valid lossless pole");
-                let err = ((1.0 - f64::from(d)).powi(2) + f64::from(s).powi(2) - 1.0).abs();
-                let limit = if freq <= 262.0 { 1.0e-10 } else { 5.0e-10 };
-                assert!(err <= limit, "sr={sr} freq={freq} err={err:e}");
-            }
-        }
-    }
-}
+#[path = "modal_soa_tests.rs"]
+mod tests;

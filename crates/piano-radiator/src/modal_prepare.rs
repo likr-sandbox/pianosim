@@ -76,7 +76,7 @@ pub(crate) fn prepare_modes_split(
         let mut z = 0;
         while z < PRESET_RADIATOR_ZONES {
             let baffle_eff = if z < 8 {
-                freq / sqrt_f64(freq * freq + 90.0 * 90.0)
+                freq / sqrt_f64(freq * freq + 15.0 * 15.0)
             } else {
                 1.0
             };

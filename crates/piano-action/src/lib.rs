@@ -149,7 +149,8 @@ impl ActionBank {
         if !self.memory_enabled {
             slot.felt_state.reset();
         }
-        slot.hammer.launch(velocity_from_u16(velocity_u16));
+        slot.hammer
+            .launch(velocity_from_u16(velocity_u16) * (1.0 - 0.16 * self.pedals.una_corda()));
     }
 
     /// Releases `key_idx`, initiating damper drop at a rate scaled by `release_vel_u16`.

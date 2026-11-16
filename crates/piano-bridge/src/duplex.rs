@@ -28,7 +28,7 @@ const ZONE_FREQ_BANDS_HZ: [(f64, f64); 6] = [
 ];
 
 const DUPLEX_TARGET_R_PER_ZONE: f64 = 0.018;
-const DUPLEX_AUDIO_GAIN: f32 = 0.025;
+const DUPLEX_AUDIO_GAIN: f32 = 0.30;
 
 /// 64-mode SIMD coupled-form ZOH duplex scale resonator bank (`Zones 2..7`).
 #[derive(Clone, Debug)]

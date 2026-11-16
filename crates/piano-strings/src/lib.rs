@@ -12,6 +12,7 @@ pub mod bridge_coupled;
 mod bridge_diag;
 pub(crate) mod bridge_kernels;
 pub(crate) mod bridge_port;
+mod bridge_prefix_step;
 pub(crate) mod bridge_sav;
 pub(crate) mod bridge_tails;
 mod bridge_zones;
@@ -61,10 +62,16 @@ pub struct StringBank {
     soa_dirty: bool,
     bp_dirty: bool,
     lossless: bool,
+    bridge_coupled: bool,
 }
 
 impl StringBank {
-    fn build_internal(sample_rate: f32, voicing: &VoicingSpec, lossless: bool) -> Self {
+    fn build_internal(
+        sample_rate: f32,
+        voicing: &VoicingSpec,
+        lossless: bool,
+        bridge_coupled: bool,
+    ) -> Self {
         let safe_rate = if sample_rate.is_finite() {
             sample_rate.clamp(8_000.0, 384_000.0)
         } else {
@@ -73,7 +80,8 @@ impl StringBank {
         let sr64 = f64::from(safe_rate);
         let specs = build_scale_design(voicing);
         let choir_map = ChoirMap::build_with_specs(&specs, voicing);
-        let soa = ModalSoa::build_with_lossless(sr64, voicing, &specs, &choir_map, lossless);
+        let soa =
+            ModalSoa::build_with_mode(sr64, voicing, &specs, &choir_map, lossless, bridge_coupled);
         let ports = ContactPorts::build(sr64, voicing, &specs, &choir_map);
         let bridge_ports = BridgePorts::build(sr64, voicing, &specs, &choir_map, &ports, &soa);
         let long_bank = LongitudinalBank::build(sr64, &specs, &choir_map, &ports.gamma_s);
@@ -99,20 +107,28 @@ impl StringBank {
             soa_dirty: false,
             bp_dirty: false,
             lossless,
+            bridge_coupled,
         }
     }
 
-    /// Allocates and precomputes permanent undamped SoA mode tables and physical SI
+    /// Allocates and precomputes permanent standalone SoA mode tables and physical SI
     /// dual-port projections for `sample_rate` and `voicing`.
     #[must_use]
     pub fn new(sample_rate: f32, voicing: &VoicingSpec) -> Self {
-        Self::build_internal(sample_rate, voicing, false)
+        Self::build_internal(sample_rate, voicing, false, false)
+    }
+
+    /// Allocates the string bank configured with intrinsic-only wire/air damping for
+    /// coupled Stage 3 `BridgeBank` radiation (eliminating standalone double damping).
+    #[must_use]
+    pub fn new_bridge_coupled(sample_rate: f32, voicing: &VoicingSpec) -> Self {
+        Self::build_internal(sample_rate, voicing, false, true)
     }
 
     /// Allocates a lossless (`r_hold = 1.0`) bank for SAV symplectic conservation checks.
     #[must_use]
     pub fn new_lossless(sample_rate: f32, voicing: &VoicingSpec) -> Self {
-        Self::build_internal(sample_rate, voicing, true)
+        Self::build_internal(sample_rate, voicing, true, false)
     }
 
     /// Enables or disables Stage 2 longitudinal coupling and Bank-Sujbert SAV phantom coupling.

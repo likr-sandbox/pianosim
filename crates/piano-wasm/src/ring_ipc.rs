@@ -112,24 +112,7 @@ impl WasmContext {
             &mut self.out_l.0[..n],
             &mut self.out_r.0[..n],
         );
-        const MASTER_OUTPUT_GAIN: f32 = 400.0;
-        for s in &mut self.out_l.0[..n] {
-            *s = (*s * MASTER_OUTPUT_GAIN).clamp(-1.0, 1.0);
-        }
-        for s in &mut self.out_r.0[..n] {
-            *s = (*s * MASTER_OUTPUT_GAIN).clamp(-1.0, 1.0);
-        }
-        let telem = self.engine.telemetry();
-        self.telemetry.0 = [
-            telem.active_voices as f32,
-            telem.peak_l * MASTER_OUTPUT_GAIN,
-            telem.peak_r * MASTER_OUTPUT_GAIN,
-            telem.rms_mono * MASTER_OUTPUT_GAIN,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ];
+        self.telemetry.0 = self.engine.telemetry().to_array();
         self.events.clear();
     }
 

@@ -256,3 +256,222 @@ fn band_mean_power(mag_sq: &[f64], sr: f64, fft_len: usize, f_lo: f64, f_hi: f64
     let sum: f64 = mag_sq[k0..=k1].iter().sum();
     sum / ((k1 - k0 + 1) as f64)
 }
+
+#[test]
+fn m7_stage4_88key_loudness_balance_zone8_ratio_duplex_and_c5_unacorda() {
+    let sr = 48_000.0;
+    let probe_keys: [(&str, u8); 10] = [
+        ("A0", 21),
+        ("C1", 24),
+        ("C2", 36),
+        ("C3", 48),
+        ("C4", 60),
+        ("A4", 69),
+        ("C5", 72),
+        ("C6", 84),
+        ("C7", 96),
+        ("C8", 108),
+    ];
+
+    let mut sustain_db_mf = Vec::with_capacity(probe_keys.len());
+    let s50 = (0.050 * 48_000.0) as usize;
+    let s300 = (0.300 * 48_000.0) as usize;
+    let s500 = (0.500 * 48_000.0) as usize;
+    for &(name, midi) in &probe_keys {
+        let mut engine = PianoEngine::new(sr);
+        let mut out_l = vec![0.0_f32; s500];
+        let mut out_r = vec![0.0_f32; s500];
+        let mut pos = 0;
+        while pos < s500 {
+            let n = (s500 - pos).min(128);
+            let ev_slice = if pos == 0 {
+                &[note_on(midi, u7_to_u16(72), 0)][..]
+            } else {
+                &[]
+            };
+            engine.render_block(ev_slice, &mut out_l[pos..pos + n], &mut out_r[pos..pos + n]);
+            pos += n;
+        }
+        let peak = out_l
+            .iter()
+            .chain(out_r.iter())
+            .fold(0.0_f32, |m, &x| m.max(x.abs()));
+        let mut sum_sq = 0.0_f64;
+        for i in s50..s300 {
+            let m = 0.5 * f64::from(out_l[i] + out_r[i]);
+            sum_sq += m * m;
+        }
+        let rms = (sum_sq / ((s300 - s50) as f64)).sqrt();
+        let db = 20.0 * rms.max(1e-12).log10();
+        let peak_db = 20.0 * f64::from(peak).max(1e-12).log10();
+        eprintln!(
+            "88-key mf {name} (midi={midi}): peak={peak_db:+.1} dBFS, sus[50..300ms]={db:+.1} dBFS"
+        );
+        assert!(peak < 0.99, "{name} mf unexpectedly clipped: peak={peak}");
+        sustain_db_mf.push(db);
+    }
+
+    let min_db = sustain_db_mf.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_db = sustain_db_mf
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let spread = max_db - min_db;
+    eprintln!(
+        "88-key mf sustained RMS range: [{min_db:+.1}, {max_db:+.1}] dBFS (spread {spread:.1} dB)"
+    );
+    assert!(
+        min_db > -58.0 && max_db < -10.0,
+        "88-key mf sustained level out of range: [{min_db:.1}, {max_db:.1}] dBFS"
+    );
+    assert!(
+        spread <= 20.0,
+        "88-key mf sustained spread {spread:.1} dB > 20 dB"
+    );
+
+    // Zone 8 keybed contribution at low velocity vs string sustained peak check (vel=1 has minimal string, vel=80 has clear string).
+    let mut eng_pp = PianoEngine::new(sr);
+    let mut l_pp = vec![0.0_f32; 2_048];
+    let mut r_pp = vec![0.0_f32; 2_048];
+    eng_pp.render_block(&[note_on(69, u7_to_u16(1), 0)], &mut l_pp, &mut r_pp);
+    let pp_peak = l_pp
+        .iter()
+        .chain(r_pp.iter())
+        .fold(0.0_f32, |m, &x| m.max(x.abs()));
+    let mut eng_mf = PianoEngine::new(sr);
+    let mut l_mf = vec![0.0_f32; s500];
+    let mut r_mf = vec![0.0_f32; s500];
+    let mut pos_mf = 0;
+    while pos_mf < s500 {
+        let n = (s500 - pos_mf).min(128);
+        let evs = if pos_mf == 0 {
+            &[note_on(69, u7_to_u16(80), 0)][..]
+        } else {
+            &[]
+        };
+        eng_mf.render_block(
+            evs,
+            &mut l_mf[pos_mf..pos_mf + n],
+            &mut r_mf[pos_mf..pos_mf + n],
+        );
+        pos_mf += n;
+    }
+    let a4_peak = l_mf[s50..s300]
+        .iter()
+        .chain(r_mf[s50..s300].iter())
+        .fold(0.0_f32, |m, &x| m.max(x.abs()));
+    let ratio_db = 20.0 * f64::from(pp_peak / a4_peak.max(1e-12)).log10();
+    eprintln!(
+        "Zone 8 vel=1 peak={pp_peak:.5} vs A4 mf[80..500] peak={a4_peak:.5} ({ratio_db:+.1} dB)"
+    );
+    assert!(
+        ratio_db <= -18.0,
+        "keybed thump at vel=1 too loud vs sustained A4: {ratio_db:+.1} dB"
+    );
+
+    // 12-note fff cluster must stay finite & bounded <= 1.0 without wraparound.
+    let mut eng_fff = PianoEngine::new(sr);
+    let chord: Vec<_> = [21_u8, 28, 36, 43, 48, 55, 60, 64, 67, 72, 79, 84]
+        .iter()
+        .enumerate()
+        .map(|(i, &k)| note_on(k, u16::MAX, (i * 8) as u32))
+        .collect();
+    let mut l_ch = vec![0.0_f32; 8_192];
+    let mut r_ch = vec![0.0_f32; 8_192];
+    eng_fff.render_block(&chord, &mut l_ch, &mut r_ch);
+    let fff_peak = l_ch.iter().chain(r_ch.iter()).fold(0.0_f32, |m, &x| {
+        assert!(x.is_finite());
+        m.max(x.abs())
+    });
+    assert!(
+        fff_peak > 0.1 && fff_peak <= 1.0,
+        "fff chord peak={fff_peak}"
+    );
+
+    // Stage 4 C5 (midi=72) Una Corda check at early [0..100ms] and sustained [150..350ms] & [200..370ms].
+    let measure_c5_stage4 = |uc_u16: u16| -> (f64, f64, f64, f64) {
+        let mut eng = PianoEngine::new(sr);
+        let evs = [
+            piano_spec::SampleEvent {
+                sample_offset: 0,
+                kind: piano_spec::EventKind::Pedal {
+                    kind: piano_spec::PedalKind::UnaCorda,
+                    value_u16: uc_u16,
+                },
+            },
+            note_on(72, u7_to_u16(96), 0),
+        ];
+        let total = 24_576_usize;
+        let mut ol = vec![0.0_f32; total];
+        let mut or = vec![0.0_f32; total];
+        let mut pos = 0;
+        while pos < total {
+            let n = (total - pos).min(128);
+            let s = if pos == 0 { &evs[..] } else { &[] };
+            eng.render_block(s, &mut ol[pos..pos + n], &mut or[pos..pos + n]);
+            pos += n;
+        }
+        let m_win = |s0: usize, len: usize| -> (f64, f64) {
+            let mono: Vec<f32> = (s0..s0 + len).map(|i| 0.5 * (ol[i] + or[i])).collect();
+            let rms_v =
+                (mono.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>() / (len as f64)).sqrt();
+            let cent = crate::m3_tests::spectral_centroid_hz(&mono, 48_000.0);
+            (rms_v, cent)
+        };
+        let (r0, c0) = m_win(0, 4_096);
+        let (r1, c1) = m_win(9_600, 8_192);
+        (r0, c0, r1, c1)
+    };
+    let (r0_n, c0_n, r1_n, c1_n) = measure_c5_stage4(0);
+    let (r0_u, c0_u, r1_u, c1_u) = measure_c5_stage4(u16::MAX);
+    eprintln!(
+        "Stage 4 C5 Una Corda 0..85ms: rms {r0_n:.5}->{r0_u:.5}, cent {c0_n:.1}->{c0_u:.1} Hz"
+    );
+    eprintln!(
+        "Stage 4 C5 Una Corda 200..370ms: rms {r1_n:.5}->{r1_u:.5}, cent {c1_n:.1}->{c1_u:.1} Hz"
+    );
+    let (rms_norm, cent_norm, rms_uc, cent_uc) = (r1_n, c1_n, r1_u, c1_u);
+    assert!(
+        rms_uc < rms_norm && cent_uc < cent_norm,
+        "Stage 4 C5 Una Corda 200..370ms failed: rms {rms_norm:.5}->{rms_uc:.5}, cent {cent_norm:.1}->{cent_uc:.1}"
+    );
+    assert!(
+        r0_u < r0_n && c0_u < c0_n,
+        "Stage 4 C5 Una Corda 0..85ms failed: rms {r0_n:.5}->{r0_u:.5}, cent {c0_n:.1}->{c0_u:.1}"
+    );
+
+    // DuplexBank Stage 4 acoustic contribution on treble C6 (midi=84) must be finite and non-zero.
+    let render_c6 = |duplex_gain: f32| -> Vec<f32> {
+        let mut eng = PianoEngine::new(sr);
+        eng.set_duplex_gain(duplex_gain);
+        let n = 8_192_usize;
+        let mut ol = vec![0.0_f32; n];
+        let mut or = vec![0.0_f32; n];
+        let mut pos = 0;
+        while pos < n {
+            let chunk = (n - pos).min(128);
+            let evs = if pos == 0 {
+                &[note_on(84, u7_to_u16(100), 0)][..]
+            } else {
+                &[]
+            };
+            eng.render_block(evs, &mut ol[pos..pos + chunk], &mut or[pos..pos + chunk]);
+            pos += chunk;
+        }
+        (0..n).map(|i| 0.5 * (ol[i] + or[i])).collect()
+    };
+    let c6_with_dup = render_c6(1.0);
+    let c6_no_dup = render_c6(0.0);
+    let dup_diff_rms = (c6_with_dup
+        .iter()
+        .zip(c6_no_dup.iter())
+        .map(|(&a, &b)| f64::from(a - b).powi(2))
+        .sum::<f64>()
+        / (c6_with_dup.len() as f64))
+        .sqrt();
+    eprintln!("Stage 4 DuplexBank C6 diff_rms={dup_diff_rms:.6e}");
+    assert!(
+        dup_diff_rms > 2.0e-5,
+        "DuplexBank had negligible Stage 4 effect: {dup_diff_rms:e}"
+    );
+}

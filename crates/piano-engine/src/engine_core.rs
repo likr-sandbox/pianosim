@@ -14,6 +14,12 @@ use crate::param_smooth::{apply_raised_cosine_crossfade, SpaceCrossfadeGuard};
 const KEY_SILENCE_RMS_THRESHOLD: f32 = 2.5e-4;
 const DAMPER_ACTIVE_HOLD_CLEARANCE_M: f32 = 0.5e-3;
 const RENDER_CHUNK: usize = 128;
+/// SI radiation sensitivity converting Stage 3 bridge velocity `[m/s]` (`Zones 0..7`)
+/// to Stage 4 calibrated acoustic drive (`~320 Pa/(m/s)` air impedance * effective area).
+const BRIDGE_ZONE_RAD_GAIN: f32 = 350.0;
+/// Structural rim admittance converting Stage 1 keybed rail force `[N]` (`Zone 8`)
+/// to Stage 4 acoustic drive so keybed thump blends realistically below sustained tones.
+const KEYBED_ZONE_ADMITTANCE_GAIN: f32 = 0.025;
 
 #[derive(Clone)]
 pub(crate) struct EngineScratch {
@@ -81,7 +87,7 @@ pub(crate) struct EngineCore {
 impl EngineCore {
     pub fn new(sample_rate: f32, voicing: &VoicingSpec) -> Self {
         let action = ActionBank::new(sample_rate, voicing);
-        let bank = StringBank::new(sample_rate, voicing);
+        let bank = StringBank::new_bridge_coupled(sample_rate, voicing);
         let mut bridge = BridgeBank::new(bank.sample_rate());
         bridge.set_port_resistances(bank.bridge_port_resistances());
         let rad0 = RadiatorBank::new_concert_grand(f64::from(sample_rate));
@@ -188,9 +194,19 @@ impl EngineCore {
             ev_cursor = action_drv.ev_cursor;
 
             for i in 0..chunk_len {
-                let kb_force = self.action.step_keybed_force_sample();
+                let kb_force = self.action.step_keybed_force_sample() * KEYBED_ZONE_ADMITTANCE_GAIN;
                 let z = self.scratch.zone8[i];
-                self.scratch.zone9[i] = [z[0], z[1], z[2], z[3], z[4], z[5], z[6], z[7], kb_force];
+                self.scratch.zone9[i] = [
+                    z[0] * BRIDGE_ZONE_RAD_GAIN,
+                    z[1] * BRIDGE_ZONE_RAD_GAIN,
+                    z[2] * BRIDGE_ZONE_RAD_GAIN,
+                    z[3] * BRIDGE_ZONE_RAD_GAIN,
+                    z[4] * BRIDGE_ZONE_RAD_GAIN,
+                    z[5] * BRIDGE_ZONE_RAD_GAIN,
+                    z[6] * BRIDGE_ZONE_RAD_GAIN,
+                    z[7] * BRIDGE_ZONE_RAD_GAIN,
+                    kb_force,
+                ];
             }
 
             let active_idx = space_guard.active_radiator_idx();

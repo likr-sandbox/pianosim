@@ -37,6 +37,20 @@ pub trait BridgePortDriver {
         b_waves_out: &mut [f32; TOTAL_STRINGS],
         zone_out: &mut [f32; 8],
     ) -> (f32, f32);
+
+    /// Advances bridge admittance, 8-zone velocity projection, and per-zone duplex bank (`Zones 2..7`).
+    #[inline]
+    fn step_bridge_sample_with_duplex_zones(
+        &mut self,
+        a_waves: &[f32; TOTAL_STRINGS],
+        zone_str_audio: &[f32; 8],
+        b_waves_out: &mut [f32; TOTAL_STRINGS],
+        zone_out: &mut [f32; 8],
+        dup_zone_out: &mut [f32; 8],
+    ) -> (f32, f32) {
+        dup_zone_out.fill(0.0);
+        self.step_bridge_sample(a_waves, zone_str_audio, b_waves_out, zone_out)
+    }
 }
 
 /// 32-byte L1d-packed coupled-form modal state `(u, v)` for one 4-mode prefix vector.

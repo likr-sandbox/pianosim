@@ -138,6 +138,13 @@ impl BridgeBank {
             .set_port_resistances(&self.r0, &self.zone_weights, self.duplex.port_resistances());
     }
 
+    /// Reconfigures treble duplex scale coupling gain (`0.0` = disabled) and refreshes `8x8` WDF matrices.
+    pub fn set_duplex_gain(&mut self, duplex_gain: f32) {
+        self.duplex = DuplexBank::new_with_params(self.sample_rate, duplex_gain, false);
+        self.ssm
+            .set_port_resistances(&self.r0, &self.zone_weights, self.duplex.port_resistances());
+    }
+
     /// Resets dynamic bridge, Hertz contact, and duplex states to rest equilibrium.
     pub fn reset(&mut self) {
         self.ssm.reset();

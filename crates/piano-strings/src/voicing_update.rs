@@ -14,7 +14,7 @@ use crate::bridge_port::{
 use crate::choir_map::StringMapEntry;
 use crate::contact_ports::populate_string_ports;
 use crate::modal_soa::{
-    populate_string_modes, sqrt_f64, ModalSoa, C_HORIZ, C_VERT, NYQUIST_CUTOFF_RATIO,
+    populate_string_modes_with_mode, sqrt_f64, ModalSoa, C_HORIZ, C_VERT, NYQUIST_CUTOFF_RATIO,
 };
 use crate::sav_spec::SavStringSpec;
 use crate::StringBank;
@@ -239,7 +239,15 @@ impl StringBank {
                 let entry = &strings[s_idx];
                 let gamma_old = self.ports.gamma_s[s_idx];
 
-                populate_string_modes(&mut self.soa, entry, sr64, voicing, &specs, self.lossless);
+                populate_string_modes_with_mode(
+                    &mut self.soa,
+                    entry,
+                    sr64,
+                    voicing,
+                    &specs,
+                    self.lossless,
+                    self.bridge_coupled,
+                );
                 populate_string_ports(&mut self.ports, s_idx, entry, sr64, voicing, &specs);
 
                 let gamma_new = self.ports.gamma_s[s_idx];

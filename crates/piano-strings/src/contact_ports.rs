@@ -141,9 +141,7 @@ pub(crate) fn strike_phi(key_idx: usize, partial_index: usize) -> f64 {
     let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
     let beta = 0.137 - 0.042 * x;
     let s = sin_cos_f64((partial_index as f64) * PI * beta).0;
-    let x_tr = (x - (48.0 / 87.0)).max(0.0);
-    let slope = 0.25 + 4.40 * x + 240.0 * x_tr / (1.0 + 10.0 * x_tr);
-    s / (1.0 + slope * ((partial_index - 1) as f64))
+    s / (1.0 + (0.25 + 4.40 * x) * ((partial_index - 1) as f64))
 }
 
 #[inline]
