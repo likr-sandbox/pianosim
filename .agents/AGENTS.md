@@ -11,7 +11,7 @@
 ## 2. 絶対遵守の実装・設計不変条件
 1. **1ファイル500行上限**: すべてのソースコード（`.rs`, `.ts`, `.js`, `.css`）および設計文書は **500行以下**（目標120〜350行）とする。肥大化の兆候が見えた段階で責務ごとにモジュール分割する（CIの `piano-cli check-lines` で強制）。
 2. **リアルタイムDSP制約**: `Engine::init(sample_rate)` 以降のオーディオスレッド処理（`render_block` / `AudioWorklet::process`）内では**ヒープ確保ゼロ・ロック取得ゼロ・システムコールゼロ・パニック禁止**を厳守する。
-3. **Web実行アーキテクチャ**: 単一スレッド `AudioWorkletGlobalScope` + `wasm32-unknown-unknown`（`+simd128` / `f32x4`）で実行し、静的ホスト互換性（`COOP/COEP` 不要）を維持する。品質ティアや休止弦スリープ間引きは入れず、全88鍵・230本・約2.6万モードを毎サンプル常時SIMD駆動する（性能限界検知時は `docs/DECISIONS_AND_FALLBACKS.md` §D1 を参照）。
+3. **Web実行アーキテクチャ & Stage 2駆動方針**: `COOP/COEP` 不要で静的ホスト互換を維持しつつ、オーディオ演算は単一スレッド `AudioWorkletGlobalScope` + `wasm32-unknown-unknown`（標準 `+simd128` 単一バイナリ、`+relaxed-simd` / `fmaf` 不使用・`0 imports`）、重い事前計算（`set_space` IR/FFT・調律変更）は専用 **Prep Web Worker + `Transferable ArrayBuffer`** へ分離する（`hammer_hardness` 単体は Voicing Dirty Mask で即時反映）。Web `AudioContext` は **`48 kHz` 固定**（`96 kHz` はオフラインCLI検証専用）。品質ティア分割は入れず全88鍵・230本・約2.6万モードの物理定義を維持しつつ、ビット完全一致ゼロスキップ、物理エネルギー地平線縮退（`-115〜-120 dB`、FTO #4/#7準拠）、サステイン踏下中の減衰済み鍵の受動共鳴降格、および融合SAV（`-55 dB` 平滑休眠）を適用する。
 4. **純Rust自己完結**: 弦・ハンマー定数および構造音響ボディモード／IRはすべて `piano-body-gen` 等のRustオフライン物理シミュレーションで生成する（Python/JAX・録音波形は使用しない）。
 5. **知財クリーンルーム（FTO）7原則**:
    - `OpenPiano` 等の **AGPL-3.0 コード参照・流用禁止**（パーミッシブライセンス依存のみ）。
@@ -32,8 +32,8 @@
 - **Rustツールチェーン & CI固定**: ローカル `rustc` (`1.97.1`), `cargo`, `wasm32-unknown-unknown` は `$HOME/.cargo/bin` にあり、実行時は必ず `export PATH="$HOME/.cargo/bin:$PATH"` を先頭に付ける。GitHub Actions（`.github/workflows/{ci,deploy}.yml`）は `@stable` のドリフトを防ぐため `dtolnay/rust-toolchain@master` + `toolchain: "1.97.1"` で固定する（`@1.97.1` タグは不可、ローカル `rust-toolchain.toml` は不使用）。
 - **`rustfmt` 1.97.1 と行数検査**: 10段超の深いネストの右結合Horner多項式式は `rustfmt` がCPU 100%でハングするため `const` 配列ループ（`eval_horner` 等）で評価する。また `cargo fmt` の自動折り返しで行数が増えるため、`piano-cli check-lines` は必ず `cargo fmt` 後に実行する。
 - **ポート `127.0.0.1:5173` 回避 & `share` Worktree Web準備**: 未バインドLoopback TCP SYNが約130秒ハングするため、`apps/web/playwright.config.ts` では `PIANOSIM_PORT`（例: `5188`, `--strictPort`）と `webServer.wait: { stdout: /Local:\\s+http/ }` を併用する（E2E約4.4s完走、Chromiumは `--autoplay-policy=no-user-gesture-required --no-sandbox`）。`workspace:share` worktree には `node_modules/` が無いため、Webビルド/E2E前に `npm ci --prefer-offline` を実行する。
-- **`AudioWorkletGlobalScope` + Wasm 境界**: インポート0個の素の `wasm32-unknown-unknown` C-ABI `.wasm`（`WebAssembly.instantiate(bytes, {})`）と Vite `transformWithEsbuild`（`?worklet` Blob URL）で、`window` / `TextDecoder` / `/@vite/env` クラッシュを回避し `dev`・`preview`・`/pianosim/` で同一動作させる。
-- **CI静的・バイナリ検査ゲート**: `.github/workflows/ci.yml` で `cargo fmt --check`、`piano-cli check-lines`、`cargo clippy --workspace -- -D warnings`、`cargo clippy --package piano-wasm --target wasm32-unknown-unknown -- -D warnings`、`cargo test --workspace`、`npm run build`、`piano-cli check-wasm-simd apps/web/public/piano_wasm.wasm`、`npm run test:e2e` を必須実行する。
+- **`AudioWorkletGlobalScope` + Prep Worker + Wasm 境界**: インポート0個の標準 `+simd128` 単一 `.wasm`（`+relaxed-simd` / `extended-const` / `fmaf` 禁止、`WebAssembly.compileStreaming` 共有）を用い、Prep Web Worker + `Transferable ArrayBuffer` で空間/調律事前計算をオフスレッド化する。Vite `transformWithEsbuild` で `dev`・`preview`・`/pianosim/` を同一動作させる。Web版 `AudioContext` は `48 kHz` 固定。
+- **CI静的・バイナリ検査ゲート**: `.github/workflows/ci.yml` で `cargo fmt --check`、`piano-cli check-lines`、`cargo clippy --workspace -- -D warnings`、`cargo clippy --package piano-wasm --target wasm32-unknown-unknown -- -D warnings`、`cargo test --workspace`、`npm run build`、`piano-cli check-wasm-simd apps/web/public/piano_wasm.wasm`（`0 imports` / `+simd128` 有 / `relaxed-simd` 無）、`npm run test:e2e` を必須実行する。
 - **GitHub CLIとPages公開**: `gh` コマンドは未インストール。リモート `origin = git@github.com:likr-sandbox/pianosim.git`、GitHub Pages（`https://likr-sandbox.github.io/pianosim/`、`base: /pianosim/`）は GitHub Actions 公開が有効。確認は `curl`・GitHub API・公開URLへのHeadless Playwrightで行う。
 
 ## 5. 音響DSP・検証上の知見（蓄積ログ）

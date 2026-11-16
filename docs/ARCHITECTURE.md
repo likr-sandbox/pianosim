@@ -12,9 +12,11 @@
 3. **Web / ネイティブ共通のゼロアロケーション・コア**
    - コアDSPクレート群は初期化（`Engine::init(sample_rate)`）以降のオーディオコールバック内で**ヒープ確保ゼロ・ロック取得ゼロ・システムコールゼロ**を厳守する。
    - サンプル正確（sample-accurate）なイベント分割とMIDI 2.0高分解能（16ビットベロシティ・連続ペダル開度 `0.0..=1.0`）を標準入力境界とし、将来のDAWプラグイン（VST3 / CLAP等）およびネイティブ単体再生（`cpal`）へ直結可能なAPIを提供する。当面の実動作ターゲットは **Webアプリケーション** および開発・音響検証・ベンチマーク用の **ネイティブCLI（`piano-cli`）** とする。
-4. **Webリアルタイム実行モデル（プロファイル切替なし・常時フル駆動）**
-   - GitHub Pages等の静的ホスティングでも `COOP/COEP` ヘッダなしでそのまま動作する **単一スレッド `AudioWorkletGlobalScope` + `wasm32-unknown-unknown`（`+simd128` / `f32x4`）** を採用する。
-   - ハイエンドPCをターゲットとし、品質ティア切替や休止弦のスリープ間引きは行わず、**全88鍵・230本・約2.6万モードを毎サンプル常時SIMD駆動**する。
+4. **Webリアルタイム実行モデル（単一`+simd128`バイナリ・Prep Worker分離・48 kHz固定）**
+   - GitHub Pages等の静的ホスティングでも `COOP/COEP` ヘッダなしでそのまま動作する **単一スレッド `AudioWorkletGlobalScope` + `wasm32-unknown-unknown`（標準 `+simd128` / `f32x4`、`+relaxed-simd` 不使用・`0 imports`）** を採用し、単一 `.wasm` バイナリで Chrome / Edge / Firefox / Safari 16.4+ すべてに対応する（`fmaf` リブコール罠を回避し、非FMA命令対で高速実行する）。
+   - Web版 `AudioContext` は **`48 kHz` 固定**（`sampleRate: 48000`、`128` サンプル量子）で生成し、88.2 / 96 kHz ハードウェア環境へのリサンプリングはOS／ブラウザのリサンプラへ委ねる。`96 kHz` ネイティブ駆動はオフライン検証 CLI（`piano-cli`）および単体テスト専用とする。
+   - **品質ティア切替は行わず全88鍵・230本・約2.6万モードの物理定義を維持**した上で、オーディオコア内では ① ビット完全一致の非励振ゼロスキップ、② 純粋な物理エネルギー地平線（`-115〜-120 dB`）による有効モード範囲縮退（FTO #4/#7準拠）、③ サステイン踏下中の減衰済み鍵の受動共鳴（SAV・打弦解放／共通ブリッジ維持）への降格、④ SAVループ融合＋`-55 dB` 平滑休眠を実施する。
+   - `set_space` の空間IR／事前FFT合成および調律・弦長変更時の重い再計算は **専用 Prep Web Worker + `Transferable ArrayBuffer` ゼロコピー転送** で非同期実行し、`hammer_hardness` 単体変更は Voicing Dirty Mask で Worklet 内即時反映することで、オーディオスレッド停止 `0 ms` を保証する。
 5. **1ファイル500行上限ルール**
    - 全ソースコード（`.rs`, `.ts`, `.js`, `.css`）および設計文書において **1ファイル最大500行以下**（設計目標150〜350行）を絶対規約とし、CI上の検査コマンド（`piano-cli check-lines`）で機械的に検証する。
 6. **フォールバック余地と開発ガバナンス**
@@ -44,17 +46,18 @@
   88鍵弦スケーリング則 + 異方性響板/リブ/リム/空気室/鉄骨FEM・固有値ソルバ
   ──▶ 縮約ブリッジモード(5〜12極) + 極除去済み放射構造モード群(数百KBバイナリ)
                                 │
-[第1層B: 初期化・空間変更時 (crates/piano-radiator::ir_synth)]
-  実AudioContextレート(44.1/48/96kHz) + 聴取視点 + 大屋根開度
-  ──▶ 9ゾーン×ステレオ(18経路) 0.5秒IR動的合成(数十ms)
+[第1層B: 初期化・空間変更時 (crates/piano-radiator::ir_synth / Prep Web Worker)]
+  Web: 48kHz固定(CLIは任意レート) + 聴取視点 + 大屋根開度 + Voicing調律変更
+  ──▶ 9ゾーン×ステレオ(18経路) 0.5秒IR＆NUPOLS事前FFT合成
+  ──▶ Prep Web Worker から Transferable ArrayBuffer でゼロコピー転送 → 8msクロスフェード
                                 │
                                 ▼
-[第2層: リアルタイムDSPコア (Zero Heap Alloc / No Locks)]
+[第2層: リアルタイムDSPコア (Zero Heap Alloc / No Locks / AudioWorklet 48kHz)]
   MIDI 1.0/2.0イベント(サンプル正確・16bitベロシティ・連続ペダル)
    ├──▶ Stage 1 (piano-action): 接触中のみ8倍(384kHz) Timoshenkoシャンク + Stulov + K-method/ADAA + 片側ダンパー
-   ├──▶ Stage 2 (piano-strings): ホスト駆動(48kHz) 230本2偏波+縦自由(~2.6万モード) ZOH + ドリフト制御SAV + ファントム倍音
+   ├──▶ Stage 2 (piano-strings): 230本2偏波+縦自由(~2.6万モード物理定義) ZOH + ゼロスキップ/エネルギー地平線縮退 + 融合SAV
    ├──▶ Stage 3 (piano-bridge): 5〜12モード縮約ブリッジ双方向連成 + Hertz剛性 + デュープレックス弦 + 3ペダル創発
-   └──▶ Stage 4 (piano-radiator): 8ブリッジゾーン+1棚板ゾーン 64tap直接SIMD FIR(遅延0) + NUPOLS FFT畳み込み ─▶ Stereo Out
+   └──▶ Stage 4 (piano-radiator): SI音圧校正済み9ゾーンNUPOLS(遅延0) + 統一リミッタ ─▶ Stereo Out
 ```
 
 ---
@@ -71,9 +74,9 @@
    - Miranda Valienteら（JASA 2024）の知見に基づき、ブリッジ駆動点モビリティから弦減衰・エネルギー還流を支配する低域主要モード **5〜12個** をStage 3の双方向結合用「縮約ブリッジアドミタンス」として抽出する。
    - Stage 4の空間放射モデル用の構造モード留数からは、この抽出済み5〜12極の寄与を逆フィルタリング（極除去：pole cancellation）で差し引いて同梱する。これにより、Stage 3（双方向結合）とStage 4（単方向畳み込み）を直列接続した際の二重共振ピークを完全に防止する。
 
-### 4.2 初期化時サンプルレート適応IR合成（`piano-radiator::ir_synth`）
-- Web Audioの `AudioContext.sampleRate`（44.1 / 48 / 96 kHz等の任意実レート）、ユーザー選択の**聴取視点プリセット**（`Player`, `CloseStereo`, `ConcertHall`, `BinauralHRTF`）、および**大屋根開度**（`Open`, `Half`, `Closed` および連続補間）に応じて、同梱の極・留数データからその場で **8ブリッジゾーン＋1棚板ゾーン（計9ゾーン×L/R＝18経路、0.5秒相当＝48 kHz時24,000タップ）** のIR波形を数十msで動的合成する。
-- これにより、大規模な事前レンダリングWAV群（数十MB）を配信することなく、Pianoteq並みの極小バンドル容量とホストサンプルレートへの厳密追従を両立する。
+### 4.2 初期化時サンプルレート適応IR合成と非同期転送（`piano-radiator::ir_synth`）
+- Web UI は `AudioContext({ sampleRate: 48000 })` を基準とし、CLI・ネイティブ試験は任意サンプルレート（44.1 / 48 / 96 kHz）で動作する。聴取視点プリセット（`Player`, `CloseStereo`, `ConcertHall`, `BinauralHRTF`）および大屋根開度（`Open`, `Half`, `Closed`）に応じて、同梱の極・留数データから **8ブリッジゾーン＋1棚板ゾーン（18経路、0.5秒IR）** を動的合成する。
+- Web実行時は同一の `piano_wasm.wasm` をロードした **専用 Prep Web Worker** で IR波形および NUPOLS 事前FFTスペクトル（および必要に応じ調律・弦スケールテーブル）を計算し、`Transferable ArrayBuffer` として `AudioWorklet` へゼロコピー転送する。`AudioWorklet` 側ではスタンバイバッファへコピー設置して8 ms二乗余弦クロスフェードを起動するのみで、オーディオコールバック内で数十msの合成スパイクを一切発生させない。
 
 ---
 
@@ -89,9 +92,10 @@
 - **片側ヒステリシス接触ダンパー**: 鍵のリリース変位、連続サステインペダル開度、およびソステヌート保持状態から算出される幾何学的クリアランスを境界入力とする片側接触要素として定義する。これによりハーフペダルおよびリペダリング時の高次倍音選択減衰を物理的に創発させる。
 
 ### 5.2 Stage 2：全弦2偏波モード＋ドリフト制御SAV非線形弦バンク（`crates/piano-strings`）
-- **SoA（Structure of Arrays）メモリ配置とキャッシュ常駐**:
-  - 230本×垂直・水平2偏波の20 kHz以下全可聴横モード（約23,514モード）および低〜中音域の縦自由モード（約1,670モード）の計 **約25,200〜26,200モード** を、64バイト境界整列（`#[repr(align(64))]`）された連続平面配列として保持する。
-  - 各モードの状態変数 $(q_m[k], q_m[k-1])$ と係数 $(a_{1,m}, a_{2,m}, b_m, c_{\text{vert},m}, c_{\text{horiz},m})$ を64B整列SoAに収めることで、総作業メモリを約490 KB（L2キャッシュ内）に抑え、分岐なしFMA演算で一括更新する。
+- **SoA（Structure of Arrays）メモリ配置と物理エネルギー駆動縮退**:
+  - 230本×垂直・水平2偏波の20 kHz以下全可聴横モード（約23,514モード）および低〜中音域の縦自由モード（約1,670モード）の計 **約25,200〜26,200モード** の物理定義を、64バイト境界整列（`#[repr(align(64))]`）された連続平面配列として保持する。
+  - **ビット完全一致のゼロスキップ＋物理エネルギー地平線**: 状態・励振が完全にゼロの弦／テールをスキップ（ビット完全一致）し、さらに各弦の物理エネルギー包絡に基づき `-115〜-120 dB` 以下の減衰済み高次モード範囲を動的に縮退させる（倍音関係の条件分岐は一切用いないため FTO #4/#7 準拠）。
+  - **サステイン踏下時の受動共鳴降格と融合SAV**: サステインペダル踏下中でも自弦のエネルギーが減衰しハンマー接触が終了した鍵は Active/SAV 状態から受動共鳴状態へ降格し、共通ブリッジ連成のみを継続する。さらに SAV 更新はループ融合と `-55 dB`（$E_{nl}/E_{lin}$）の平滑休眠を組み合わせ、ピッチドリフトなしでSIMDレジスタスピルを抑える。
 - **ZOH（ゼロ次ホールド）／インパルス不変2次モード更新式**:
   $$q_m[k+1] = 2 r_m \cos(\Omega_m T_s)\, q_m[k] - r_m^2\, q_m[k-1] + b_m f[k]$$
   周波数プリワーピング不要でナイキスト周波数まで数値的ピッチ分散誤差を完全にゼロに保つ。
@@ -108,12 +112,12 @@
   3. **ウナ・コルダ（左ペダル）**: 連続左ペダル値に応じてハンマー打撃軸が横シフトし、トリコード3本のうち2本（複弦は1本）のみを打撃する。打たれなかった残余弦はブリッジ経由でエネルギーを吸収・再放出し、柔らかい音色と特有の二段階減衰を生む。
   4. **ソステヌート（中央ペダル）**: 踏み込み瞬間にダンパーが開放状態にあった鍵のクリアランスのみを機械ラッチで保持する。
 
-### 5.4 Stage 4：ゼロ追加遅延マルチゾーン分割畳み込み放射＆ボイシング（`crates/piano-radiator`）
-- **空間射影と棚板衝撃ゾーン**: ブリッジを音域・位置に沿った8ゾーンへ分割し、各弦の位置重みで駆動力を射影する。さらに鍵盤の底突き衝撃力（高音域強打ほど顕著なkeybed thump）を第9ゾーン（棚板構造入力）へ力インパルスとして注入する。
+### 5.4 Stage 4：ゼロ追加遅延マルチゾーン分割畳み込み放射・SI音圧校正・ボイシング（`crates/piano-radiator`）
+- **SI単位音圧校正とデュープレックス結線**: ブリッジ8ゾーン（Zones 0..7）は弦・ブリッジ速度 `[m/s]` を放射音響インピーダンス係数で音圧スケールへ変換し、デュープレックス共鳴出力（`zones 2..8`）と統合して放射する。第9ゾーン（棚板構造体）は打鍵衝撃力 `[N]` を構造アドミタンス係数でスケールし、弦音と過大な乖離がない統一ダイナミクス下でStage 4統一リミッタ（Web/CLI共通、任意ゲイン乗算なし）へ通す。
 - **非一様分割FFT畳み込み（NUPOLS）**:
-  - 0.5秒IR（24,000タップ＠48 kHz）の先頭64サンプルを**直接SIMD FIR**で処理して**追加アルゴリズム遅延ゼロ**を保証する。
-  - 64サンプル以降のテールはブロックサイズを段階拡大（例: 64 → 128 → 256 → 512 → 1024 → 2048）した非一様分割畳み込み（FDL: Frequency-Domain Delay Line）により18経路（9ゾーン×L/R）を低負荷で計算する。
-- **リアルタイム・ボイシング再計算**: ハンマー硬度（$K, p$）、ユニゾン揺らぎ量、ストレッチ調律度、弦長スケール変更時は、解析的分散式およびStulovパラメータ式を直接再評価し、クロスフェードまたはパラメータ平滑化を通じて安全に反映する。
+  - 0.5秒IR（24,000タップ＠48 kHz）の先頭フレームを**直接SIMD FIR**で処理して**追加アルゴリズム遅延ゼロ**を保証する。
+  - 後続テールは4x千鳥分割FFT（FDL: Frequency-Domain Delay Line）により18経路（9ゾーン×L/R）を低負荷（ゼロ入力スロットのスキップ付）で計算する。
+- **ボイシング Dirty Mask と非同期空間更新**: ハンマー硬度（$K, p$）単体変更時は Stage 2 の全モード極再計算を行わず Worklet 内で即時局所更新し、空間（大屋根・視点）や調律／弦長変更時は Prep Web Worker で事前計算してゼロコピー転送・8 ms二乗余弦クロスフェードで切り替える。
 
 ---
 
@@ -121,15 +125,14 @@
 
 ### 6.1 ポータブルSIMD抽象化（`crates/piano-simd`）
 - 共通4レーンSIMD型 `F32x4` を定義し、コンパイルターゲット別にネイティブ組み込み命令へゼロコスト写像する。
-  - `target_arch = "wasm32"`（`+simd128`）: `core::arch::wasm32::v128`（`f32x4_add`, `f32x4_mul` 等）
-  - `target_arch = "x86_64"`（AVX2 / FMA有効時）: 8レーンラッパーまたは `SSE/AVX`
-  - `target_arch = "aarch64"`: `core::arch::aarch64::float32x4_t`（NEON）
-  - 上記以外のフォールバック: `[f32; 4]` スカラ実装（同一テスト結果のビット近似検証用）
+  - `target_arch = "wasm32"`（標準 `+simd128`）: `core::arch::wasm32::v128`（`f32x4_add`, `f32x4_mul` 等）。**`+relaxed-simd` 拡張は使用しない**（`fmaf` ソフトウェアリブコールによる10倍超の低速化を防ぐため、`target_feature = "relaxed-simd"` 無効時は常に `f32x4_add(f32x4_mul(...))` の2命令で展開し、Chrome / Edge / Firefox / Safari 16.4+ を単一バイナリで網羅する）。
+  - `target_arch = "x86_64"` / `aarch64` / スカラフォールバック: 各CPU組み込み命令および `[f32; 4]` 等価演算。
 
-### 6.2 Web AudioWorklet + Wasm IPC（`crates/piano-wasm`, `apps/web/src/audio`）
-- **スレッド分離**: メインスレッド（Vanilla TypeScript UI / Web MIDI / SMFプレイヤー）は、AudioWorkletの `port.postMessage` または共有メッセージキュー経由でサンプルオフセット付きコマンドを送信する。`AudioWorkletProcessor::process()`（128サンプル／量子）内部では、Wasmインスタンスの線形メモリ上に事前確保された固定長コマンドキューからイベントを取り出し、`PianoEngine::process(events, out_l, out_r)` を単一スレッド同期実行する。
-- **テレメトリ計測**: 1量子ごとの処理経過時間（`performance.now()`／モノトニック計測）およびブリッジ・ピークレベルを間引きリングバッファでメインスレッドへ返し、UI上でp50/p99処理時間とスペクトルを可視化する。
-- **Rust→Wasmビルド規約**: `.cargo/config.toml` に `rustflags = ["-C", "target-feature=+simd128"]` を明記し、生成Wasmバイナリが確実にSIMD128命令を含むことをCIで検査する。
+### 6.2 Web AudioWorklet + Prep Web Worker + Wasm IPC（`crates/piano-wasm`, `apps/web/src/audio`）
+- **スレッド分離（COOP/COEP不要）**: Web版 `AudioContext` は **`48 kHz` 固定**で初期化し、`WebAssembly.compileStreaming` でコンパイルしたインポート0個の単一 `.wasm` を `AudioWorklet` と専用 **Prep Web Worker** で共有する。`AudioWorklet` 起動時には全SAVバケットを通す `active12` ウォームアップを実施してJITスパイクを回避し、全入力経路で自動 `unlock()` と初期化待ち入力キュー保持を行う。
+- **Prep Web Worker と Transferable 転送**: 空間プリセット／大屋根変更（`set_space`）および必要に応じた重い再計算は Prep Web Worker でオフスレッド実行し、生成した事前計算バッファを `Transferable ArrayBuffer` でゼロコピー転送して 8 ms クロスフェード切替する。
+- **誠実な全ブロックテレメトリ**: `AudioWorklet` 内のブロック平均化隠蔽や末尾カットを行わず、全量子（128サンプル）を走査して真の最大処理時間・p50・p99・D1超過回数、および Peak Hold / RMS（`dBFS` ＋ 推定 `dB SPL` `-18 dBFS ≈ 82 dB SPL`）・CLIP状態を集計してHUDに表示する。
+- **Rust→Wasmビルド規約**: `.cargo/config.toml` に `rustflags = ["-C", "target-feature=+simd128,+bulk-memory,+nontrapping-fptoint,+sign-ext"]`（`+relaxed-simd`・`+extended-const` 除外）を指定し、CI の `piano-cli check-wasm-simd` で `0 imports`・`+simd128` 命令存在・`relaxed-simd` 非混入を機械検査する。
 
 ### 6.3 ネイティブ拡張境界（`crates/piano-engine`, `crates/piano-cli`）
 - `PianoEngine` はプラットフォーム非依存（`no_std` 互換コアまたは `std` は初期化時のみ使用）とし、`render_block(&mut self, events: &[SampleEvent], out_l: &mut [f32], out_r: &mut [f32])` の単一エントリポイントを提供する。
