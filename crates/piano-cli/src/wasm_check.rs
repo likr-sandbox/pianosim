@@ -10,6 +10,7 @@ pub struct WasmSimdReport {
     pub code_bodies: u32,
     pub v128_locals: u32,
     pub simd_opcodes: usize,
+    pub relaxed_simd_opcodes: usize,
 }
 
 struct Cursor<'a> {
@@ -161,10 +162,7 @@ fn skip_opcode_immediates(
             let _ = body.read_u8()?;
         }
         0xfc => skip_misc_opcode(body)?,
-        0xfd => {
-            report.simd_opcodes += 1;
-            skip_simd_opcode(body)?;
-        }
+        0xfd => skip_simd_opcode(body, report)?,
         _ => {
             return Err(format!(
                 "unrecognized Wasm opcode 0x{op:02x} in code section"
@@ -201,8 +199,13 @@ fn skip_misc_opcode(body: &mut Cursor<'_>) -> Result<(), String> {
     Ok(())
 }
 
-fn skip_simd_opcode(body: &mut Cursor<'_>) -> Result<(), String> {
+fn skip_simd_opcode(body: &mut Cursor<'_>, report: &mut WasmSimdReport) -> Result<(), String> {
     let sub = body.read_uleb128()?;
+    if sub >= 256 {
+        report.relaxed_simd_opcodes += 1;
+    } else {
+        report.simd_opcodes += 1;
+    }
     match sub {
         0..=11 | 92 | 93 => {
             let _ = body.read_uleb128()?;
@@ -256,5 +259,13 @@ mod tests {
         let real = minimal_wasm_with_body(&real_body);
         let real_report = inspect_wasm_simd(&real).expect("valid real wasm");
         assert_eq!(real_report.simd_opcodes, 3);
+        assert_eq!(real_report.relaxed_simd_opcodes, 0);
+
+        // Relaxed SIMD opcode f32x4.relaxed_madd (0xfd 0x85 0x02 = sub 261) must be flagged.
+        let relaxed_body = vec![0x00, 0xfd, 0x85, 0x02, 0x1a, 0x0b];
+        let relaxed = minimal_wasm_with_body(&relaxed_body);
+        let relaxed_report = inspect_wasm_simd(&relaxed).expect("valid relaxed wasm");
+        assert_eq!(relaxed_report.simd_opcodes, 0);
+        assert_eq!(relaxed_report.relaxed_simd_opcodes, 1);
     }
 }

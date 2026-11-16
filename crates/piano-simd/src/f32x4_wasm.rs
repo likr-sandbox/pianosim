@@ -79,12 +79,26 @@ pub(crate) fn div(a: Inner, b: Inner) -> Inner {
 
 #[inline(always)]
 pub(crate) fn mul_add(a: Inner, b: Inner, c: Inner) -> Inner {
-    Inner(f32x4_relaxed_madd(a.0, b.0, c.0))
+    #[cfg(target_feature = "relaxed-simd")]
+    {
+        Inner(f32x4_relaxed_madd(a.0, b.0, c.0))
+    }
+    #[cfg(not(target_feature = "relaxed-simd"))]
+    {
+        Inner(f32x4_add(f32x4_mul(a.0, b.0), c.0))
+    }
 }
 
 #[inline(always)]
 pub(crate) fn nmul_add(a: Inner, b: Inner, c: Inner) -> Inner {
-    Inner(f32x4_relaxed_nmadd(a.0, b.0, c.0))
+    #[cfg(target_feature = "relaxed-simd")]
+    {
+        Inner(f32x4_relaxed_nmadd(a.0, b.0, c.0))
+    }
+    #[cfg(not(target_feature = "relaxed-simd"))]
+    {
+        Inner(f32x4_sub(c.0, f32x4_mul(a.0, b.0)))
+    }
 }
 
 #[inline(always)]

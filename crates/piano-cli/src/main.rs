@@ -64,14 +64,26 @@ fn cmd_check_wasm_simd(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or_else(usage)?;
     let bytes = fs::read(path).map_err(|e| format!("failed to read {path}: {e}"))?;
     let report = inspect_wasm_simd(&bytes)?;
+    if report.import_count > 0 {
+        return Err(format!(
+            "check-wasm-simd FAILED for {path}: {} imports (must be 0)",
+            report.import_count
+        ));
+    }
     if report.simd_opcodes == 0 {
         return Err(format!(
             "check-wasm-simd FAILED for {path}: 0 SIMD128 (0xfd) opcodes in {} code bodies",
             report.code_bodies
         ));
     }
+    if report.relaxed_simd_opcodes > 0 {
+        return Err(format!(
+            "check-wasm-simd FAILED for {path}: {} relaxed-simd opcodes forbidden",
+            report.relaxed_simd_opcodes
+        ));
+    }
     println!(
-        "check-wasm-simd OK: {path} -> {} SIMD128 (0xfd) opcodes, {} v128 locals, {} code bodies, {} imports",
+        "check-wasm-simd OK: {path} -> {} SIMD128 (0xfd) opcodes, 0 relaxed-simd, {} v128 locals, {} code bodies, {} imports",
         report.simd_opcodes, report.v128_locals, report.code_bodies, report.import_count
     );
     Ok(())
