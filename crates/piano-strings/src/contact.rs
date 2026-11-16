@@ -16,55 +16,7 @@ use crate::zoh_kernel::{
     TILE,
 };
 
-/// Stage 1 key-action driver driving nonlinear hammer strike and orthogonal V/H
-/// unilateral damper ports per sample with exact SI duality (`Newtons`, `meters`, `m/s`).
-pub trait KeyActionDriver {
-    /// Returns `true` while hammer `key_idx` is still in flight or rebounding toward rest.
-    fn is_hammer_active(&self, key_idx: usize) -> bool;
-    /// Instantaneous geometric clearance `y_clear` (m) of damper pad `key_idx`.
-    fn damper_clearance_m(&self, key_idx: usize) -> f32;
-    /// Returns per-choir-string hammer strike weights `[w0, w1, w2]` (Una Corda support).
-    fn strike_weights(&self, key_idx: usize) -> [f32; 3];
-    /// Advances damper rail smoother by 1 sample for `key_idx` and returns `y_clear` (m).
-    fn step_key_clearance(&mut self, key_idx: usize) -> f32;
-    /// Advances damper rail smoother by `t_len` samples (<= 8), fills `out_clears[..t_len]`,
-    /// and returns the minimum clearance across the tile.
-    fn step_key_clearance_tile(
-        &mut self,
-        key_idx: usize,
-        t_len: usize,
-        out_clears: &mut [f32; TILE],
-    ) -> f32;
-    /// Returns `true` if `key_idx` has a sample-accurate NoteOn/NoteOff inside `[chunk_base, chunk_base + sub)`.
-    #[inline]
-    fn has_mid_block_event(&self, _key_idx: usize, _chunk_base: usize, _sub: usize) -> bool {
-        false
-    }
-    /// Applies queued NoteOn/NoteOff events at `sample_idx`, returning a bitmask of NoteOn keys.
-    #[inline]
-    fn apply_sample_events_at(&mut self, _sample_idx: usize) -> u128 {
-        0
-    }
-    /// Evaluates hammer force `F_strike` (N, `+` up) from `(y_str_m, v_str_mps, r_port_strike)`.
-    fn step_hammer_sample(
-        &mut self,
-        key_idx: usize,
-        y_str_m: f32,
-        v_str_mps: f32,
-        r_port_strike: f32,
-    ) -> f32;
-    /// Evaluates unilateral damper force `F_damp` (N, on string) for damper `slot_idx`
-    /// (`s_idx * 2` = vertical, `s_idx * 2 + 1` = horizontal) from port state & `y_clear_m`.
-    fn step_damper_sample(
-        &mut self,
-        key_idx: usize,
-        slot_idx: usize,
-        y_damp_m: f32,
-        v_damp_mps: f32,
-        r_port_damp: f32,
-        y_clear_m: f32,
-    ) -> f32;
-}
+pub use crate::action_driver::KeyActionDriver;
 
 #[inline]
 pub(crate) fn step_transverse_pol<const HAS_DAMPER: bool>(
@@ -232,8 +184,17 @@ pub(crate) fn sample_damper(
     s: usize,
     yc: f32,
 ) -> (f32, f32) {
-    let rv = drv.step_damper_sample(k, s * 2, p.y_dv[s], p.v_dv[s], p.r_port_damp_v[s], yc);
-    let rh = drv.step_damper_sample(k, s * 2 + 1, p.y_dh[s], p.v_dh[s], p.r_port_damp_h[s], yc);
+    let (rv, rh) = drv.step_damper_pair(
+        k,
+        s,
+        p.y_dv[s],
+        p.v_dv[s],
+        p.r_port_damp_v[s],
+        p.y_dh[s],
+        p.v_dh[s],
+        p.r_port_damp_h[s],
+        yc,
+    );
     (
         if rv.is_finite() { rv } else { 0.0 },
         if rh.is_finite() { rh } else { 0.0 },

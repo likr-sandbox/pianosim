@@ -77,6 +77,8 @@ pub(crate) struct ChunkPlan {
     pub sav_sched_dirty: bool,
     pub hammer_forces: [HammerStepForce; TOTAL_STRINGS],
     pub tail_partial_damp: [TailDampPartial; TOTAL_STRINGS],
+    pub symp_gains: [[f32; 2]; TOTAL_STRINGS],
+    pub symp_has_gains: [bool; TOTAL_STRINGS],
     pub zone_tail_n: [[f32; 8]; SUB],
     pub n_a: usize,
     pub n_sl: usize,

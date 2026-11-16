@@ -319,14 +319,27 @@ pub(crate) fn update_sav_dormancy(
 }
 
 #[inline]
-fn flush_prefix_slice(slice: &mut [PrefixState]) -> bool {
+fn flush_prefix_slice(slice: &mut [PrefixState], clear_horizon: bool) -> bool {
     let mut any_nz = false;
-    for st in slice {
+    let mut max_e = 0.0_f32;
+    for st in slice.iter_mut() {
         let mut u_a = st.u.to_array();
         let mut v_a = st.v.to_array();
         any_nz |= flush_subnormals_slices(&mut u_a, &mut v_a);
+        if clear_horizon {
+            for i in 0..4 {
+                max_e = max_e.max(u_a[i] * u_a[i] + v_a[i] * v_a[i]);
+            }
+        }
         st.u = F32x4::from_array(u_a);
         st.v = F32x4::from_array(v_a);
+    }
+    if clear_horizon && max_e < ENERGY_HORIZON_SQ {
+        for st in slice {
+            st.u = F32x4::zero();
+            st.v = F32x4::zero();
+        }
+        return false;
     }
     any_nz
 }
@@ -337,6 +350,7 @@ pub(crate) fn flush_bridge_subnormals_core(
     sav: &mut SavBank,
     strings: &[StringMapEntry],
     key_has_hammer: &[bool; NUM_KEYS],
+    key_closed_damp: &[bool; NUM_KEYS],
     lossless: bool,
 ) {
     for (s_idx, entry) in strings.iter().enumerate() {
@@ -351,7 +365,10 @@ pub(crate) fn flush_bridge_subnormals_core(
                     m.tl_l.clone(),
                 )
             };
-            let nz_br = flush_prefix_slice(&mut bridge_ports.state[p_range]);
+            let nz_br = flush_prefix_slice(
+                &mut bridge_ports.state[p_range],
+                !lossless && key_closed_damp[k] && !ports.tail_nonzero[s_idx],
+            );
             let nz = if !ports.tail_nonzero[s_idx] {
                 nz_br
             } else {
@@ -431,6 +448,15 @@ impl StringBank {
 
     /// Flushes `< 1e-20` subnormals across `BridgePorts` once at the end of an audio block.
     pub fn flush_bridge_subnormals(&mut self, key_has_hammer: &[bool; NUM_KEYS]) {
+        self.flush_bridge_subnormals_with_dampers(key_has_hammer, &[false; NUM_KEYS]);
+    }
+
+    /// Flushes subnormals and retires `< -120 dBFS` closed-damper strings to zero-skip idle.
+    pub fn flush_bridge_subnormals_with_dampers(
+        &mut self,
+        key_has_hammer: &[bool; NUM_KEYS],
+        key_closed_damp: &[bool; NUM_KEYS],
+    ) {
         if self.soa_dirty {
             flush_bridge_subnormals_core(
                 &mut self.ports,
@@ -438,6 +464,7 @@ impl StringBank {
                 &mut self.sav,
                 self.choir_map.strings(),
                 key_has_hammer,
+                key_closed_damp,
                 self.lossless,
             );
         }

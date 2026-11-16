@@ -124,6 +124,37 @@ impl KeyActionDriver for ActionDriver<'_> {
         self.action
             .step_damper_sample(key_idx, pad_slot, y_d, v_d, r_d, y_clear)
     }
+
+    #[inline]
+    fn step_damper_pair(
+        &mut self,
+        key_idx: usize,
+        str_idx: usize,
+        y_dv: f32,
+        v_dv: f32,
+        r_dv: f32,
+        y_dh: f32,
+        v_dh: f32,
+        r_dh: f32,
+        y_clear: f32,
+    ) -> (f32, f32) {
+        self.action.step_damper_pair(
+            key_idx, str_idx, y_dv, v_dv, r_dv, y_dh, v_dh, r_dh, y_clear,
+        )
+    }
+
+    #[inline]
+    fn symp_linear_gains_if_settled(
+        &mut self,
+        key_idx: usize,
+        str_idx: usize,
+        r_dv: f32,
+        r_dh: f32,
+        y_clear_m: f32,
+    ) -> Option<(f32, f32)> {
+        self.action
+            .symp_linear_gains_if_settled(key_idx, str_idx, r_dv, r_dh, y_clear_m)
+    }
 }
 
 pub(crate) struct BridgeDriver<'a>(pub &'a mut BridgeBank);

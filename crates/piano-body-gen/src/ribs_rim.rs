@@ -25,7 +25,7 @@ pub const CONCERT_ZONE_POS_M: [[f32; 3]; PRESET_RADIATOR_ZONES] = [
     [-0.28, 1.08, 0.040], // Zone 1: Upper bass overstrung bridge
     [-0.20, 0.96, 0.032], // Zone 2: Low tenor long bridge
     [-0.06, 0.80, 0.032], // Zone 3: Tenor long bridge
-    [0.08, 0.64, 0.032],  // Zone 4: Middle register long bridge
+    [-0.02, 0.74, 0.032], // Zone 4: Middle register long bridge
     [0.22, 0.48, 0.030],  // Zone 5: Upper middle long bridge
     [0.36, 0.34, 0.028],  // Zone 6: Lower treble long bridge
     [0.50, 0.22, 0.026],  // Zone 7: Top treble bridge / capo termination

@@ -4,7 +4,7 @@ use piano_simd::F32x4;
 use piano_spec::{LONGITUDINAL_MAX_KEY_IDX, TOTAL_STRINGS};
 
 use crate::bridge_kernels::{
-    step_pol_prefix_wdf_inj, step_pol_prefix_wdf_symp_damp, step_string_prefix_wdf_br,
+    step_pol_prefix_wdf_inj, step_string_prefix_wdf_br, step_string_prefix_wdf_symp_damp_vh,
 };
 use crate::bridge_port::{C_SIGN_H_ARR, C_SIGN_V_ARR};
 use crate::bridge_tails::{BridgeRun, ChunkPlan, KeyCat};
@@ -80,24 +80,20 @@ pub(crate) fn step_coupled_prefixes(
                 );
                 (cv_v + ch_v, br_v_v + br_h_v)
             } else {
-                let (cv_v, br_v_v, ydv_br, vdv_br_raw) = step_pol_prefix_wdf_symp_damp(
-                    r.ports,
-                    r.bridge_ports,
-                    v_br_r,
-                    beta_v_off,
-                    c_sign_v,
-                    neg_vbr,
-                    hf.fd_v,
-                );
-                let (ch_v, br_h_v, ydh_br, vdh_br_raw) = step_pol_prefix_wdf_symp_damp(
-                    r.ports,
-                    r.bridge_ports,
-                    h_br_r,
-                    beta_h_off,
-                    c_sign_h,
-                    neg_vbr,
-                    hf.fd_h,
-                );
+                let (acc_c, acc_br, [ydv_br, vdv_br_raw, ydh_br, vdh_br_raw]) =
+                    step_string_prefix_wdf_symp_damp_vh(
+                        r.ports,
+                        r.bridge_ports,
+                        v_br_r,
+                        h_br_r,
+                        beta_v_off,
+                        beta_h_off,
+                        c_sign_v,
+                        c_sign_h,
+                        neg_vbr,
+                        hf.fd_v,
+                        hf.fd_h,
+                    );
                 let tp = plan.tail_partial_damp[s_idx];
                 r.ports.y_dv[s_idx] = ydv_br + tp.ydv;
                 r.ports.y_dh[s_idx] = ydh_br + tp.ydh;
@@ -112,62 +108,83 @@ pub(crate) fn step_coupled_prefixes(
                     r.ports.v_dh[s_idx] = alpha * (vdh_br_raw + tp.vdh_raw);
                 }
                 r.ports.ports_synced[s_idx] = true;
-                (cv_v + ch_v, br_v_v + br_h_v)
+                (acc_c, acc_br)
             }
         } else if cat == KeyCat::DampedSymp && entry.has_damper && r.ports.may_be_nonzero[s_idx] {
-            let yc = r.ports.y_clear_scratch[k][ts];
-            if yc < DAMPER_CLEAR_THRESHOLD_M {
-                if !r.ports.ports_synced[s_idx] {
-                    refresh_prefix_damp_ports_bp(r.bridge_ports, r.ports, s_idx);
-                }
-                let raw_fv = driver.step_damper_sample(
-                    k,
-                    s_idx * 2,
-                    r.ports.y_dv[s_idx],
-                    r.ports.v_dv[s_idx],
-                    r_dv,
-                    yc,
-                );
-                let raw_fh = driver.step_damper_sample(
-                    k,
-                    s_idx * 2 + 1,
-                    r.ports.y_dh[s_idx],
-                    r.ports.v_dh[s_idx],
-                    r_dh,
-                    yc,
-                );
-                let fd_v = if raw_fv.is_finite() { raw_fv } else { 0.0 };
-                let fd_h = if raw_fh.is_finite() { raw_fh } else { 0.0 };
-                let (cv_v, br_v_v, ydv, vdv_raw) = step_pol_prefix_wdf_symp_damp(
-                    r.ports,
-                    r.bridge_ports,
-                    v_br_r,
-                    beta_v_off,
-                    c_sign_v,
-                    neg_vbr,
-                    fd_v,
-                );
-                let (ch_v, br_h_v, ydh, vdh_raw) = step_pol_prefix_wdf_symp_damp(
-                    r.ports,
-                    r.bridge_ports,
-                    h_br_r,
-                    beta_h_off,
-                    c_sign_h,
-                    neg_vbr,
-                    fd_h,
-                );
+            if plan.symp_has_gains[s_idx]
+                && r.ports.y_dv[s_idx].abs() <= 1.0e-6
+                && r.ports.y_dh[s_idx].abs() <= 1.0e-6
+            {
+                let [gv, gh] = plan.symp_gains[s_idx];
+                let fd_v = gv * r.ports.v_dv[s_idx];
+                let fd_h = gh * r.ports.v_dh[s_idx];
+                let (acc_c, acc_br, [ydv, vdv_raw, ydh, vdh_raw]) =
+                    step_string_prefix_wdf_symp_damp_vh(
+                        r.ports,
+                        r.bridge_ports,
+                        v_br_r,
+                        h_br_r,
+                        beta_v_off,
+                        beta_h_off,
+                        c_sign_v,
+                        c_sign_h,
+                        neg_vbr,
+                        fd_v,
+                        fd_h,
+                    );
                 let alpha = r.ports.alpha_vel[s_idx];
                 r.ports.y_dv[s_idx] = ydv;
                 r.ports.v_dv[s_idx] = alpha * vdv_raw;
                 r.ports.y_dh[s_idx] = ydh;
                 r.ports.v_dh[s_idx] = alpha * vdh_raw;
-                r.ports.ports_synced[s_idx] = true;
-                (cv_v + ch_v, br_v_v + br_h_v)
-            } else {
-                let (acc_c, acc_br) =
-                    step_string_prefix_wdf_br(r.bridge_ports, beta_v_off, nv, nh, neg_vbr);
-                r.ports.ports_synced[s_idx] = false;
                 (acc_c, acc_br)
+            } else {
+                plan.symp_has_gains[s_idx] = false;
+                let yc = r.ports.y_clear_scratch[k][ts];
+                if yc < DAMPER_CLEAR_THRESHOLD_M {
+                    if !r.ports.ports_synced[s_idx] {
+                        refresh_prefix_damp_ports_bp(r.bridge_ports, r.ports, s_idx);
+                    }
+                    let (raw_fv, raw_fh) = driver.step_damper_pair(
+                        k,
+                        s_idx,
+                        r.ports.y_dv[s_idx],
+                        r.ports.v_dv[s_idx],
+                        r_dv,
+                        r.ports.y_dh[s_idx],
+                        r.ports.v_dh[s_idx],
+                        r_dh,
+                        yc,
+                    );
+                    let fd_v = if raw_fv.is_finite() { raw_fv } else { 0.0 };
+                    let fd_h = if raw_fh.is_finite() { raw_fh } else { 0.0 };
+                    let (acc_c, acc_br, [ydv, vdv_raw, ydh, vdh_raw]) =
+                        step_string_prefix_wdf_symp_damp_vh(
+                            r.ports,
+                            r.bridge_ports,
+                            v_br_r,
+                            h_br_r,
+                            beta_v_off,
+                            beta_h_off,
+                            c_sign_v,
+                            c_sign_h,
+                            neg_vbr,
+                            fd_v,
+                            fd_h,
+                        );
+                    let alpha = r.ports.alpha_vel[s_idx];
+                    r.ports.y_dv[s_idx] = ydv;
+                    r.ports.v_dv[s_idx] = alpha * vdv_raw;
+                    r.ports.y_dh[s_idx] = ydh;
+                    r.ports.v_dh[s_idx] = alpha * vdh_raw;
+                    r.ports.ports_synced[s_idx] = true;
+                    (acc_c, acc_br)
+                } else {
+                    let (acc_c, acc_br) =
+                        step_string_prefix_wdf_br(r.bridge_ports, beta_v_off, nv, nh, neg_vbr);
+                    r.ports.ports_synced[s_idx] = false;
+                    (acc_c, acc_br)
+                }
             }
         } else {
             let (acc_c, acc_br) =

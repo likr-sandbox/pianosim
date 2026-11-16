@@ -12,7 +12,6 @@ pub const DAMPER_PAD_SLOTS: usize = TOTAL_STRINGS * 2;
 const DAMPER_EXPONENT_P: f32 = 2.2;
 const DAMPER_LUT_SIZE: usize = 512;
 const DAMPER_LUT_X_MAX: f32 = 2.0;
-const DELTA_D_SCALE_M: f32 = 1.0e-3;
 const ENGAGE_HALF_M: f32 = 8.0e-5;
 const TAU_DAMP_FELT_S: f64 = 1.2e-3;
 const EPS_DAMP_HYST: f32 = 0.25;
@@ -123,18 +122,40 @@ impl DamperPadBank {
         }
 
         let slot = &mut self.slots[slot_idx];
-        let inv_scale = 1.0 / DELTA_D_SCALE_M;
+        let inv_scale = 1000.0_f32;
 
         if y_damp_m == 0.0 && v_damp_mps == 0.0 {
-            // Even under resting preload (y_clear_m < 0), stationary equilibrium yields F = 0.0.
-            let delta_eq = (-y_clear_m).max(0.0);
-            let u_eq = delta_eq * inv_scale;
-            let phi_pos = slot.adaa_pos.process(&self.lut, u_eq);
-            let phi_neg = slot.adaa_neg.process(&self.lut, u_eq);
+            let u_eq = (-y_clear_m).max(0.0) * inv_scale;
+            let phi_eq = self.lut.eval_f(u_eq);
+            slot.adaa_pos.sync_x(u_eq);
+            slot.adaa_neg.sync_x(u_eq);
             let a = self.a_damp_felt;
-            slot.z_pos = a * slot.z_pos + (1.0 - a) * phi_pos;
-            slot.z_neg = a * slot.z_neg + (1.0 - a) * phi_neg;
+            slot.z_pos = a * slot.z_pos + (1.0 - a) * phi_eq;
+            slot.z_neg = a * slot.z_neg + (1.0 - a) * phi_eq;
             return 0.0;
+        }
+
+        let safe_r = r_port_damp.max(0.0);
+        if y_clear_m <= -5.0e-5 && y_damp_m.abs() <= 1.0e-6 {
+            let u_eq = -y_clear_m * inv_scale;
+            let phi_eq = self.lut.eval_f(u_eq);
+            slot.adaa_pos.sync_x(u_eq + y_damp_m * inv_scale);
+            slot.adaa_neg.sync_x(u_eq - y_damp_m * inv_scale);
+            let a = self.a_damp_felt;
+            let z_next = a * slot.z_pos + (1.0 - a) * phi_eq;
+            slot.z_pos = z_next;
+            slot.z_neg = z_next;
+            let felt_hyst = 2.0 * (phi_eq - EPS_DAMP_HYST * z_next).max(0.0);
+            let s_sum = -2.0 * y_clear_m;
+            let engage = s_sum / (s_sum + ENGAGE_HALF_M);
+            let c_raw = self.c_nom_key[key_idx] * engage * (1.0 + HYST_DAMP_GAIN * felt_hyst)
+                + self.f_scale_key[key_idx] * felt_hyst;
+            let c_eff = if c_raw * safe_r > MAX_PASSIVE_PORT_RATIO && safe_r > 0.0 {
+                MAX_PASSIVE_PORT_RATIO / safe_r
+            } else {
+                c_raw
+            };
+            return (-c_eff * v_damp_mps) / (1.0 + 0.5 * safe_r * c_eff);
         }
 
         let delta_pos = (y_damp_m - y_clear_m).max(0.0);
@@ -160,14 +181,168 @@ impl DamperPadBank {
         let engage = s_sum / (s_sum + ENGAGE_HALF_M);
         let c_raw = self.c_nom_key[key_idx] * engage * (1.0 + HYST_DAMP_GAIN * felt_hyst)
             + self.f_scale_key[key_idx] * felt_hyst;
-        let safe_r = r_port_damp.max(0.0);
-        let c_eff = if safe_r > 0.0 {
-            c_raw.min(MAX_PASSIVE_PORT_RATIO / safe_r)
+        let c_eff = if c_raw * safe_r > MAX_PASSIVE_PORT_RATIO && safe_r > 0.0 {
+            MAX_PASSIVE_PORT_RATIO / safe_r
         } else {
             c_raw
         };
 
         (-c_eff * v_damp_mps) / (1.0 + 0.5 * safe_r * c_eff)
+    }
+
+    /// Evaluates one host sample for both V (`2 * str_idx`) and H (`2 * str_idx + 1`)
+    /// slots of `(key_idx, str_idx)`, sharing geometric clearance computations.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    pub fn step_damper_pair(
+        &mut self,
+        key_idx: usize,
+        str_idx: usize,
+        y_dv_m: f32,
+        v_dv_mps: f32,
+        r_dv: f32,
+        y_dh_m: f32,
+        v_dh_mps: f32,
+        r_dh: f32,
+        y_clear_m: f32,
+    ) -> (f32, f32) {
+        if key_idx >= DAMPED_KEYS
+            || str_idx >= TOTAL_STRINGS
+            || !y_clear_m.is_finite()
+            || !y_dv_m.is_finite()
+            || !v_dv_mps.is_finite()
+            || !r_dv.is_finite()
+            || !y_dh_m.is_finite()
+            || !v_dh_mps.is_finite()
+            || !r_dh.is_finite()
+        {
+            return (0.0, 0.0);
+        }
+
+        let sv_idx = str_idx * 2;
+        let inv_scale = 1000.0_f32;
+        if y_clear_m <= -5.0e-5 && y_dv_m.abs() <= 1.0e-6 && y_dh_m.abs() <= 1.0e-6 {
+            let u_eq = -y_clear_m * inv_scale;
+            let phi_eq = self.lut.eval_f(u_eq);
+            let a = self.a_damp_felt;
+            let one_m_a_phi = (1.0 - a) * phi_eq;
+            let s_sum = -2.0 * y_clear_m;
+            let engage = s_sum / (s_sum + ENGAGE_HALF_M);
+            let c_nom_e = self.c_nom_key[key_idx] * engage;
+            let f_scale = self.f_scale_key[key_idx];
+
+            let [sv, sh] = &mut self.slots[sv_idx..sv_idx + 2] else {
+                return (0.0, 0.0);
+            };
+            sv.adaa_pos.sync_x(u_eq + y_dv_m * inv_scale);
+            sv.adaa_neg.sync_x(u_eq - y_dv_m * inv_scale);
+            let zv = a * sv.z_pos + one_m_a_phi;
+            sv.z_pos = zv;
+            sv.z_neg = zv;
+
+            sh.adaa_pos.sync_x(u_eq + y_dh_m * inv_scale);
+            sh.adaa_neg.sync_x(u_eq - y_dh_m * inv_scale);
+            let zh = a * sh.z_pos + one_m_a_phi;
+            sh.z_pos = zh;
+            sh.z_neg = zh;
+
+            let hv = 2.0 * (phi_eq - EPS_DAMP_HYST * zv).max(0.0);
+            let hh = 2.0 * (phi_eq - EPS_DAMP_HYST * zh).max(0.0);
+            let cv = c_nom_e * (1.0 + HYST_DAMP_GAIN * hv) + f_scale * hv;
+            let ch = c_nom_e * (1.0 + HYST_DAMP_GAIN * hh) + f_scale * hh;
+            let srv = r_dv.max(0.0);
+            let srh = r_dh.max(0.0);
+            let cev = if cv * srv > MAX_PASSIVE_PORT_RATIO && srv > 0.0 {
+                MAX_PASSIVE_PORT_RATIO / srv
+            } else {
+                cv
+            };
+            let ceh = if ch * srh > MAX_PASSIVE_PORT_RATIO && srh > 0.0 {
+                MAX_PASSIVE_PORT_RATIO / srh
+            } else {
+                ch
+            };
+            let fv = if y_dv_m == 0.0 && v_dv_mps == 0.0 {
+                0.0
+            } else {
+                (-cev * v_dv_mps) / (1.0 + 0.5 * srv * cev)
+            };
+            let fh = if y_dh_m == 0.0 && v_dh_mps == 0.0 {
+                0.0
+            } else {
+                (-ceh * v_dh_mps) / (1.0 + 0.5 * srh * ceh)
+            };
+            return (fv, fh);
+        }
+
+        let fv = self.step_damper_sample(key_idx, sv_idx, y_dv_m, v_dv_mps, r_dv, y_clear_m);
+        let fh = self.step_damper_sample(key_idx, sv_idx + 1, y_dh_m, v_dh_mps, r_dh, y_clear_m);
+        (fv, fh)
+    }
+
+    /// Returns pre-evaluated linear equilibrium V/H damper force-per-velocity gains `(gv, gh)`
+    /// for `(key_idx, str_idx)` when `y_clear_m <= -5e-5` and felt hysteresis state `z` has
+    /// converged to its exact fixed point `phi(y_clear_m)` (within `1e-5`).
+    #[inline]
+    pub fn symp_linear_gains_if_settled(
+        &mut self,
+        key_idx: usize,
+        str_idx: usize,
+        r_dv: f32,
+        r_dh: f32,
+        y_clear_m: f32,
+    ) -> Option<(f32, f32)> {
+        if key_idx >= DAMPED_KEYS
+            || str_idx >= TOTAL_STRINGS
+            || !y_clear_m.is_finite()
+            || y_clear_m > -5.0e-5
+            || !r_dv.is_finite()
+            || !r_dh.is_finite()
+        {
+            return None;
+        }
+        let u_eq = -y_clear_m * 1000.0_f32;
+        let phi_eq = self.lut.eval_f(u_eq);
+        let sv_idx = str_idx * 2;
+        let [sv, sh] = &mut self.slots[sv_idx..sv_idx + 2] else {
+            return None;
+        };
+        if (sv.z_pos - phi_eq).abs() > 1.0e-5
+            || (sv.z_neg - phi_eq).abs() > 1.0e-5
+            || (sh.z_pos - phi_eq).abs() > 1.0e-5
+            || (sh.z_neg - phi_eq).abs() > 1.0e-5
+        {
+            return None;
+        }
+        sv.adaa_pos.sync_x(u_eq);
+        sv.adaa_neg.sync_x(u_eq);
+        sh.adaa_pos.sync_x(u_eq);
+        sh.adaa_neg.sync_x(u_eq);
+
+        let s_sum = -2.0 * y_clear_m;
+        let engage = s_sum / (s_sum + ENGAGE_HALF_M);
+        let c_nom_e = self.c_nom_key[key_idx] * engage;
+        let f_scale = self.f_scale_key[key_idx];
+        let hv = 2.0 * (phi_eq - EPS_DAMP_HYST * sv.z_pos).max(0.0);
+        let hh = 2.0 * (phi_eq - EPS_DAMP_HYST * sh.z_pos).max(0.0);
+        let cv = c_nom_e * (1.0 + HYST_DAMP_GAIN * hv) + f_scale * hv;
+        let ch = c_nom_e * (1.0 + HYST_DAMP_GAIN * hh) + f_scale * hh;
+        let srv = r_dv.max(0.0);
+        let srh = r_dh.max(0.0);
+        let cev = if cv * srv > MAX_PASSIVE_PORT_RATIO && srv > 0.0 {
+            MAX_PASSIVE_PORT_RATIO / srv
+        } else {
+            cv
+        };
+        let ceh = if ch * srh > MAX_PASSIVE_PORT_RATIO && srh > 0.0 {
+            MAX_PASSIVE_PORT_RATIO / srh
+        } else {
+            ch
+        };
+        Some((
+            -cev / (1.0 + 0.5 * srv * cev),
+            -ceh / (1.0 + 0.5 * srh * ceh),
+        ))
     }
 }
 

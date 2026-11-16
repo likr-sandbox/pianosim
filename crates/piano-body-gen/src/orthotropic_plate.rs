@@ -384,8 +384,8 @@ fn extend_statistical_rayleigh_modes(modes: &mut Vec<SolvedBodyMode>, f_start: f
         let phi_y = det_unit_f64(0x6400 + idx as u64) * 2.0 * PI;
 
         // Overlap-normalized amplitude envelope rolling smoothly from Ritz modes up to 16.5 kHz.
-        let hf_taper = (1_800.0 / (freq_hz + 900.0)).powf(0.42);
-        let modal_gain = 0.0095 * hf_taper;
+        let hf_taper = (2_200.0 / (freq_hz + 900.0)).powf(0.18);
+        let modal_gain = 0.0098 * hf_taper;
 
         let mut zone_drive = [0.0_f64; PRESET_RADIATOR_ZONES];
         for (z, pos) in CONCERT_ZONE_POS_M.iter().enumerate().take(NUM_BRIDGE_ZONES) {
@@ -393,9 +393,9 @@ fn extend_statistical_rayleigh_modes(modes: &mut Vec<SolvedBodyMode>, f_start: f
             let y = pos[1] as f64;
             let rim_d = rim_signed_distance_m(x, y).clamp(0.0, 0.25);
             let boundary_fade = (rim_d / 0.14).clamp(0.35, 1.0);
-            // Treble bridge modes localize tighter above 4 kHz due to local bridge impedance.
-            let treble_focus = if freq_hz > 3_500.0 && z >= 4 {
-                1.18
+            // Mid/treble bridge modes localize and radiate strongly above ~1.85 kHz.
+            let treble_focus = if freq_hz > 1_850.0 && z >= 3 {
+                1.85
             } else if freq_hz > 5_000.0 && z <= 1 {
                 0.72
             } else {

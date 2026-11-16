@@ -174,6 +174,12 @@ impl AdaaState {
         self.x_prev = 0.0;
     }
 
+    /// Updates `x_prev` directly when stepping within a linear equilibrium region.
+    #[inline]
+    pub fn sync_x(&mut self, x: f32) {
+        self.x_prev = x;
+    }
+
     /// Advances one sample and returns the antialiased nonlinearity output.
     #[inline]
     pub fn process(&mut self, lut: &AdaaPowerLut, x: f32) -> f32 {

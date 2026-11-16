@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+pub mod action_driver;
 pub mod bridge_coupled;
 mod bridge_diag;
 pub(crate) mod bridge_kernels;

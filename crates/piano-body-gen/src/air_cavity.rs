@@ -9,8 +9,8 @@ use std::f64::consts::PI;
 
 /// Speed of sound in dry air at ~20 deg C [m/s].
 const SPEED_OF_SOUND_M_S: f64 = 343.2;
-/// Sitka spruce acoustic coincidence frequency (~8.3 mm thickness) [Hz].
-const PLATE_COINCIDENCE_HZ: f64 = 1_920.0;
+/// Sitka spruce acoustic coincidence frequency (~10.3 mm effective bridge-zone thickness) [Hz].
+const PLATE_COINCIDENCE_HZ: f64 = 1_550.0;
 
 #[derive(Clone, Copy)]
 struct CavityEigenCandidate {
@@ -176,8 +176,8 @@ pub fn populate_radiation_multipoles(modes: &mut [SolvedBodyMode]) {
 
         // Coincidence radiation efficiency curve for Sitka spruce board.
         let coinc_ratio = (f / PLATE_COINCIDENCE_HZ).clamp(0.02, 4.0);
-        let sigma_rad = (0.14 + 0.86 * coinc_ratio.powf(1.15) / (1.0 + coinc_ratio.powf(1.15)))
-            .clamp(0.14, 0.98);
+        let sigma_rad = (0.20 + 0.80 * coinc_ratio.powf(1.15) / (1.0 + coinc_ratio.powf(1.15)))
+            .clamp(0.20, 0.98);
         let k_air = 2.0 * PI * f / SPEED_OF_SOUND_M_S;
         let helmholtz_eff = (k_air * 0.55) / (1.0 + (k_air * 0.55).powi(2)).sqrt();
 
@@ -193,8 +193,8 @@ pub fn populate_radiation_multipoles(modes: &mut [SolvedBodyMode]) {
                 let dipole_z = sign_z * 0.26 * (1.0 - 0.58 * sigma_rad);
                 // Open concert lid reflects mid/high upper-board energy toward hall/CloseStereo.
                 let mid_band =
-                    (f / 260.0) / (1.0 + (f / 260.0)) * (1.0 / (1.0 + (f / 7_500.0).powi(2)));
-                let lid_coupling = (0.08 + 0.26 * mid_band) * sign_z;
+                    (f / 260.0) / (1.0 + (f / 260.0)) * (1.0 / (1.0 + (f / 10_500.0).powi(2)));
+                let lid_coupling = (0.09 + 0.38 * mid_band) * sign_z;
                 [monopole, dipole_x, dipole_y, dipole_z, lid_coupling]
             }
             ModeSource::RimKeybed => {

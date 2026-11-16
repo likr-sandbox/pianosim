@@ -142,6 +142,8 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         sav_sched_dirty: false,
         hammer_forces: [HammerStepForce::ZERO; TOTAL_STRINGS],
         tail_partial_damp: [TailDampPartial::ZERO; TOTAL_STRINGS],
+        symp_gains: [[0.0; 2]; TOTAL_STRINGS],
+        symp_has_gains: [false; TOTAL_STRINGS],
         zone_tail_n: [[0.0; 8]; SUB],
         n_a: 0,
         n_coupled_strs: 0,
@@ -162,6 +164,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         plan.key_has_hammer.fill(false);
         plan.key_has_mid_ev.fill(false);
         plan.str_coupled.fill(false);
+        plan.symp_has_gains.fill(false);
         (plan.n_a, plan.n_coupled_strs, plan.n_sl, plan.n_sav) = (0, 0, 0, 0);
         plan.sav_sched_dirty = false;
         plan.zone_tail_n[..sub].fill([0.0; 8]);
@@ -173,14 +176,9 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             let any_nz = plan.was_nz[sr.clone()].iter().any(|&b| b);
             if !mid_ev && !hammer && !any_nz {
                 if key.has_damper {
-                    let min_c = step_clearance_subblock(driver, k, sub, None);
-                    if min_c < DAMPER_CLEAR_THRESHOLD_M {
-                        plan.key_cat[k] = KeyCat::DampedSymp;
-                        continue;
-                    }
-                } else {
-                    continue;
+                    step_clearance_subblock(driver, k, sub, None);
                 }
+                continue;
             }
             let min_c = if mid_ev {
                 0.0
@@ -207,9 +205,36 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             } else if min_c < DAMPER_CLEAR_THRESHOLD_M {
                 plan.key_cat[k] = KeyCat::DampedSymp;
                 if key.has_damper {
+                    let yc0 = r.ports.y_clear_scratch[k][0];
+                    let const_closed = yc0 <= -5.0e-5
+                        && r.ports.y_clear_scratch[k][..sub].iter().all(|&c| c == yc0);
                     for s_idx in sr.clone() {
                         if plan.was_nz[s_idx] {
                             plan.push_coupled(s_idx);
+                            if const_closed {
+                                if !r.ports.ports_synced[s_idx] {
+                                    crate::contact_ports::refresh_prefix_damp_ports_bp(
+                                        r.bridge_ports,
+                                        r.ports,
+                                        s_idx,
+                                    );
+                                    r.ports.ports_synced[s_idx] = true;
+                                }
+                                if r.ports.y_dv[s_idx].abs() <= 5.0e-7
+                                    && r.ports.y_dh[s_idx].abs() <= 5.0e-7
+                                {
+                                    if let Some((gv, gh)) = driver.symp_linear_gains_if_settled(
+                                        k,
+                                        s_idx,
+                                        r.bridge_ports.r_damp_prefix_v[s_idx],
+                                        r.bridge_ports.r_damp_prefix_h[s_idx],
+                                        yc0,
+                                    ) {
+                                        plan.symp_gains[s_idx] = [gv, gh];
+                                        plan.symp_has_gains[s_idx] = true;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -300,12 +325,23 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         }
         return;
     }
+    let mut flush_closed_damp = [false; NUM_KEYS];
+    for (k, key) in r.keys.iter().enumerate() {
+        if !r.lossless
+            && key.has_damper
+            && !plan.key_has_hammer[k]
+            && driver.damper_clearance_m(k) <= -1.0e-5
+        {
+            flush_closed_damp[k] = true;
+        }
+    }
     flush_bridge_subnormals_core(
         r.ports,
         r.bridge_ports,
         r.sav,
         r.strings,
         &plan.key_has_hammer,
+        &flush_closed_damp,
         r.lossless,
     );
 }

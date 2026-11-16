@@ -156,7 +156,11 @@ impl EngineCore {
             idx += 1;
         }
         let hammers = core::array::from_fn(|k| self.action.is_hammer_active(k));
-        self.bank.flush_bridge_subnormals(&hammers);
+        let closed_damp = core::array::from_fn(|k| {
+            k < DAMPED_KEYS && !hammers[k] && self.action.damper_clearance_m(k) <= -1.0e-5
+        });
+        self.bank
+            .flush_bridge_subnormals_with_dampers(&hammers, &closed_damp);
     }
 
     fn render_segment(
