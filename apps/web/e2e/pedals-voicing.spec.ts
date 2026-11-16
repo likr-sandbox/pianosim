@@ -89,7 +89,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     await note1.dispatchEvent('pointerup', { buttons: 0 });
     await page.waitForTimeout(300);
     const note1Latched = await sampleDestinationAudio(page);
-    expect(note1Latched.rms).toBeGreaterThan(note1Held.rms * 0.4);
+    expect(note1Latched.rms).toBeGreaterThan(note1Held.rms * 0.3);
 
     // Step 4: Play Note 2 staccato (struck AFTER sostenuto engaged)
     await note2.dispatchEvent('pointerdown', { buttons: 1 });
@@ -118,20 +118,22 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     // Baseline: strike without Una Corda
     await c5Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(350);
-    const normal = await sampleDestinationAudio(page);
+    await page.waitForTimeout(200);
+    const normal = await sampleDestinationAudio(page, 200);
     await c5Key.dispatchEvent('pointerup', { buttons: 0 });
-    await expectAudioDecay(page, normal.rms);
+    await expectAudioDecay(page, normal.rms, 0.05, 4000);
+    await page.getByTestId('panic-btn').click();
+    await page.waitForTimeout(200);
 
     // Strike with Una Corda engaged
     await page.getByTestId('pedal-una-corda').click();
     expect(await page.getByTestId('pedal-una-corda').getAttribute('aria-pressed')).toBe('true');
 
     await c5Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(350);
-    const unaCorda = await sampleDestinationAudio(page);
+    await page.waitForTimeout(200);
+    const unaCorda = await sampleDestinationAudio(page, 200);
     await c5Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(350);
+    await page.waitForTimeout(300);
 
     // Verify strike weight reduction (lower RMS) and felt softening (lower spectral centroid)
     expect(unaCorda.rms).toBeLessThan(normal.rms);

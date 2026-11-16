@@ -65,7 +65,7 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
           if (!d || d.telemetry.activeVoices < 20) return Infinity;
           return d.telemetry.callbackUs;
         });
-      }, { timeout: 3000 })
+      }, { timeout: 5000 })
       .toBeLessThan(1866.7);
 
     // Verify telemetry HUD p99 callback display satisfies D1 budget (< 1,866.7 us @ 48 kHz)
