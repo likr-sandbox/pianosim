@@ -159,6 +159,23 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       this.syncMemoryView();
       this.initializing = false;
 
+      // Pre-warm V8 Wasm JIT pipelines across action, contact, bridge, and radiator
+      exports.piano_note_on(ctx, 60, 32768, 0);
+      exports.piano_note_on(ctx, 64, 32768, 0);
+      exports.piano_note_on(ctx, 67, 32768, 0);
+      for (let i = 0; i < 4; i++) {
+        exports.piano_render(ctx, 128);
+      }
+      exports.piano_pedal(ctx, 0, 32768, 0);
+      for (let i = 0; i < 4; i++) {
+        exports.piano_render(ctx, 128);
+      }
+      exports.piano_all_notes_off(ctx);
+      exports.piano_pedal(ctx, 0, 0, 0);
+      for (let i = 0; i < 4; i++) {
+        exports.piano_render(ctx, 128);
+      }
+
       for (const queued of this.pending) {
         if (this.destroyed) {
           break;
