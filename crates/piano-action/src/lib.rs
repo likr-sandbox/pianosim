@@ -84,6 +84,8 @@ pub struct ActionBank {
     damper_pad: DamperPadBank,
     keybed: KeybedBank,
     keys: Box<[KeyActionSlot]>,
+    hammer_voicing: VoicingSpec,
+    key_hardness_applied: [f32; NUM_KEYS],
 }
 
 impl ActionBank {
@@ -111,6 +113,8 @@ impl ActionBank {
             damper_pad: DamperPadBank::new(sr, voicing),
             keybed: KeybedBank::new(sr),
             keys: keys.into_boxed_slice(),
+            hammer_voicing: voicing.sanitized(),
+            key_hardness_applied: [voicing.effective_global_hammer_hardness(); NUM_KEYS],
         }
     }
 
@@ -148,11 +152,20 @@ impl ActionBank {
         self.pedals.note_on(key_idx);
         self.keybed.note_on(key_idx, velocity_u16);
         let slot = &mut self.keys[key_idx];
+        let target_h = self.hammer_voicing.hammer_hardness;
+        if (self.key_hardness_applied[key_idx] - target_h).abs() > 1.0e-6 {
+            slot.felt_spec.update_voicing_in_place(
+                key_idx,
+                f64::from(self.sample_rate),
+                &self.hammer_voicing,
+            );
+            self.key_hardness_applied[key_idx] = target_h;
+        }
         if !self.memory_enabled {
             slot.felt_state.reset();
         }
         slot.hammer
-            .launch(velocity_from_u16(velocity_u16) * (1.0 - 0.16 * self.pedals.una_corda()));
+            .launch(velocity_from_u16(velocity_u16) * (1.0 - 0.19 * self.pedals.una_corda()));
     }
 
     /// Releases `key_idx`, initiating damper drop at a rate scaled by `release_vel_u16`.
@@ -332,6 +345,21 @@ impl ActionBank {
             .symp_linear_gains_if_settled(key_idx, str_idx, r_dv, r_dh, y_clear_m)
     }
 
+    /// Advances quiescent damper felt relaxation over `sub` samples and returns linear V/H gains.
+    #[inline]
+    pub fn symp_linear_gains_for_chunk(
+        &mut self,
+        key_idx: usize,
+        str_idx: usize,
+        r_dv: f32,
+        r_dh: f32,
+        yc_mid: f32,
+        sub: usize,
+    ) -> Option<(f32, f32)> {
+        self.damper_pad
+            .symp_linear_gains_for_chunk(key_idx, str_idx, r_dv, r_dh, yc_mid, sub)
+    }
+
     /// Advances active keybed rail impacts by one host sample, returning the total
     /// Stage 4 Zone 8 mechanical keybed bottoming force (`N`).
     #[inline]
@@ -339,14 +367,34 @@ impl ActionBank {
         self.keybed.step_sample()
     }
 
+    /// Updates only global hammer hardness cleanly (`< 1 us`), updating active hammers
+    /// immediately and lazily syncing resting hammers on next `note_on` without recomputing dampers.
+    pub fn update_hammer_hardness_in_place(&mut self, voicing: &VoicingSpec) {
+        let sr = f64::from(self.sample_rate);
+        let h = voicing.effective_global_hammer_hardness();
+        self.hammer_voicing.hammer_hardness = h;
+        for (key_idx, slot) in self.keys.iter_mut().enumerate() {
+            if slot.hammer.is_active() {
+                slot.felt_spec
+                    .update_voicing_in_place(key_idx, sr, &self.hammer_voicing);
+                self.key_hardness_applied[key_idx] = h;
+            }
+        }
+    }
+
     /// Updates felt stiffness/scaling and damper pad impedance smoothly in-place
     /// for `voicing` with zero heap allocations, zero locks, and zero panics.
     pub fn update_voicing_in_place(&mut self, voicing: &VoicingSpec) {
         let sr = f64::from(self.sample_rate);
+        self.hammer_voicing = voicing.sanitized();
+        self.key_hardness_applied
+            .fill(self.hammer_voicing.hammer_hardness);
         for (key_idx, slot) in self.keys.iter_mut().enumerate() {
-            slot.felt_spec.update_voicing_in_place(key_idx, sr, voicing);
+            slot.felt_spec
+                .update_voicing_in_place(key_idx, sr, &self.hammer_voicing);
         }
-        self.damper_pad.update_voicing_in_place(voicing);
+        self.damper_pad
+            .update_voicing_in_place(&self.hammer_voicing);
     }
 
     #[cfg(test)]

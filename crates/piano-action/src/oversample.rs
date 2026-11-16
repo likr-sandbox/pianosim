@@ -178,13 +178,13 @@ impl HammerOversampleState {
 
             let (f_base_n, eps_base) = felt_state.effective_params(felt_spec, memory_enabled);
             let shoulder_soft = if una_corda_mod.1 > 0.0 {
-                (1.0 - 2.0 * una_corda_mod.1).max(0.65)
+                (1.0 - 3.8 * una_corda_mod.1).max(0.48)
             } else {
                 1.0
             };
             let f_scale_eff_n = f_base_n * una_corda_mod.0 * shoulder_soft;
             let eps_eff = if una_corda_mod.1 > 0.0 {
-                (eps_base + 1.5 * una_corda_mod.1).min(0.56)
+                (eps_base + 2.2 * una_corda_mod.1).min(0.62)
             } else {
                 eps_base
             };
