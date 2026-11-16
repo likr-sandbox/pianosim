@@ -86,6 +86,17 @@ impl ScalarF32x4 {
     }
 
     #[inline(always)]
+    pub(crate) fn nmul_add(self, mul: Self, add: Self) -> Self {
+        let (a, b, c) = (self.0, mul.0, add.0);
+        Self([
+            -a[0] * b[0] + c[0],
+            -a[1] * b[1] + c[1],
+            -a[2] * b[2] + c[2],
+            -a[3] * b[3] + c[3],
+        ])
+    }
+
+    #[inline(always)]
     pub(crate) fn min(self, rhs: Self) -> Self {
         let (a, b) = (self.0, rhs.0);
         Self([

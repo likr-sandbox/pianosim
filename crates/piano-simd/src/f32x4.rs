@@ -79,6 +79,10 @@ mod imp {
         a.mul_add(b, c)
     }
     #[inline(always)]
+    pub(crate) fn nmul_add(a: Inner, b: Inner, c: Inner) -> Inner {
+        a.nmul_add(b, c)
+    }
+    #[inline(always)]
     pub(crate) fn min(a: Inner, b: Inner) -> Inner {
         a.min(b)
     }
@@ -260,6 +264,13 @@ impl F32x4 {
     #[inline(always)]
     pub fn mul_add(self, mul: Self, add: Self) -> Self {
         Self(imp::mul_add(self.0, mul.0, add.0))
+    }
+
+    /// Lane-wise negative multiply-add `-(self * mul) + add`.
+    #[must_use]
+    #[inline(always)]
+    pub fn nmul_add(self, mul: Self, add: Self) -> Self {
+        Self(imp::nmul_add(self.0, mul.0, add.0))
     }
 
     /// Lane-wise minimum.

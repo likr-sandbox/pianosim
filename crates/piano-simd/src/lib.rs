@@ -89,6 +89,12 @@ mod tests {
             assert!((fma_got[i] - fma_ref[i]).abs() < 1e-6);
         }
 
+        let fnma_got = va.nmul_add(vb, vc).to_array();
+        let fnma_ref = sa.nmul_add(sb, sc).to_array();
+        for i in 0..4 {
+            assert!((fnma_got[i] - fnma_ref[i]).abs() < 1e-6);
+        }
+
         let pos = [0.0_f32, 0.25, 2.0, 144.0];
         let sq_got = F32x4::from_array(pos).sqrt().to_array();
         let sq_ref = ScalarF32x4::from_array(pos).sqrt().to_array();

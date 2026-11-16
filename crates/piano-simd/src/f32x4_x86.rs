@@ -86,6 +86,19 @@ pub(crate) fn mul_add(a: Inner, b: Inner, c: Inner) -> Inner {
 }
 
 #[inline(always)]
+pub(crate) fn nmul_add(a: Inner, b: Inner, c: Inner) -> Inner {
+    #[cfg(target_feature = "fma")]
+    {
+        // SAFETY: Guarded by `cfg(target_feature = "fma")`.
+        Inner(unsafe { _mm_fnmadd_ps(a.0, b.0, c.0) })
+    }
+    #[cfg(not(target_feature = "fma"))]
+    {
+        sub(c, mul(a, b))
+    }
+}
+
+#[inline(always)]
 pub(crate) fn min(a: Inner, b: Inner) -> Inner {
     Inner(unsafe { _mm_min_ps(a.0, b.0) })
 }

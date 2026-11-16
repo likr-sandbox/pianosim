@@ -76,6 +76,12 @@ pub(crate) fn mul_add(a: Inner, b: Inner, c: Inner) -> Inner {
 }
 
 #[inline(always)]
+pub(crate) fn nmul_add(a: Inner, b: Inner, c: Inner) -> Inner {
+    // `vfmsq_f32(acc, x, y)` computes `acc - x * y`.
+    Inner(unsafe { vfmsq_f32(c.0, a.0, b.0) })
+}
+
+#[inline(always)]
 pub(crate) fn min(a: Inner, b: Inner) -> Inner {
     Inner(unsafe { vminq_f32(a.0, b.0) })
 }
