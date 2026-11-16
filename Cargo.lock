@@ -32,6 +32,7 @@ version = "0.1.0"
 dependencies = [
  "piano-engine",
  "piano-radiator",
+ "piano-simd",
  "piano-spec",
 ]
 
