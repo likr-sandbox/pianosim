@@ -23,7 +23,7 @@ import { TransportBar } from './transport-bar';
 import { VoicingPanel, type VoicingState } from './voicing-panel';
 
 const A4_MIDI = 69;
-const A4_TEST_DURATION_MS = 750;
+const A4_TEST_DURATION_MS = 2000;
 
 export class AppShell {
   private readonly root: HTMLElement;
