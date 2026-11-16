@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 piano-engine = { path = "../piano-engine" }
+piano-radiator = { path = "../piano-radiator" }
 piano-spec = { path = "../piano-spec" }
