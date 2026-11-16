@@ -15,6 +15,7 @@ mod modal_prepare;
 mod modal_synth;
 mod nupols_tier;
 mod partitioned_fft;
+mod space_blob;
 mod subrate_upsample;
 
 #[cfg(test)]
@@ -33,6 +34,7 @@ pub use piano_spec::{
     BodyPreset, LidState, ListenerPerspective, PresetDecodeError, PRESET_RADIATOR_ZONES,
 };
 use piano_spec::{PresetReducedPole, PRESET_BRIDGE_ZONES, PRESET_REDUCED_POLES};
+pub use space_blob::{space_blob_len_for_sample_rate, SpacePrepContext};
 
 /// Deterministic physics-baked 9-zone concert-grand `PIANOBOD` asset.
 pub const CONCERT_GRAND_PRESET_BYTES: &[u8] = include_bytes!("../assets/concert_grand_v1.pbdy");

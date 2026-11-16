@@ -26,11 +26,13 @@ pub(crate) mod sav_drift;
 pub(crate) mod sav_pair;
 pub(crate) mod sav_spec;
 pub(crate) mod sav_tile;
+mod voicing_blob;
 mod voicing_update;
 pub mod zoh_kernel;
 
 pub use bridge_port::BridgePortDriver;
 pub use contact::KeyActionDriver;
+pub use voicing_blob::{voicing_blob_len, VoicingPrepContext};
 
 use piano_spec::{build_scale_design, VoicingSpec, TOTAL_STRINGS};
 

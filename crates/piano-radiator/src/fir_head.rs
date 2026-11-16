@@ -8,6 +8,7 @@ use crate::ir_synth::path_index;
 /// Exact cutoff tap index splitting zero-latency direct FIR from NUPOLS FFT tail.
 pub(crate) const HEAD_TAPS: usize = 64;
 const HEAD_VECS: usize = HEAD_TAPS / 4;
+pub(crate) const FIR_COEFFS_LEN: usize = PRESET_RADIATOR_ZONES * HEAD_TAPS * 2;
 const RING_LEN: usize = 128;
 const RING_MASK: usize = RING_LEN - 1;
 const RING_HIST_OFFSET: usize = RING_LEN - (HEAD_TAPS - 1); // 65
@@ -74,6 +75,26 @@ impl FirHead {
                 let base = v * 4;
                 self.coeffs_l_rev[z][v] = F32x4::from_slice(&rev_l[base..base + 4]);
                 self.coeffs_r_rev[z][v] = F32x4::from_slice(&rev_r[base..base + 4]);
+                v += 1;
+            }
+            z += 1;
+        }
+    }
+
+    pub(crate) fn load_coeffs_slice(&mut self, coeffs: &[f32]) {
+        let mut cursor = 0usize;
+        let mut z = 0usize;
+        while z < PRESET_RADIATOR_ZONES {
+            let mut v = 0usize;
+            while v < HEAD_VECS {
+                self.coeffs_l_rev[z][v] = F32x4::from_slice(&coeffs[cursor..cursor + 4]);
+                cursor += 4;
+                v += 1;
+            }
+            v = 0;
+            while v < HEAD_VECS {
+                self.coeffs_r_rev[z][v] = F32x4::from_slice(&coeffs[cursor..cursor + 4]);
+                cursor += 4;
                 v += 1;
             }
             z += 1;

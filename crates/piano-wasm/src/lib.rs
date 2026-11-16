@@ -1,13 +1,17 @@
 //! AudioWorklet WebAssembly bindings and linear-memory SPSC IPC queues.
 
 pub mod exports;
+pub mod prep_ipc;
 pub mod ring_ipc;
 
 pub use exports::{
-    piano_all_notes_off, piano_destroy, piano_init, piano_note_off, piano_note_on, piano_out_l_ptr,
-    piano_out_r_ptr, piano_pedal, piano_render, piano_set_space, piano_set_voicing,
+    piano_all_notes_off, piano_apply_space_blob, piano_apply_voicing_blob, piano_destroy,
+    piano_init, piano_note_off, piano_note_on, piano_out_l_ptr, piano_out_r_ptr, piano_pedal,
+    piano_prep_destroy, piano_prep_init, piano_prep_out_ptr, piano_prep_space, piano_prep_voicing,
+    piano_render, piano_set_hammer_hardness, piano_set_space, piano_set_voicing, piano_staging_ptr,
     piano_telemetry_ptr,
 };
+pub use prep_ipc::PrepContext;
 pub use ring_ipc::{WasmContext, MAX_BLOCK, TELEMETRY_LEN};
 
 #[cfg(test)]
@@ -120,6 +124,45 @@ mod tests {
         );
         assert_eq!(piano_set_space(core::ptr::null_mut(), 0, 0), -1);
 
+        piano_destroy(ctx);
+    }
+
+    #[test]
+    fn c_abi_prep_worker_transfers_space_and_voicing_without_audio_stall() {
+        let ctx = piano_init(48_000.0);
+        let prep = piano_prep_init(48_000.0);
+        assert!(!ctx.is_null() && !prep.is_null());
+
+        piano_note_on(ctx, 60, 50_000, 0);
+        piano_render(ctx, 128);
+
+        let sp_len = piano_prep_space(prep, 2, 1);
+        assert!(sp_len > 10_000);
+        let sp_src = unsafe { slice::from_raw_parts(piano_prep_out_ptr(prep), sp_len) };
+        let st_sp = piano_staging_ptr(ctx, sp_len);
+        assert!(!st_sp.is_null());
+        unsafe { slice::from_raw_parts_mut(st_sp, sp_len) }.copy_from_slice(sp_src);
+        assert_eq!(piano_apply_space_blob(ctx, 2, 1, sp_len), 0);
+
+        let vc_len = piano_prep_voicing(prep, 0.72, 1.8, 1.3, 0.94);
+        assert!(vc_len > 10_000);
+        let vc_src = unsafe { slice::from_raw_parts(piano_prep_out_ptr(prep), vc_len) };
+        let st_vc = piano_staging_ptr(ctx, vc_len);
+        assert!(!st_vc.is_null());
+        unsafe { slice::from_raw_parts_mut(st_vc, vc_len) }.copy_from_slice(vc_src);
+        assert_eq!(
+            piano_apply_voicing_blob(ctx, 0.72, 1.8, 1.3, 0.94, vc_len),
+            0
+        );
+        assert_eq!(piano_set_hammer_hardness(ctx, 0.4), 0);
+
+        piano_render(ctx, 128);
+        let out_l = unsafe { slice::from_raw_parts(piano_out_l_ptr(ctx), 128) };
+        assert!(out_l.iter().all(|x| x.is_finite()) && out_l.iter().any(|&x| x.abs() > 1e-4));
+
+        assert_eq!(piano_apply_space_blob(ctx, 2, 1, 0), -3);
+        assert_eq!(piano_apply_voicing_blob(ctx, 0.72, 1.8, 1.3, 0.94, 0), -3);
+        piano_prep_destroy(prep);
         piano_destroy(ctx);
     }
 }

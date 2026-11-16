@@ -134,6 +134,26 @@ impl NupolsTier {
         }
     }
 
+    pub(crate) fn ir_spectra_float_len(&self) -> usize {
+        self.p_count * NUM_IR_PATHS * self.fft.spectrum_len() * 2
+    }
+
+    pub(crate) fn import_ir_spectra(&mut self, src: &[f32]) -> usize {
+        if self.p_count == 0 {
+            return 0;
+        }
+        let spec_len = self.fft.spectrum_len();
+        let mut off = 0usize;
+        for spec in &mut self.ir_spectra {
+            let (re, im) = spec.planes_mut();
+            re.copy_from_slice(&src[off..off + spec_len]);
+            off += spec_len;
+            im.copy_from_slice(&src[off..off + spec_len]);
+            off += spec_len;
+        }
+        off
+    }
+
     pub(crate) fn reset(&mut self) {
         for buf in &mut self.fdl {
             buf.clear();

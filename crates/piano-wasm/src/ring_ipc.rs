@@ -1,7 +1,7 @@
 //! Linear-memory zero-allocation IPC context for `AudioWorkletGlobalScope`.
 
-use piano_engine::{EventQueue, PianoEngine};
-use piano_spec::{EventKind, LidState, ListenerPerspective, PedalKind, SampleEvent};
+use piano_engine::{space_blob_len_for_sample_rate, voicing_blob_len, EventQueue, PianoEngine};
+use piano_spec::{EventKind, LidState, ListenerPerspective, PedalKind, SampleEvent, VoicingSpec};
 
 /// Maximum audio frames rendered per `piano_render` call.
 pub const MAX_BLOCK: usize = 512;
@@ -21,18 +21,24 @@ pub struct WasmContext {
     out_l: AlignedBlock,
     out_r: AlignedBlock,
     telemetry: AlignedTelemetry,
+    staging: Vec<f32>,
 }
 
 impl WasmContext {
-    /// Initializes the piano engine and pre-allocates fixed audio/telemetry buffers.
+    /// Initializes the piano engine and pre-allocates fixed audio/telemetry/staging buffers.
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
+        let engine = PianoEngine::new(sample_rate);
+        let sr_f64 = f64::from(engine.sample_rate());
+        let cap =
+            space_blob_len_for_sample_rate(sr_f64).max(voicing_blob_len(engine.sample_rate()));
         Self {
-            engine: PianoEngine::new(sample_rate),
+            engine,
             events: EventQueue::new(),
             out_l: AlignedBlock([0.0; MAX_BLOCK]),
             out_r: AlignedBlock([0.0; MAX_BLOCK]),
             telemetry: AlignedTelemetry([0.0; TELEMETRY_LEN]),
+            staging: vec![0.0; cap],
         }
     }
 
@@ -101,6 +107,52 @@ impl WasmContext {
     #[inline]
     pub fn set_space(&mut self, perspective: ListenerPerspective, lid: LidState) {
         self.engine.set_space(perspective, lid);
+    }
+
+    /// Updates only hammer hardness smoothly (`< 50 us`), avoiding string table rebuild.
+    #[inline]
+    pub fn set_hammer_hardness(&mut self, hammer_hardness: f32) {
+        self.engine.set_hammer_hardness(hammer_hardness);
+    }
+
+    /// Returns mutable pointer to pre-allocated staging buffer if `len_f32` fits.
+    #[inline]
+    pub fn staging_mut_ptr(&mut self, len_f32: usize) -> *mut f32 {
+        if len_f32 == 0 || len_f32 > self.staging.len() {
+            return core::ptr::null_mut();
+        }
+        self.staging.as_mut_ptr()
+    }
+
+    /// Applies an off-thread precomputed spatial FIR + NUPOLS blob from staging memory.
+    pub fn apply_space_blob(
+        &mut self,
+        perspective: ListenerPerspective,
+        lid: LidState,
+        len_f32: usize,
+    ) -> bool {
+        if len_f32 == 0 || len_f32 > self.staging.len() {
+            return false;
+        }
+        let blob = &self.staging[..len_f32];
+        self.engine.apply_precomputed_space(perspective, lid, blob)
+    }
+
+    /// Applies an off-thread precomputed Stage 2/3 tuning table blob from staging memory.
+    pub fn apply_voicing_blob(
+        &mut self,
+        hammer_hardness: f32,
+        unison_detune: f32,
+        stretch: f32,
+        length_scale: f32,
+        len_f32: usize,
+    ) -> bool {
+        if len_f32 == 0 || len_f32 > self.staging.len() {
+            return false;
+        }
+        let spec = VoicingSpec::from_globals(hammer_hardness, unison_detune, stretch, length_scale);
+        self.engine
+            .apply_precomputed_voicing(spec, &self.staging[..len_f32])
     }
 
     /// Renders up to `MAX_BLOCK` frames into the internal L/R buffers, updates

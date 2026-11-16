@@ -30,7 +30,7 @@ fn rescale_vec_uv(u_slice: &mut [F32x4], v_slice: &mut [F32x4], r: Range<usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rescale_active_string_uv(
+pub(crate) fn rescale_active_string_uv(
     soa: &mut ModalSoa,
     bp: &mut BridgePorts,
     soa_dirty: bool,

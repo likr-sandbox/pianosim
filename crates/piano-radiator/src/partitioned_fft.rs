@@ -76,6 +76,30 @@ impl NupolsTail {
         }
     }
 
+    pub(crate) fn ir_spectra_float_len(&self) -> usize {
+        self.tiers
+            .iter()
+            .map(NupolsTier::ir_spectra_float_len)
+            .sum()
+    }
+
+    pub(crate) fn import_ir_spectra(&mut self, src: &[f32]) -> bool {
+        if src.len() != self.ir_spectra_float_len() {
+            return false;
+        }
+        let mut off = 0usize;
+        for tier in &mut self.tiers {
+            let used = tier.import_ir_spectra(&src[off..]);
+            off += used;
+        }
+        if !self.tail_clean {
+            self.active_samples_rem = self
+                .active_samples_rem
+                .max(self.ir_len + IN_RING_LEN + 2 * MAX_TIER_FFT_LEN);
+        }
+        off == src.len()
+    }
+
     pub(crate) fn reset(&mut self) {
         for r in &mut self.in_ring {
             r.clear();

@@ -8,6 +8,7 @@ use piano_radiator::{
     BodyPreset, LidState, ListenerPerspective, RadiatorBank, CONCERT_GRAND_PRESET_BYTES,
     PRESET_RADIATOR_ZONES,
 };
+use piano_spec::{EventKind, SampleEvent, VoicingSpec};
 
 use crate::m4_tests::note_on;
 use crate::PianoEngine;
@@ -247,4 +248,41 @@ fn direct_convolve_18_ref(
         ref_l.into_iter().map(|v| v as f32).collect(),
         ref_r.into_iter().map(|v| v as f32).collect(),
     )
+}
+
+#[test]
+fn m7_precomputed_space_and_voicing_blobs_apply_click_free_with_parity() {
+    let sr = 48_000.0;
+    let mut eng = PianoEngine::new(sr);
+    let mut sp_prep = piano_radiator::SpacePrepContext::new_concert_grand(f64::from(sr));
+    let mut vc_prep = piano_strings::VoicingPrepContext::new(sr);
+
+    let ev = [SampleEvent {
+        sample_offset: 0,
+        kind: EventKind::NoteOn {
+            midi_key: 60,
+            velocity_u16: 52_000,
+        },
+    }];
+    let (mut l, mut r) = ([0.0_f32; 128], [0.0_f32; 128]);
+    eng.render_block(&ev, &mut l, &mut r);
+    for _ in 0..8 {
+        eng.render_block(&[], &mut l, &mut r);
+    }
+
+    let sp_blob = sp_prep.prepare_space(ListenerPerspective::ConcertHall, LidState::Half);
+    assert!(eng.apply_precomputed_space(ListenerPerspective::ConcertHall, LidState::Half, sp_blob));
+    assert!(eng.space_guard().is_crossfading());
+    let spec = VoicingSpec::from_globals(0.7, 1.6, 1.25, 0.95);
+    let vc_blob = vc_prep.prepare_voicing(&spec);
+    assert!(eng.apply_precomputed_voicing(spec, vc_blob));
+
+    for _ in 0..8 {
+        eng.render_block(&[], &mut l, &mut r);
+        assert!(l.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
+        assert!(r.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
+    }
+    eng.set_hammer_hardness(0.35);
+    eng.render_block(&[], &mut l, &mut r);
+    assert!(l.iter().any(|&x| x.abs() > 1e-4));
 }

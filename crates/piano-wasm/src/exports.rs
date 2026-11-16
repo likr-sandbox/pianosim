@@ -2,6 +2,7 @@
 
 use core::ptr;
 
+use crate::prep_ipc::PrepContext;
 use crate::ring_ipc::WasmContext;
 
 /// Allocates and initializes a [`WasmContext`] for the given sample rate.
@@ -182,4 +183,158 @@ pub extern "C" fn piano_set_space(ctx: *mut WasmContext, perspective: u32, lid: 
     let ctx = unsafe { &mut *ctx };
     ctx.set_space(persp, lid_state);
     0
+}
+
+/// Updates only hammer hardness smoothly (`< 50 us`), avoiding Stage 2/3 rebuild.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_set_hammer_hardness(ctx: *mut WasmContext, hammer_hardness: f32) -> i32 {
+    if ctx.is_null() {
+        return -1;
+    }
+    // SAFETY: `ctx` is a valid non-null pointer from `piano_init`.
+    let ctx = unsafe { &mut *ctx };
+    ctx.set_hammer_hardness(hammer_hardness);
+    0
+}
+
+/// Returns mutable pointer to pre-allocated staging memory for zero-alloc blob transfer.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_staging_ptr(ctx: *mut WasmContext, len_f32: usize) -> *mut f32 {
+    if ctx.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: `ctx` is a valid non-null pointer from `piano_init`.
+    let ctx = unsafe { &mut *ctx };
+    ctx.staging_mut_ptr(len_f32)
+}
+
+/// Installs an off-thread precomputed spatial FIR + NUPOLS blob from staging memory.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_apply_space_blob(
+    ctx: *mut WasmContext,
+    perspective: u32,
+    lid: u32,
+    len_f32: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return -1;
+    }
+    let Some(persp) = u8::try_from(perspective)
+        .ok()
+        .and_then(piano_spec::ListenerPerspective::from_u8)
+    else {
+        return -2;
+    };
+    let Some(lid_state) = u8::try_from(lid)
+        .ok()
+        .and_then(piano_spec::LidState::from_u8)
+    else {
+        return -2;
+    };
+    // SAFETY: `ctx` is a valid non-null pointer from `piano_init`.
+    let ctx = unsafe { &mut *ctx };
+    if ctx.apply_space_blob(persp, lid_state, len_f32) {
+        0
+    } else {
+        -3
+    }
+}
+
+/// Installs an off-thread precomputed Stage 2/3 tuning blob from staging memory.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_apply_voicing_blob(
+    ctx: *mut WasmContext,
+    hammer_hardness: f32,
+    unison_detune: f32,
+    stretch: f32,
+    length_scale: f32,
+    len_f32: usize,
+) -> i32 {
+    if ctx.is_null() {
+        return -1;
+    }
+    // SAFETY: `ctx` is a valid non-null pointer from `piano_init`.
+    let ctx = unsafe { &mut *ctx };
+    if ctx.apply_voicing_blob(
+        hammer_hardness,
+        unison_detune,
+        stretch,
+        length_scale,
+        len_f32,
+    ) {
+        0
+    } else {
+        -3
+    }
+}
+
+/// Allocates a [`PrepContext`] for the off-thread Prep Web Worker.
+#[no_mangle]
+pub extern "C" fn piano_prep_init(sample_rate: f32) -> *mut PrepContext {
+    Box::into_raw(Box::new(PrepContext::new(sample_rate)))
+}
+
+/// Frees a [`PrepContext`] previously returned by [`piano_prep_init`].
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_prep_destroy(prep: *mut PrepContext) {
+    if !prep.is_null() {
+        // SAFETY: Caller owns valid pointer returned by `piano_prep_init`.
+        unsafe { drop(Box::from_raw(prep)) };
+    }
+}
+
+/// Precomputes Stage 4 spatial FIR + NUPOLS spectra off-thread; returns `f32` length.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_prep_space(prep: *mut PrepContext, perspective: u32, lid: u32) -> usize {
+    if prep.is_null() {
+        return 0;
+    }
+    let Some(persp) = u8::try_from(perspective)
+        .ok()
+        .and_then(piano_spec::ListenerPerspective::from_u8)
+    else {
+        return 0;
+    };
+    let Some(lid_state) = u8::try_from(lid)
+        .ok()
+        .and_then(piano_spec::LidState::from_u8)
+    else {
+        return 0;
+    };
+    // SAFETY: `prep` is a valid non-null pointer from `piano_prep_init`.
+    unsafe { &mut *prep }.prepare_space(persp, lid_state)
+}
+
+/// Precomputes Stage 2/3 tuning tables off-thread; returns `f32` length.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_prep_voicing(
+    prep: *mut PrepContext,
+    hammer_hardness: f32,
+    unison_detune: f32,
+    stretch: f32,
+    length_scale: f32,
+) -> usize {
+    if prep.is_null() {
+        return 0;
+    }
+    // SAFETY: `prep` is a valid non-null pointer from `piano_prep_init`.
+    unsafe { &mut *prep }.prepare_voicing(hammer_hardness, unison_detune, stretch, length_scale)
+}
+
+/// Returns pointer to the most recently prepared blob in [`PrepContext`] linear memory.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_prep_out_ptr(prep: *const PrepContext) -> *const f32 {
+    if prep.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: `prep` is a valid non-null pointer from `piano_prep_init`.
+    unsafe { &*prep }.out_ptr()
 }

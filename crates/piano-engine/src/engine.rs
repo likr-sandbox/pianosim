@@ -90,6 +90,66 @@ impl PianoEngine {
             .set_target(hammer_hardness, unison_detune, stretch, length_scale);
     }
 
+    /// Updates only hammer hardness smoothly (`< 50 us`), leaving string tuning untouched.
+    pub fn set_hammer_hardness(&mut self, hammer_hardness: f32) {
+        self.voicing_smoother.set_target(
+            hammer_hardness,
+            self.voicing_smoother.current_unison_detune(),
+            self.voicing_smoother.current_stretch(),
+            self.voicing_smoother.current_length_scale(),
+        );
+    }
+
+    /// Installs an off-thread precomputed Stage 2/3 tuning table blob with zero allocations.
+    pub fn apply_precomputed_voicing(&mut self, spec: VoicingSpec, blob: &[f32]) -> bool {
+        let v = spec.sanitized();
+        if !self.core.bank.install_precomputed_voicing(&v, blob) {
+            return false;
+        }
+        self.core
+            .bridge
+            .set_port_resistances(self.core.bank.bridge_port_resistances());
+        self.core.action.update_voicing_in_place(&v);
+        self.voicing_smoother.set_tuning_applied(
+            v.unison_detune_scale,
+            v.stretch_amount,
+            v.string_length_scale,
+        );
+        true
+    }
+
+    /// Installs an off-thread precomputed Stage 4 FIR/NUPOLS blob and starts crossfade/switch.
+    pub fn apply_precomputed_space(
+        &mut self,
+        perspective: impl IntoListenerPerspective,
+        lid: impl IntoLidState,
+        blob: &[f32],
+    ) -> bool {
+        let Some(persp) = perspective.into_perspective() else {
+            return false;
+        };
+        let Some(lid_state) = lid.into_lid_state() else {
+            return false;
+        };
+        let action = self
+            .space_guard
+            .request_space(persp, lid_state, self.sample_rate());
+        match action {
+            SpaceTransitionAction::None => true,
+            SpaceTransitionAction::InstantSwitch {
+                target_idx,
+                perspective,
+                lid,
+            } => self.core.radiators[target_idx].install_precomputed_space(perspective, lid, blob),
+            SpaceTransitionAction::StartCrossfade {
+                fade_in_idx,
+                perspective,
+                lid,
+                ..
+            } => self.core.radiators[fade_in_idx].install_precomputed_space(perspective, lid, blob),
+        }
+    }
+
     /// Sets listener perspective and lid opening state with 8 ms raised-cosine crossfade.
     pub fn set_space(&mut self, perspective: impl IntoListenerPerspective, lid: impl IntoLidState) {
         let Some(persp) = perspective.into_perspective() else {

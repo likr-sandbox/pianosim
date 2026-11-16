@@ -116,6 +116,34 @@ impl VoicingSpec {
         }
     }
 
+    /// Returns a [`VoicingSpec`] populated from global parameters with clamped values.
+    #[must_use]
+    pub fn from_globals(
+        hammer_hardness: f32,
+        unison_detune_scale: f32,
+        stretch_amount: f32,
+        string_length_scale: f32,
+    ) -> Self {
+        let mut s = Self::new();
+        s.hammer_hardness = hammer_hardness;
+        s.unison_detune_scale = unison_detune_scale;
+        s.stretch_amount = stretch_amount;
+        s.string_length_scale = string_length_scale;
+        s.sanitized()
+    }
+
+    /// Returns a copy with all four global parameters clamped and finite.
+    #[must_use]
+    pub fn sanitized(&self) -> Self {
+        Self {
+            hammer_hardness: self.effective_global_hammer_hardness(),
+            unison_detune_scale: self.effective_unison_detune_scale(),
+            stretch_amount: self.effective_stretch_amount(),
+            string_length_scale: self.effective_string_length_scale(),
+            note_offsets: self.note_offsets,
+        }
+    }
+
     /// Returns the per-note offset struct for `key_idx`, or [`NoteVoicingOffset::ZERO`]
     /// if `key_idx >= 88`.
     #[must_use]

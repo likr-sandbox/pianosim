@@ -12,7 +12,9 @@ pub use event_queue::{EventQueue, MAX_EVENTS};
 pub use param_smooth::{
     IntoLidState, IntoListenerPerspective, SpaceCrossfadeGuard, VoicingSmoother,
 };
+pub use piano_radiator::{space_blob_len_for_sample_rate, SpacePrepContext};
 pub use piano_spec;
+pub use piano_strings::{voicing_blob_len, VoicingPrepContext};
 pub use telemetry::EngineTelemetry;
 
 #[cfg(test)]
