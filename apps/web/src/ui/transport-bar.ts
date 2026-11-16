@@ -1,5 +1,6 @@
 /** Transport control bar for demo scores, SMF file upload, play/pause/stop, scrub seek, and tempo scaling. */
 
+import { DEMO_SCORES } from '../midi/demo-scores';
 import type { MidiPlayer } from '../midi/midi-player';
 import type { WebMidiManager } from '../midi/web-midi';
 
@@ -75,8 +76,7 @@ export class TransportBar {
           <div class="transport-group demo-picker">
             <label for="select-demo" class="transport-label">Demo Score</label>
             <select id="select-demo" data-testid="demo-select" class="select-demo">
-              <option value="bach-prelude">Bach: Prelude in C (BWV 846)</option>
-              <option value="chopin-nocturne">Chopin: Nocturne in Eb (Op. 9 No. 2)</option>
+              ${DEMO_SCORES.map((s) => `<option value="${s.id}">${s.title}</option>`).join('\n              ')}
             </select>
           </div>
 

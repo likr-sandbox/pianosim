@@ -19,7 +19,7 @@ export interface MidiPlayerCallbacks {
 
 export class MidiPlayer {
   private readonly host: WasmAudioHost;
-  private readonly callbacks: MidiPlayerCallbacks;
+  private callbacks: MidiPlayerCallbacks;
 
   private score: ParsedSmf | null = null;
   private isPlayingState = false;
@@ -36,6 +36,10 @@ export class MidiPlayer {
 
   constructor(host: WasmAudioHost, callbacks: MidiPlayerCallbacks = {}) {
     this.host = host;
+    this.callbacks = callbacks;
+  }
+
+  setCallbacks(callbacks: MidiPlayerCallbacks): void {
     this.callbacks = callbacks;
   }
 
@@ -133,6 +137,12 @@ export class MidiPlayer {
 
   stop(): void {
     this.pause();
+    this.host.pedal(PEDAL_SUSTAIN, 0, 0);
+    this.host.pedal(PEDAL_SOSTENUTO, 0, 0);
+    this.host.pedal(PEDAL_UNA_CORDA, 0, 0);
+    this.callbacks.onPedalChange?.(PEDAL_SUSTAIN, 0);
+    this.callbacks.onPedalChange?.(PEDAL_SOSTENUTO, 0);
+    this.callbacks.onPedalChange?.(PEDAL_UNA_CORDA, 0);
     this.playheadSeconds = 0;
     this.nextEventIndex = 0;
     const dur = this.score?.durationSeconds ?? 0;
