@@ -154,6 +154,36 @@ impl NupolsTier {
         off
     }
 
+    pub(crate) fn import_ir_spectra_range(
+        &mut self,
+        tier_base: usize,
+        src_off: usize,
+        src: &[f32],
+    ) {
+        if self.p_count == 0 {
+            return;
+        }
+        let tier_end = tier_base + self.ir_spectra_float_len();
+        let src_end = src_off + src.len();
+        if src_end <= tier_base || src_off >= tier_end {
+            return;
+        }
+        let spec_len = self.fft.spectrum_len();
+        let mut cur = tier_base;
+        for spec in &mut self.ir_spectra {
+            let (re, im) = spec.planes_mut();
+            for plane in [re, im] {
+                let p_end = cur + spec_len;
+                let lo = cur.max(src_off);
+                let hi = p_end.min(src_end);
+                if lo < hi {
+                    plane[lo - cur..hi - cur].copy_from_slice(&src[lo - src_off..hi - src_off]);
+                }
+                cur = p_end;
+            }
+        }
+    }
+
     pub(crate) fn reset(&mut self) {
         for buf in &mut self.fdl {
             buf.clear();
@@ -229,10 +259,13 @@ impl NupolsTier {
                 if self.fdl_nz[fdl_base + z] {
                     self.acc_dirty = true;
                     let x_spec = &self.fdl[fdl_base + z];
-                    self.acc_l
-                        .fma_accumulate(x_spec, &self.ir_spectra[ir_base + path_index(z, 0)]);
-                    self.acc_r
-                        .fma_accumulate(x_spec, &self.ir_spectra[ir_base + path_index(z, 1)]);
+                    SplitComplexBuf::fma_accumulate_lr(
+                        &mut self.acc_l,
+                        &mut self.acc_r,
+                        x_spec,
+                        &self.ir_spectra[ir_base + path_index(z, 0)],
+                        &self.ir_spectra[ir_base + path_index(z, 1)],
+                    );
                 }
                 z += 1;
             }

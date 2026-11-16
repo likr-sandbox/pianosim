@@ -150,6 +150,58 @@ impl PianoEngine {
         }
     }
 
+    /// Streams a chunk `[blob_off..blob_off + chunk.len())` into the standby Stage 4 radiator.
+    pub fn stage_precomputed_space_chunk(
+        &mut self,
+        perspective: impl IntoListenerPerspective,
+        lid: impl IntoLidState,
+        blob_off: usize,
+        chunk: &[f32],
+        total_len: usize,
+    ) -> bool {
+        if self.space_guard.is_crossfading() {
+            return false;
+        }
+        let Some(persp) = perspective.into_perspective() else {
+            return false;
+        };
+        let Some(lid_state) = lid.into_lid_state() else {
+            return false;
+        };
+        let standby = self.space_guard.standby_radiator_idx();
+        if blob_off == 0 {
+            self.core.radiators[standby].reset();
+        }
+        self.core.radiators[standby]
+            .install_precomputed_space_chunk(persp, lid_state, blob_off, chunk, total_len)
+    }
+
+    /// Activates the pre-staged standby radiator bank via instant swap (silent) or 8 ms crossfade.
+    pub fn commit_precomputed_space(
+        &mut self,
+        perspective: impl IntoListenerPerspective,
+        lid: impl IntoLidState,
+    ) -> bool {
+        if self.space_guard.is_crossfading() {
+            return false;
+        }
+        let Some(persp) = perspective.into_perspective() else {
+            return false;
+        };
+        let Some(lid_state) = lid.into_lid_state() else {
+            return false;
+        };
+        let standby = self.space_guard.standby_radiator_idx();
+        let rad = &self.core.radiators[standby];
+        if rad.perspective() != persp || rad.lid_state() != lid_state {
+            return false;
+        }
+        let _ = self
+            .space_guard
+            .commit_standby(persp, lid_state, self.sample_rate());
+        true
+    }
+
     /// Sets listener perspective and lid opening state with 8 ms raised-cosine crossfade.
     pub fn set_space(&mut self, perspective: impl IntoListenerPerspective, lid: impl IntoLidState) {
         let Some(persp) = perspective.into_perspective() else {
@@ -285,12 +337,14 @@ impl PianoEngine {
             .voicing_smoother
             .step_block_with_dirty(frames, self.sample_rate())
         {
-            self.core.action.update_voicing_in_place(&spec);
             if (dirty & DIRTY_TUNING) != 0 {
+                self.core.action.update_voicing_in_place(&spec);
                 self.core.bank.update_voicing_in_place(&spec);
                 self.core
                     .bridge
                     .set_port_resistances(self.core.bank.bridge_port_resistances());
+            } else {
+                self.core.action.update_hammer_hardness_in_place(&spec);
             }
         }
 

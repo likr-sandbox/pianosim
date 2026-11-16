@@ -26,7 +26,7 @@ mod tests;
 use alloc::vec::Vec;
 use core::fmt;
 use fir_head::{FirHead, HEAD_TAPS};
-use ir_synth::{ir_len_for_sample_rate, synthesize_irs, IrSynthScratch};
+pub use ir_synth::{ir_len_for_sample_rate, synthesize_irs, IrSynthScratch};
 use limiter::limit_stereo_buffers;
 use math::clamp_f64;
 use partitioned_fft::NupolsTail;

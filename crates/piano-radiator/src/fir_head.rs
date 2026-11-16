@@ -101,6 +101,29 @@ impl FirHead {
         }
     }
 
+    pub(crate) fn load_coeffs_range(&mut self, fir_off: usize, coeffs: &[f32]) {
+        if fir_off == 0 && coeffs.len() >= FIR_COEFFS_LEN {
+            self.load_coeffs_slice(&coeffs[..FIR_COEFFS_LEN]);
+            return;
+        }
+        let end = (fir_off + coeffs.len()).min(FIR_COEFFS_LEN);
+        for g_idx in fir_off..end {
+            let val = coeffs[g_idx - fir_off];
+            let z = g_idx / (HEAD_TAPS * 2);
+            let rem = g_idx % (HEAD_TAPS * 2);
+            let is_r = rem >= HEAD_TAPS;
+            let tap = if is_r { rem - HEAD_TAPS } else { rem };
+            let vec_slot = if is_r {
+                &mut self.coeffs_r_rev[z][tap >> 2]
+            } else {
+                &mut self.coeffs_l_rev[z][tap >> 2]
+            };
+            let mut arr = vec_slot.to_array();
+            arr[tap & 3] = val;
+            *vec_slot = F32x4::from_array(arr);
+        }
+    }
+
     /// Zero all input history lines without altering filter coefficients.
     pub(crate) fn reset(&mut self) {
         let mut z = 0;

@@ -23,7 +23,7 @@ const NUM_REDUCED_POLES: usize = 10;
 
 /// Compute IR sample length for `sample_rate` (`0.5 s`, minimum 256 samples).
 #[inline]
-pub(crate) fn ir_len_for_sample_rate(sample_rate: f64) -> usize {
+pub fn ir_len_for_sample_rate(sample_rate: f64) -> usize {
     let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
     (round_f64(IR_DURATION_SECS * sr) as usize).clamp(256, 192_000)
 }
@@ -31,16 +31,16 @@ pub(crate) fn ir_len_for_sample_rate(sample_rate: f64) -> usize {
 /// Reusable scratch storage so `reconfigure_space` allocates zero heap memory
 /// once `ir_len` is initialized.
 #[derive(Clone)]
-pub(crate) struct IrSynthScratch {
-    pub(crate) ir_len: usize,
-    pub(crate) ir_flat: Vec<f32>,
+pub struct IrSynthScratch {
+    pub ir_len: usize,
+    pub ir_flat: Vec<f32>,
     modal_ws: ModalWorkspace,
     delay_scratch: Vec<f32>,
     refl_scratch: Vec<f32>,
 }
 
 impl IrSynthScratch {
-    pub(crate) fn new(ir_len: usize) -> Self {
+    pub fn new(ir_len: usize) -> Self {
         Self {
             ir_len,
             ir_flat: vec![0.0_f32; NUM_IR_PATHS * ir_len],
@@ -74,7 +74,7 @@ impl IrSynthScratch {
 }
 
 /// Synthesize all 18 spatialized and pole-cancelled IRs into `scratch.ir_flat`.
-pub(crate) fn synthesize_irs(
+pub fn synthesize_irs(
     preset: &BodyPreset,
     perspective: ListenerPerspective,
     lid_state: LidState,

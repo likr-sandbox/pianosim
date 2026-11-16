@@ -190,6 +190,51 @@ impl RadiatorBank {
         self.lid_state = lid_state;
         true
     }
+
+    /// Streams one slice `[blob_off .. blob_off + chunk.len())` of a precomputed spatial blob.
+    pub fn install_precomputed_space_chunk(
+        &mut self,
+        perspective: ListenerPerspective,
+        lid_state: LidState,
+        blob_off: usize,
+        chunk: &[f32],
+        total_len: usize,
+    ) -> bool {
+        let expected_len =
+            SPACE_BLOB_HEADER_LEN + FIR_COEFFS_LEN + self.tail.ir_spectra_float_len();
+        if total_len != expected_len || blob_off + chunk.len() > total_len {
+            return false;
+        }
+        if blob_off == 0
+            && (chunk.len() < SPACE_BLOB_HEADER_LEN
+                || chunk[0].to_bits() != SPACE_BLOB_MAGIC
+                || (f64::from(chunk[1]) - self.sample_rate).abs() > 0.5
+                || chunk[2].to_bits() != perspective as u32
+                || chunk[3].to_bits() != lid_state as u32)
+        {
+            return false;
+        }
+        let chunk_end = blob_off + chunk.len();
+        let fir_start = SPACE_BLOB_HEADER_LEN;
+        let fir_end = fir_start + FIR_COEFFS_LEN;
+        let f_lo = blob_off.max(fir_start);
+        let f_hi = chunk_end.min(fir_end);
+        if f_lo < f_hi {
+            self.head
+                .load_coeffs_range(f_lo - fir_start, &chunk[f_lo - blob_off..f_hi - blob_off]);
+        }
+        let t_lo = blob_off.max(fir_end);
+        let t_hi = chunk_end;
+        if t_lo < t_hi {
+            self.tail
+                .import_ir_spectra_range(t_lo - fir_end, &chunk[t_lo - blob_off..t_hi - blob_off]);
+        }
+        if chunk_end == total_len {
+            self.perspective = perspective;
+            self.lid_state = lid_state;
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -229,5 +274,27 @@ mod tests {
             LidState::Open,
             &[0.0; 16],
         ));
+
+        let mut chunk_bank = RadiatorBank::new_concert_grand(sr);
+        let blob = prep.prepare_space(ListenerPerspective::ConcertHall, LidState::Closed);
+        let total = blob.len();
+        let mut off = 0usize;
+        while off < total {
+            let n = 7_919.min(total - off);
+            assert!(chunk_bank.install_precomputed_space_chunk(
+                ListenerPerspective::ConcertHall,
+                LidState::Closed,
+                off,
+                &blob[off..off + n],
+                total,
+            ));
+            off += n;
+        }
+        let mut ref_chunk_bank = RadiatorBank::new_concert_grand(sr);
+        ref_chunk_bank.reconfigure_space(ListenerPerspective::ConcertHall, LidState::Closed);
+        ref_chunk_bank.process_block(&frames, &mut ref_l, &mut ref_r);
+        chunk_bank.process_block(&frames, &mut fast_l, &mut fast_r);
+        assert_eq!(ref_l, fast_l);
+        assert_eq!(ref_r, fast_r);
     }
 }

@@ -323,6 +323,11 @@ impl SpaceCrossfadeGuard {
     }
     #[inline]
     #[must_use]
+    pub const fn standby_radiator_idx(&self) -> usize {
+        1 - self.active_radiator_idx
+    }
+    #[inline]
+    #[must_use]
     pub const fn elapsed_samples(&self) -> usize {
         self.elapsed_samples
     }
@@ -330,6 +335,46 @@ impl SpaceCrossfadeGuard {
     #[must_use]
     pub const fn total_samples(&self) -> usize {
         self.total_samples
+    }
+
+    /// Commits a pre-staged standby radiator bank without overwriting the active buffer.
+    pub fn commit_standby(
+        &mut self,
+        perspective: ListenerPerspective,
+        lid: LidState,
+        sample_rate: f32,
+    ) -> SpaceTransitionAction {
+        if self.crossfading {
+            return SpaceTransitionAction::None;
+        }
+        if perspective == self.current_perspective && lid == self.current_lid {
+            return SpaceTransitionAction::None;
+        }
+        self.target_perspective = perspective;
+        self.target_lid = lid;
+        if self.recent_envelope <= SPACE_SILENCE_ENV_THRESHOLD {
+            self.active_radiator_idx = 1 - self.active_radiator_idx;
+            self.current_perspective = perspective;
+            self.current_lid = lid;
+            self.elapsed_samples = 0;
+            SpaceTransitionAction::InstantSwitch {
+                target_idx: self.active_radiator_idx,
+                perspective,
+                lid,
+            }
+        } else {
+            let total = ((SPACE_CROSSFADE_S * sample_rate).round() as usize).max(1);
+            self.total_samples = total;
+            self.elapsed_samples = 0;
+            self.crossfading = true;
+            SpaceTransitionAction::StartCrossfade {
+                fade_out_idx: self.active_radiator_idx,
+                fade_in_idx: 1 - self.active_radiator_idx,
+                perspective,
+                lid,
+                total_samples: total,
+            }
+        }
     }
 
     pub fn step_block(&mut self, frames: usize) {

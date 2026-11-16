@@ -100,6 +100,20 @@ impl NupolsTail {
         off == src.len()
     }
 
+    pub(crate) fn import_ir_spectra_range(&mut self, tail_off: usize, src: &[f32]) {
+        let mut tier_base = 0usize;
+        for tier in &mut self.tiers {
+            let t_len = tier.ir_spectra_float_len();
+            tier.import_ir_spectra_range(tier_base, tail_off, src);
+            tier_base += t_len;
+        }
+        if !self.tail_clean {
+            self.active_samples_rem = self
+                .active_samples_rem
+                .max(self.ir_len + IN_RING_LEN + 2 * MAX_TIER_FFT_LEN);
+        }
+    }
+
     pub(crate) fn reset(&mut self) {
         for r in &mut self.in_ring {
             r.clear();
@@ -224,13 +238,12 @@ impl NupolsTail {
                         tier.step_fdl_head();
                         tier.pending_s_in_end = s_in_end;
                         tier.has_pending = true;
-                        tier.forward_zones_range(&self.in_ring, s_in_end, 0, 3, work);
+                        tier.forward_zones_range(&self.in_ring, s_in_end, 0, 4, work);
                     } else if tier.has_pending {
                         let s_in_end = tier.pending_s_in_end;
                         match sub {
-                            1 => tier.forward_zones_range(&self.in_ring, s_in_end, 3, 6, work),
+                            1 => tier.forward_zones_range(&self.in_ring, s_in_end, 4, 9, work),
                             2 => {
-                                tier.forward_zones_range(&self.in_ring, s_in_end, 6, 9, work);
                                 tier.clear_acc();
                                 tier.accumulate_partitions(0, tier.p_count);
                             }
@@ -256,7 +269,7 @@ impl NupolsTail {
                         let p1 = tier.p_count / 3;
                         let p2 = (2 * tier.p_count) / 3;
                         match sub {
-                            1..=8 => {
+                            1..=7 => {
                                 tier.forward_zones_range(
                                     &self.in_ring,
                                     s_in_end,
@@ -265,14 +278,15 @@ impl NupolsTail {
                                     work,
                                 );
                             }
-                            9 => {
+                            9 => tier.forward_zones_range(&self.in_ring, s_in_end, 8, 9, work),
+                            10 => {
                                 tier.clear_acc();
                                 tier.accumulate_partitions(0, p1);
                             }
-                            10 => tier.accumulate_partitions(p1, p2),
-                            11 => tier.accumulate_partitions(p2, tier.p_count),
-                            12 => tier.inverse_channel_add(0, &mut self.out_ring_l, s_in_end, work),
-                            13 => {
+                            11 => tier.accumulate_partitions(p1, p2),
+                            12 => tier.accumulate_partitions(p2, tier.p_count),
+                            13 => tier.inverse_channel_add(0, &mut self.out_ring_l, s_in_end, work),
+                            15 => {
                                 tier.inverse_channel_add(1, &mut self.out_ring_r, s_in_end, work);
                                 tier.has_pending = false;
                             }
@@ -292,18 +306,23 @@ impl NupolsTail {
                         let p2 = (2 * tier.p_count) / 4;
                         let p3 = (3 * tier.p_count) / 4;
                         match sub {
-                            3 | 7 | 11 | 15 | 19 | 23 | 27 | 31 | 35 => {
-                                let z = (sub - 3) / 4;
+                            7 | 9 | 11 | 13 => {
+                                let z = (sub - 7) / 2;
                                 tier.forward_zones_range(&self.in_ring, s_in_end, z, z + 1, work);
                             }
-                            39 => {
+                            23 | 25 | 27 | 29 => {
+                                let z = 4 + (sub - 23) / 2;
+                                tier.forward_zones_range(&self.in_ring, s_in_end, z, z + 1, work);
+                            }
+                            39 => tier.forward_zones_range(&self.in_ring, s_in_end, 8, 9, work),
+                            41 => {
                                 tier.clear_acc();
                                 tier.accumulate_partitions(0, p1);
                             }
                             43 => tier.accumulate_partitions(p1, p2),
-                            47 => tier.accumulate_partitions(p2, p3),
-                            51 => tier.accumulate_partitions(p3, tier.p_count),
-                            55 => tier.inverse_channel_add(0, &mut self.out_ring_l, s_in_end, work),
+                            45 => tier.accumulate_partitions(p2, p3),
+                            55 => tier.accumulate_partitions(p3, tier.p_count),
+                            57 => tier.inverse_channel_add(0, &mut self.out_ring_l, s_in_end, work),
                             59 => {
                                 tier.inverse_channel_add(1, &mut self.out_ring_r, s_in_end, work);
                                 tier.has_pending = false;

@@ -155,6 +155,20 @@ impl KeyActionDriver for ActionDriver<'_> {
         self.action
             .symp_linear_gains_if_settled(key_idx, str_idx, r_dv, r_dh, y_clear_m)
     }
+
+    #[inline]
+    fn symp_linear_gains_for_chunk(
+        &mut self,
+        key_idx: usize,
+        str_idx: usize,
+        r_dv: f32,
+        r_dh: f32,
+        yc_mid: f32,
+        sub: usize,
+    ) -> Option<(f32, f32)> {
+        self.action
+            .symp_linear_gains_for_chunk(key_idx, str_idx, r_dv, r_dh, yc_mid, sub)
+    }
 }
 
 pub(crate) struct BridgeDriver<'a>(pub &'a mut BridgeBank);
