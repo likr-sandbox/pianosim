@@ -51,6 +51,7 @@ export class AppShell {
 
   private velocity7 = 100;
   private a4PulseTimer: number | null = null;
+  private a4PulseGen = 0;
   private readonly cleanupHandlers: Array<() => void> = [];
 
   constructor(
@@ -68,6 +69,7 @@ export class AppShell {
 
     this.pedalController = new PedalController({
       onPedalChange: (kind: PedalKind, valU16: number) => {
+        this.ensureUnlocked();
         this.host.pedal(kind, valU16, 0);
       },
       onStateUpdate: (st) => {
@@ -217,6 +219,7 @@ export class AppShell {
     // Voicing Panel
     const voicingContainer = this.root.querySelector<HTMLElement>('#voicing-mount')!;
     this.voicingPanel = new VoicingPanel(voicingContainer, (st: VoicingState) => {
+      this.ensureUnlocked();
       this.host.setVoicing(
         st.hammerHardness,
         st.unisonDetune,
@@ -228,6 +231,7 @@ export class AppShell {
     // Space Panel
     const spaceContainer = this.root.querySelector<HTMLElement>('#space-mount')!;
     this.spacePanel = new SpacePanel(spaceContainer, (persp: ListenerPerspective, lid: LidState) => {
+      this.ensureUnlocked();
       this.host.setSpace(persp, lid);
     });
 
@@ -304,7 +308,24 @@ export class AppShell {
     });
   }
 
+  private ensureUnlocked(): Promise<void> {
+    if (this.host.isReady()) {
+      return Promise.resolve();
+    }
+    return this.host
+      .unlock()
+      .then(async () => {
+        await this.midiManager.refresh();
+        this.unlockBtn.classList.add('is-ready');
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.showError(msg);
+      });
+  }
+
   private acquireNote(midiKey: number, velocity7?: number): void {
+    void this.ensureUnlocked();
     const vel = velocity7 ?? this.velocity7;
     const u16 = u7ToU16(vel);
     this.host.noteOn(midiKey, u16, 0);
@@ -318,14 +339,24 @@ export class AppShell {
 
   private triggerA4Pulse(): void {
     this.clearA4Pulse();
+    const gen = ++this.a4PulseGen;
+    const unlockP = this.ensureUnlocked();
     this.acquireNote(A4_MIDI, 100);
-    this.a4PulseTimer = window.setTimeout(() => {
-      this.releaseNote(A4_MIDI);
-      this.a4PulseTimer = null;
-    }, A4_TEST_DURATION_MS);
+    void unlockP.then(() => {
+      if (this.a4PulseGen !== gen) {
+        return;
+      }
+      this.a4PulseTimer = window.setTimeout(() => {
+        if (this.a4PulseGen === gen) {
+          this.releaseNote(A4_MIDI);
+          this.a4PulseTimer = null;
+        }
+      }, A4_TEST_DURATION_MS);
+    });
   }
 
   private clearA4Pulse(): void {
+    this.a4PulseGen++;
     if (this.a4PulseTimer !== null) {
       window.clearTimeout(this.a4PulseTimer);
       this.a4PulseTimer = null;
@@ -337,6 +368,7 @@ export class AppShell {
     this.clearA4Pulse();
     this.midiPlayer.stop();
     this.host.allNotesOff();
+    this.telemetry.clearClip();
     this.keyboardView.clearActiveKeys();
     this.pedalController.reset();
   }

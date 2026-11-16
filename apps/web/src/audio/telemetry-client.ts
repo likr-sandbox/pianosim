@@ -1,4 +1,9 @@
-import type { EngineStatus, PianoDiagnostics, TelemetrySnapshot } from './abi';
+import {
+  SPL_CALIBRATION_OFFSET_DB,
+  type EngineStatus,
+  type PianoDiagnostics,
+  type TelemetrySnapshot,
+} from './abi';
 
 const EMPTY_TELEMETRY: TelemetrySnapshot = {
   activeVoices: 0,
@@ -9,8 +14,13 @@ const EMPTY_TELEMETRY: TelemetrySnapshot = {
   maxCallbackUs: 0,
   p50Us: 0,
   p99Us: 0,
+  overrunCount: 0,
+  clipped: false,
   blockCount: 0,
 };
+
+const PEAK_HOLD_MS = 1_200;
+const PEAK_DECAY_DB_PER_S = 18.0;
 
 export type DiagnosticsListener = (diag: PianoDiagnostics) => void;
 
@@ -20,12 +30,18 @@ declare global {
   }
 }
 
-/** Tracks live AudioWorklet telemetry and updates `window.__PIANO_DIAG__`. */
+export function linearToDbfs(amp: number): number {
+  if (!Number.isFinite(amp)) {
+    return NaN;
+  }
+  if (amp <= 1e-6) {
+    return -Infinity;
+  }
+  return 20.0 * Math.log10(amp);
+}
+
+/** Tracks live AudioWorklet telemetry, full-block peak hold / SPL, and honest p99 / max load. */
 export class TelemetryClient {
-  /**
-   * Capacity of rolling telemetry history (32 packets * 32 blocks * 2.67 ms = ~2.73 seconds at 48 kHz).
-   * 32 snapshots provide sufficient smoothing while allowing attack transients to purge within ~2.7s.
-   */
   private static readonly HISTORY_CAPACITY = 32;
   private readonly callbackHistory = new Float32Array(TelemetryClient.HISTORY_CAPACITY);
   private readonly sortScratch = new Float32Array(TelemetryClient.HISTORY_CAPACITY);
@@ -33,6 +49,14 @@ export class TelemetryClient {
   private historyIndex = 0;
   private p50Us = 0;
   private p99Us = 0;
+  private sessionMaxCallbackUs = 0;
+
+  private peakHold = 0;
+  private peakHoldStampMs = 0;
+  private peakHoldDbfs = -Infinity;
+  private rmsDbfs = -Infinity;
+  private splDb = -Infinity;
+  private clipLatched = false;
 
   private status: EngineStatus = 'locked';
   private sampleRate = 0;
@@ -67,6 +91,12 @@ export class TelemetryClient {
       workletNode: this.workletNode,
       telemetry: this.telemetry,
       telemetryBlocksReceived: this.telemetryBlocksReceived,
+      peakHold: this.peakHold,
+      peakHoldDbfs: this.peakHoldDbfs,
+      rmsDbfs: this.rmsDbfs,
+      splDb: this.splDb,
+      clipLatched: this.clipLatched,
+      sessionMaxCallbackUs: this.sessionMaxCallbackUs,
       p50Us: this.p50Us,
       p99Us: this.p99Us,
       error: this.error,
@@ -98,6 +128,13 @@ export class TelemetryClient {
     this.emit();
   }
 
+  clearClip(): void {
+    this.clipLatched = false;
+    this.peakHold = Math.max(Math.abs(this.telemetry.peakL), Math.abs(this.telemetry.peakR));
+    this.peakHoldDbfs = linearToDbfs(this.peakHold);
+    this.emit();
+  }
+
   updateTelemetry(snapshot: TelemetrySnapshot): void {
     const us = snapshot.callbackUs;
     this.callbackHistory[this.historyIndex] = us;
@@ -111,19 +148,36 @@ export class TelemetryClient {
     const sorted = this.sortScratch.subarray(0, n);
     sorted.sort();
 
-    // Median (50th percentile)
     this.p50Us = sorted[Math.floor(n * 0.5)];
-
-    // 99th percentile with small-sample robustness:
-    // When n >= 4, clamps to at most n - 2 to protect against a single anomalous CPU/OS interrupt spike.
-    // For n < 4, uses the highest available sample (n - 1).
-    let p99Idx = 0;
-    if (n >= 4) {
-      p99Idx = Math.min(n - 2, Math.max(0, Math.floor(0.99 * (n - 1))));
-    } else if (n > 1) {
-      p99Idx = n - 1;
-    }
+    // Honest nearest-rank 99th percentile without n - 2 masking.
+    const p99Idx = n > 0 ? Math.min(n - 1, Math.max(0, Math.ceil(0.99 * n) - 1)) : 0;
     this.p99Us = sorted[p99Idx];
+
+    if (snapshot.maxCallbackUs > this.sessionMaxCallbackUs) {
+      this.sessionMaxCallbackUs = snapshot.maxCallbackUs;
+    }
+
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const blockPeak = Math.max(Math.abs(snapshot.peakL), Math.abs(snapshot.peakR));
+    if (blockPeak >= this.peakHold) {
+      this.peakHold = blockPeak;
+      this.peakHoldStampMs = now;
+    } else if (this.peakHold > 0 && now - this.peakHoldStampMs > PEAK_HOLD_MS) {
+      const elapsedS = (now - this.peakHoldStampMs - PEAK_HOLD_MS) / 1000.0;
+      const decayFactor = Math.pow(10.0, (-PEAK_DECAY_DB_PER_S * elapsedS) / 20.0);
+      this.peakHold = Math.max(blockPeak, this.peakHold * decayFactor);
+      if (this.peakHold <= 1e-6) {
+        this.peakHold = 0;
+      }
+    }
+    this.peakHoldDbfs = linearToDbfs(this.peakHold);
+    this.rmsDbfs = linearToDbfs(snapshot.rmsMono);
+    this.splDb = Number.isFinite(this.peakHoldDbfs)
+      ? this.peakHoldDbfs + SPL_CALIBRATION_OFFSET_DB
+      : -Infinity;
+    if (snapshot.clipped || blockPeak >= 0.999) {
+      this.clipLatched = true;
+    }
 
     this.telemetry = {
       ...snapshot,
@@ -147,6 +201,13 @@ export class TelemetryClient {
     this.historyIndex = 0;
     this.p50Us = 0;
     this.p99Us = 0;
+    this.sessionMaxCallbackUs = 0;
+    this.peakHold = 0;
+    this.peakHoldStampMs = 0;
+    this.peakHoldDbfs = -Infinity;
+    this.rmsDbfs = -Infinity;
+    this.splDb = -Infinity;
+    this.clipLatched = false;
     this.error = null;
     this.emit();
   }
@@ -170,11 +231,18 @@ export class TelemetryClient {
 
 export function formatPeakDb(peakL: number, peakR: number): string {
   const peak = Math.max(Math.abs(peakL), Math.abs(peakR));
-  if (!Number.isFinite(peak)) {
+  const db = linearToDbfs(peak);
+  if (Number.isNaN(db)) {
     return 'NaN';
   }
-  if (peak <= 1e-6) {
+  if (!Number.isFinite(db)) {
     return '-inf dB';
   }
-  return `${(20 * Math.log10(peak)).toFixed(1)} dB`;
+  return `${db.toFixed(1)} dB`;
+}
+
+export function formatDbfs(db: number): string {
+  if (Number.isNaN(db)) return 'NaN';
+  if (!Number.isFinite(db)) return '-inf dBFS';
+  return `${db.toFixed(1)} dBFS`;
 }

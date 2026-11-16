@@ -1,57 +1,68 @@
 import {
+  HAMMER_HARDNESS_DEFAULT,
+  LID_OPEN,
+  PERSPECTIVE_PLAYER,
+  STRING_SCALE_DEFAULT,
+  STRETCH_TUNING_DEFAULT,
+  UNISON_DETUNE_DEFAULT,
+  WEB_AUDIO_SAMPLE_RATE,
   WORKLET_PROCESSOR_NAME,
   type LidState,
   type ListenerPerspective,
   type PedalKind,
+  type PrepInboundMessage,
+  type PrepOutboundMessage,
   type WorkletInboundMessage,
   type WorkletOutboundMessage,
 } from './abi';
+import prepWorkerCode from './prep-worker.ts?blobworker';
 import { TelemetryClient } from './telemetry-client';
+import { compileWasmModule } from './wasm-loader';
 import workletCode from './worklet-processor.ts?worklet';
 
-const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d] as const;
 const INIT_TIMEOUT_MS = 10_000;
 const ANALYSER_FFT_SIZE = 2048;
+const MAX_PENDING_BEFORE_READY = 256;
 
-function assertValidWasmBytes(bytes: ArrayBuffer): void {
-  if (bytes.byteLength < 8) {
-    throw new Error('Fetched piano_wasm.wasm is empty or truncated.');
-  }
-  const header = new Uint8Array(bytes, 0, 4);
-  for (let i = 0; i < 4; i++) {
-    if (header[i] !== WASM_MAGIC[i]) {
-      throw new Error(
-        'Invalid Wasm binary magic header (expected compiled public/piano_wasm.wasm).',
-      );
-    }
-  }
-}
-
-async function fetchWasmBinary(): Promise<ArrayBuffer> {
-  const url = `${import.meta.env.BASE_URL}piano_wasm.wasm`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: HTTP ${response.status}`);
-  }
-  const bytes = await response.arrayBuffer();
-  assertValidWasmBytes(bytes);
-  return bytes;
-}
-
-/** Manages AudioContext lifecycle, Wasm Worklet initialization, and passive diagnostic tap. */
+/** Manages 48 kHz AudioContext lifecycle, Wasm Worklet, and off-thread Prep Web Worker. */
 export class WasmAudioHost {
   private readonly telemetry: TelemetryClient;
   private audioContext: AudioContext | null = null;
   private workletNode: AudioWorkletNode | null = null;
+  private prepWorker: Worker | null = null;
   private analyser: AnalyserNode | null = null;
   private initPromise: Promise<void> | null = null;
+  private pipelineReady = false;
+  private readonly pendingBeforeReady: Array<() => void> = [];
+
+  private lastHammer = HAMMER_HARDNESS_DEFAULT;
+  private lastTuning = {
+    unison: UNISON_DETUNE_DEFAULT,
+    stretch: STRETCH_TUNING_DEFAULT,
+    scale: STRING_SCALE_DEFAULT,
+  };
+  private voicingSeq = 0;
+  private voicingInFlight = false;
+  private pendingVoicingReq: Extract<PrepInboundMessage, { type: 'prepVoicing' }> | null = null;
+
+  private lastSpace: { persp: ListenerPerspective; lid: LidState } = {
+    persp: PERSPECTIVE_PLAYER,
+    lid: LID_OPEN,
+  };
+  private spaceSeq = 0;
+  private spaceInFlight = false;
+  private pendingSpaceReq: Extract<PrepInboundMessage, { type: 'prepSpace' }> | null = null;
 
   constructor(telemetry: TelemetryClient) {
     this.telemetry = telemetry;
   }
 
   isReady(): boolean {
-    return this.workletNode !== null && this.telemetry.getDiagnostics().status === 'ready';
+    return (
+      this.pipelineReady &&
+      this.workletNode !== null &&
+      this.telemetry.getDiagnostics().status === 'ready'
+    );
   }
 
   getAudioContext(): AudioContext | null {
@@ -79,19 +90,37 @@ export class WasmAudioHost {
     return this.initPromise;
   }
 
+  private enqueueOrRun(fn: () => void): void {
+    if (this.pipelineReady && this.workletNode) {
+      fn();
+    } else if (this.pendingBeforeReady.length < MAX_PENDING_BEFORE_READY) {
+      this.pendingBeforeReady.push(fn);
+    }
+  }
+
   noteOn(midiKey: number, velocityU16: number, sampleOffset = 0): void {
-    this.postToWorklet({ type: 'noteOn', midiKey, velocityU16, sampleOffset });
+    this.enqueueOrRun(() => {
+      this.postToWorklet({ type: 'noteOn', midiKey, velocityU16, sampleOffset });
+    });
   }
 
   noteOff(midiKey: number, releaseVelU16 = 0, sampleOffset = 0): void {
-    this.postToWorklet({ type: 'noteOff', midiKey, releaseVelU16, sampleOffset });
+    this.enqueueOrRun(() => {
+      this.postToWorklet({ type: 'noteOff', midiKey, releaseVelU16, sampleOffset });
+    });
   }
 
   pedal(pedalKind: PedalKind, valueU16: number, sampleOffset = 0): void {
-    this.postToWorklet({ type: 'pedal', pedalKind, valueU16, sampleOffset });
+    this.enqueueOrRun(() => {
+      this.postToWorklet({ type: 'pedal', pedalKind, valueU16, sampleOffset });
+    });
   }
 
   allNotesOff(): void {
+    if (!this.pipelineReady) {
+      this.pendingBeforeReady.length = 0;
+      return;
+    }
     this.postToWorklet({ type: 'allNotesOff' });
   }
 
@@ -101,24 +130,80 @@ export class WasmAudioHost {
     stretchTuning: number,
     stringLengthScale: number,
   ): void {
-    this.postToWorklet({
-      type: 'setVoicing',
-      hammerHardness,
-      unisonDetune,
-      stretchTuning,
-      stringLengthScale,
+    this.enqueueOrRun(() => {
+      if (hammerHardness !== this.lastHammer) {
+        this.lastHammer = hammerHardness;
+        this.postToWorklet({ type: 'setHammer', hammerHardness });
+      }
+      const tuningChanged =
+        unisonDetune !== this.lastTuning.unison ||
+        stretchTuning !== this.lastTuning.stretch ||
+        stringLengthScale !== this.lastTuning.scale;
+      if (!tuningChanged || !this.prepWorker) {
+        return;
+      }
+      this.lastTuning = {
+        unison: unisonDetune,
+        stretch: stretchTuning,
+        scale: stringLengthScale,
+      };
+      const req: Extract<PrepInboundMessage, { type: 'prepVoicing' }> = {
+        type: 'prepVoicing',
+        hammerHardness,
+        unisonDetune,
+        stretchTuning,
+        stringLengthScale,
+        seq: ++this.voicingSeq,
+      };
+      if (this.voicingInFlight) {
+        this.pendingVoicingReq = req;
+      } else {
+        this.voicingInFlight = true;
+        this.prepWorker.postMessage(req);
+      }
     });
   }
 
   setSpace(perspective: ListenerPerspective, lidState: LidState): void {
-    this.postToWorklet({
-      type: 'setSpace',
-      perspective,
-      lidState,
+    this.enqueueOrRun(() => {
+      if (
+        perspective === this.lastSpace.persp &&
+        lidState === this.lastSpace.lid
+      ) {
+        return;
+      }
+      this.lastSpace = { persp: perspective, lid: lidState };
+      if (!this.prepWorker) {
+        this.postToWorklet({ type: 'setSpace', perspective, lidState });
+        return;
+      }
+      const req: Extract<PrepInboundMessage, { type: 'prepSpace' }> = {
+        type: 'prepSpace',
+        perspective,
+        lidState,
+        seq: ++this.spaceSeq,
+      };
+      if (this.spaceInFlight) {
+        this.pendingSpaceReq = req;
+      } else {
+        this.spaceInFlight = true;
+        this.prepWorker.postMessage(req);
+      }
     });
   }
 
   async dispose(): Promise<void> {
+    this.pipelineReady = false;
+    this.pendingBeforeReady.length = 0;
+    this.pendingVoicingReq = null;
+    this.pendingSpaceReq = null;
+    this.voicingInFlight = false;
+    this.spaceInFlight = false;
+    if (this.prepWorker) {
+      this.prepWorker.postMessage({ type: 'destroy' } satisfies PrepInboundMessage);
+      this.prepWorker.terminate();
+      this.prepWorker = null;
+    }
     if (this.workletNode) {
       this.postToWorklet({ type: 'destroy' });
       this.workletNode.disconnect();
@@ -145,6 +230,7 @@ export class WasmAudioHost {
     this.telemetry.setStatus('initializing');
     let audioContext: AudioContext | null = null;
     let workletNode: AudioWorkletNode | null = null;
+    let prepWorker: Worker | null = null;
     let analyser: AnalyserNode | null = null;
 
     try {
@@ -155,7 +241,10 @@ export class WasmAudioHost {
         throw new Error('Web Audio API is not supported in this browser.');
       }
 
-      audioContext = new AudioCtx({ latencyHint: 'interactive', sampleRate: 48000 });
+      audioContext = new AudioCtx({
+        latencyHint: 'interactive',
+        sampleRate: WEB_AUDIO_SAMPLE_RATE,
+      });
       audioContext.onstatechange = () => {
         this.telemetry.syncContextState();
       };
@@ -166,16 +255,24 @@ export class WasmAudioHost {
         throw new Error('AudioWorklet is unavailable in this execution context.');
       }
 
-      const blobUrl = URL.createObjectURL(
+      const workletBlobUrl = URL.createObjectURL(
         new Blob([workletCode], { type: 'application/javascript' }),
       );
+      const workerBlobUrl = URL.createObjectURL(
+        new Blob([prepWorkerCode], { type: 'application/javascript' }),
+      );
+      let wasmModule: WebAssembly.Module;
       try {
-        await audioContext.audioWorklet.addModule(blobUrl);
+        const [, compiled] = await Promise.all([
+          audioContext.audioWorklet.addModule(workletBlobUrl),
+          compileWasmModule(),
+        ]);
+        wasmModule = compiled;
+        prepWorker = new Worker(workerBlobUrl, { type: 'module' });
       } finally {
-        URL.revokeObjectURL(blobUrl);
+        URL.revokeObjectURL(workletBlobUrl);
+        URL.revokeObjectURL(workerBlobUrl);
       }
-
-      const wasmBytes = await fetchWasmBinary();
 
       workletNode = new AudioWorkletNode(audioContext, WORKLET_PROCESSOR_NAME, {
         numberOfInputs: 0,
@@ -186,21 +283,36 @@ export class WasmAudioHost {
       analyser = audioContext.createAnalyser();
       analyser.fftSize = ANALYSER_FFT_SIZE;
       analyser.smoothingTimeConstant = 0;
-
-      // Passive diagnostic tap directly inline before AudioContext destination.
       workletNode.connect(analyser);
       analyser.connect(audioContext.destination);
 
       this.audioContext = audioContext;
       this.workletNode = workletNode;
+      this.prepWorker = prepWorker;
       this.analyser = analyser;
       this.telemetry.setAudioGraph(audioContext, analyser, workletNode);
 
-      await this.handshakeWorklet(workletNode, wasmBytes);
+      const channel = new MessageChannel();
+      await Promise.all([
+        this.handshakeWorklet(workletNode, wasmModule, channel.port2),
+        this.handshakePrepWorker(prepWorker, wasmModule, audioContext.sampleRate, channel.port1),
+      ]);
+
+      this.pipelineReady = true;
       this.telemetry.syncContextState();
       this.telemetry.setStatus('ready');
+
+      const queued = this.pendingBeforeReady.splice(0);
+      for (const run of queued) {
+        run();
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      this.pipelineReady = false;
+      this.pendingBeforeReady.length = 0;
+      if (prepWorker) {
+        prepWorker.terminate();
+      }
       if (workletNode) {
         workletNode.disconnect();
       }
@@ -212,6 +324,7 @@ export class WasmAudioHost {
       }
       this.audioContext = null;
       this.workletNode = null;
+      this.prepWorker = null;
       this.analyser = null;
       this.telemetry.setAudioGraph(null, null, null);
       this.telemetry.setStatus('error', message);
@@ -219,7 +332,11 @@ export class WasmAudioHost {
     }
   }
 
-  private handshakeWorklet(node: AudioWorkletNode, wasmBytes: ArrayBuffer): Promise<void> {
+  private handshakeWorklet(
+    node: AudioWorkletNode,
+    wasmModule: WebAssembly.Module,
+    prepPort: MessagePort,
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
       const timer = window.setTimeout(() => {
@@ -268,14 +385,87 @@ export class WasmAudioHost {
             maxCallbackUs: msg.maxCallbackUs,
             p50Us: msg.p50Us,
             p99Us: msg.p99Us,
+            overrunCount: msg.overrunCount,
+            clipped: msg.clipped,
             blockCount: msg.blockCount,
           });
         }
       };
 
-      node.port.postMessage({ type: 'init', wasmBytes } satisfies WorkletInboundMessage, [
-        wasmBytes,
-      ]);
+      node.port.postMessage(
+        { type: 'init', wasmModule, prepPort } satisfies WorkletInboundMessage,
+        [prepPort],
+      );
+    });
+  }
+
+  private handshakePrepWorker(
+    worker: Worker,
+    wasmModule: WebAssembly.Module,
+    sampleRate: number,
+    workletPort: MessagePort,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = window.setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error('Timed out waiting for Prep Web Worker initialization.'));
+        }
+      }, INIT_TIMEOUT_MS);
+
+      worker.onerror = (ev) => {
+        const msg = `Prep Worker error: ${ev.message}`;
+        if (!settled) {
+          settled = true;
+          window.clearTimeout(timer);
+          reject(new Error(msg));
+        }
+      };
+
+      worker.onmessage = (event: MessageEvent<PrepOutboundMessage>) => {
+        const msg = event.data;
+        if (msg.type === 'ready') {
+          if (!settled) {
+            settled = true;
+            window.clearTimeout(timer);
+            resolve();
+          }
+          return;
+        }
+        if (msg.type === 'spaceDone') {
+          if (this.pendingSpaceReq && this.prepWorker) {
+            const next = this.pendingSpaceReq;
+            this.pendingSpaceReq = null;
+            this.prepWorker.postMessage(next);
+          } else {
+            this.spaceInFlight = false;
+          }
+          return;
+        }
+        if (msg.type === 'voicingDone') {
+          if (this.pendingVoicingReq && this.prepWorker) {
+            const next = this.pendingVoicingReq;
+            this.pendingVoicingReq = null;
+            this.prepWorker.postMessage(next);
+          } else {
+            this.voicingInFlight = false;
+          }
+          return;
+        }
+        if (msg.type === 'error') {
+          if (!settled) {
+            settled = true;
+            window.clearTimeout(timer);
+            reject(new Error(msg.message));
+          }
+        }
+      };
+
+      worker.postMessage(
+        { type: 'init', wasmModule, sampleRate, workletPort } satisfies PrepInboundMessage,
+        [workletPort],
+      );
     });
   }
 }

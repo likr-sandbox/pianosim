@@ -106,4 +106,87 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
     await page.keyboard.up('KeyH');
     assertNoErrors();
   });
+
+  test('auto-unlocks at 48 kHz on queued A4 trigger and reports honest SPL/Peak/Max HUD', async ({
+    page,
+  }) => {
+    const assertNoErrors = setupErrorMonitoring(page);
+
+    // Click A4 test button directly from locked state without clicking Unlock Audio first.
+    await expect(page.getByTestId('hud-status')).toHaveText('Locked');
+    await page.getByTestId('trigger-a4').click();
+
+    await expect
+      .poll(async () => {
+        return page.evaluate(() => {
+          const d = window.__PIANO_DIAG__;
+          return d ? `${d.status}:${d.contextState}` : 'missing';
+        });
+      })
+      .toBe('ready:running');
+
+    await expect(page.getByTestId('hud-sample-rate')).toHaveText('48000 Hz');
+
+    // Queued A4 trigger fires cleanly once pipeline is ready.
+    await expect
+      .poll(async () => parseInt((await page.getByTestId('hud-voices').textContent()) ?? '0', 10), {
+        timeout: 3000,
+      })
+      .toBeGreaterThanOrEqual(1);
+
+    await page.waitForTimeout(160);
+    const audio = await sampleDestinationAudio(page, 400, 500);
+    expect(audio.nonFiniteCount).toBe(0);
+    expect(audio.peak).toBeLessThanOrEqual(1.0);
+    expect(audio.rms).toBeGreaterThan(0.002);
+    expect(audio.peakFreqHz).toBeGreaterThanOrEqual(435);
+    expect(audio.peakFreqHz).toBeLessThanOrEqual(445);
+
+    // Verify HUD Peak Hold / RMS / SPL calibration (-18 dBFS == 82.0 dB SPL) and true max/overrun fields.
+    await expect
+      .poll(async () => {
+        return page.evaluate(() => {
+          const d = window.__PIANO_DIAG__;
+          return d && Number.isFinite(d.splDb) && d.peakHoldDbfs > -60 ? 1 : 0;
+        });
+      })
+      .toBe(1);
+
+    const hudCheck = await page.evaluate(() => {
+      const d = window.__PIANO_DIAG__!;
+      const fillEl = document.querySelector<HTMLElement>('[data-testid="hud-level-fill"]')!;
+      const peakText = document.querySelector('[data-testid="hud-peak-db"]')?.textContent ?? '';
+      const rmsText = document.querySelector('[data-testid="hud-rms-db"]')?.textContent ?? '';
+      const splText = document.querySelector('[data-testid="hud-spl-db"]')?.textContent ?? '';
+      const maxText = document.querySelector('[data-testid="hud-max-us"]')?.textContent ?? '';
+      const overrunsText = document.querySelector('[data-testid="hud-overruns"]')?.textContent ?? '';
+      const clipClass = document.querySelector('[data-testid="hud-clip"]')?.className ?? '';
+      return {
+        sampleRate: d.sampleRate,
+        peakHoldDbfs: d.peakHoldDbfs,
+        splDb: d.splDb,
+        fillPct: parseFloat(fillEl.style.width || '0'),
+        peakText,
+        rmsText,
+        splText,
+        maxUs: parseFloat(maxText),
+        overruns: parseInt(overrunsText, 10),
+        isClipping: clipClass.includes('is-clipping'),
+      };
+    });
+
+    expect(hudCheck.sampleRate).toBe(48000);
+    expect(Math.abs(hudCheck.splDb - (hudCheck.peakHoldDbfs + 100.0))).toBeLessThan(1e-5);
+    expect(hudCheck.fillPct).toBeGreaterThan(0);
+    expect(hudCheck.peakText).toMatch(/^-?\d+\.\d+ dB$/);
+    expect(hudCheck.rmsText).toMatch(/^RMS -?\d+\.\d+ dBFS$/);
+    expect(hudCheck.splText).toMatch(/^≈ \d+\.\d+ dB SPL$/);
+    expect(Number.isFinite(hudCheck.maxUs) && hudCheck.maxUs >= 0).toBe(true);
+    expect(Number.isInteger(hudCheck.overruns) && hudCheck.overruns >= 0).toBe(true);
+    expect(hudCheck.isClipping).toBe(false);
+
+    // Confirm auto-release after 750ms pulse decays audio cleanly.
+    await expectAudioDecay(page, audio.rms, 0.25, 3000);
+    assertNoErrors();
+  });
 });

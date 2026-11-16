@@ -2,10 +2,19 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, transformWithEsbuild, type Plugin } from 'vite';
 
-const WORKLET_SUFFIX = '?worklet';
+const BLOB_SUFFIXES = ['?worklet', '?blobworker'] as const;
+
+function matchBlobSuffix(id: string): string | null {
+  for (const suffix of BLOB_SUFFIXES) {
+    if (id.endsWith(suffix)) {
+      return suffix;
+    }
+  }
+  return null;
+}
 
 /**
- * Compiles TypeScript AudioWorklet processors into standalone JS strings
+ * Compiles TypeScript AudioWorklet & Prep Worker scripts into standalone JS strings
  * so they load identically via Blob URL in dev, preview, and GitHub Pages.
  */
 function audioWorkletPlugin(): Plugin {
@@ -17,21 +26,23 @@ function audioWorkletPlugin(): Plugin {
       isBuild = config.command === 'build';
     },
     async resolveId(source, importer) {
-      if (!source.endsWith(WORKLET_SUFFIX)) {
+      const suffix = matchBlobSuffix(source);
+      if (!suffix) {
         return null;
       }
-      const cleanSource = source.slice(0, -WORKLET_SUFFIX.length);
+      const cleanSource = source.slice(0, -suffix.length);
       const resolved = await this.resolve(cleanSource, importer, { skipSelf: true });
       if (!resolved) {
         return null;
       }
-      return `${resolved.id}${WORKLET_SUFFIX}`;
+      return `${resolved.id}${suffix}`;
     },
     async load(id) {
-      if (!id.endsWith(WORKLET_SUFFIX)) {
+      const suffix = matchBlobSuffix(id);
+      if (!suffix) {
         return null;
       }
-      const filePath = id.slice(0, -WORKLET_SUFFIX.length);
+      const filePath = id.slice(0, -suffix.length);
       this.addWatchFile(filePath);
       const source = await readFile(filePath, 'utf8');
       const result = await transformWithEsbuild(source, filePath, {
