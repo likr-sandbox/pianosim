@@ -8,7 +8,7 @@ use crate::engine_core::{AudioTap, EngineCore};
 use crate::event_queue::{is_sorted_by_offset, EventQueue};
 use crate::param_smooth::{
     IntoLidState, IntoListenerPerspective, SpaceCrossfadeGuard, SpaceTransitionAction,
-    VoicingSmoother,
+    VoicingSmoother, DIRTY_TUNING,
 };
 use crate::telemetry::{compute_block_telemetry, EngineTelemetry};
 
@@ -221,12 +221,17 @@ impl PianoEngine {
         let out_l = &mut out_l[..frames];
         let out_r = &mut out_r[..frames];
 
-        if let Some(spec) = self.voicing_smoother.step_block(frames, self.sample_rate()) {
+        if let Some((spec, dirty)) = self
+            .voicing_smoother
+            .step_block_with_dirty(frames, self.sample_rate())
+        {
             self.core.action.update_voicing_in_place(&spec);
-            self.core.bank.update_voicing_in_place(&spec);
-            self.core
-                .bridge
-                .set_port_resistances(self.core.bank.bridge_port_resistances());
+            if (dirty & DIRTY_TUNING) != 0 {
+                self.core.bank.update_voicing_in_place(&spec);
+                self.core
+                    .bridge
+                    .set_port_resistances(self.core.bank.bridge_port_resistances());
+            }
         }
 
         if is_sorted_by_offset(events) {

@@ -75,6 +75,8 @@ fn step_prefix_run_k<const K: usize>(
     meta: &[FastPrefixMeta; TOTAL_STRINGS],
     gains: &[f32; TOTAL_STRINGS],
     str_coupled: &[bool; TOTAL_STRINGS],
+    may_be_nonzero: &mut [bool; TOTAL_STRINGS],
+    ports_synced: &mut [bool; TOTAL_STRINGS],
     a_waves: &mut [f32; TOTAL_STRINGS],
     b_waves: &[f32; TOTAL_STRINGS],
     sum_l_vec: &mut F32x4,
@@ -87,6 +89,27 @@ fn step_prefix_run_k<const K: usize>(
     while idx + 4 <= count {
         let s = start_s + idx;
         if !(str_coupled[s] | str_coupled[s + 1] | str_coupled[s + 2] | str_coupled[s + 3]) {
+            let any_nz = may_be_nonzero[s]
+                | may_be_nonzero[s + 1]
+                | may_be_nonzero[s + 2]
+                | may_be_nonzero[s + 3];
+            let any_b = b_waves[s] != 0.0
+                || b_waves[s + 1] != 0.0
+                || b_waves[s + 2] != 0.0
+                || b_waves[s + 3] != 0.0;
+            if !any_nz && !any_b {
+                a_waves[s..s + 4].fill(0.0);
+                idx += 4;
+                continue;
+            }
+            if !any_nz || any_b {
+                for j in 0..4 {
+                    if !may_be_nonzero[s + j] && b_waves[s + j] != 0.0 {
+                        may_be_nonzero[s + j] = true;
+                        ports_synced[s + j] = false;
+                    }
+                }
+            }
             let nvp = neg_half
                 * (F32x4::from_slice(&a_waves[s..s + 4]) + F32x4::from_slice(&b_waves[s..s + 4]));
             let base = idx * stride;
@@ -130,6 +153,14 @@ fn step_prefix_run_k<const K: usize>(
             if str_coupled[s_idx] {
                 continue;
             }
+            if !may_be_nonzero[s_idx] && b_waves[s_idx] == 0.0 {
+                a_waves[s_idx] = 0.0;
+                continue;
+            }
+            if !may_be_nonzero[s_idx] {
+                may_be_nonzero[s_idx] = true;
+                ports_synced[s_idx] = false;
+            }
             let off = (idx + sub_i) * stride;
             let neg_vbr = F32x4::splat(-0.5 * (a_waves[s_idx] + b_waves[s_idx]));
             let (acc_m, acc_br) = step_one_prefix::<K>(
@@ -148,6 +179,15 @@ fn step_prefix_run_k<const K: usize>(
     while idx < count {
         let s_idx = start_s + idx;
         if !str_coupled[s_idx] {
+            if !may_be_nonzero[s_idx] && b_waves[s_idx] == 0.0 {
+                a_waves[s_idx] = 0.0;
+                idx += 1;
+                continue;
+            }
+            if !may_be_nonzero[s_idx] {
+                may_be_nonzero[s_idx] = true;
+                ports_synced[s_idx] = false;
+            }
             let off = idx * stride;
             let neg_vbr = F32x4::splat(-0.5 * (a_waves[s_idx] + b_waves[s_idx]));
             let (acc_m, acc_br) = step_one_prefix::<K>(
@@ -169,6 +209,7 @@ fn step_prefix_run_k<const K: usize>(
 #[inline(never)]
 pub(crate) fn step_uncoupled_prefixes_fast(
     bp: &mut BridgePorts,
+    ports: &mut ContactPorts,
     str_coupled: &[bool; TOTAL_STRINGS],
     a_waves: &mut [f32; TOTAL_STRINGS],
     b_waves: &[f32; TOTAL_STRINGS],
@@ -197,6 +238,8 @@ pub(crate) fn step_uncoupled_prefixes_fast(
                 &bp.fast_meta,
                 &bp.a_wave_gains,
                 str_coupled,
+                &mut ports.may_be_nonzero,
+                &mut ports.ports_synced,
                 a_waves,
                 b_waves,
                 &mut sum_l_vec,
@@ -210,6 +253,8 @@ pub(crate) fn step_uncoupled_prefixes_fast(
                 &bp.fast_meta,
                 &bp.a_wave_gains,
                 str_coupled,
+                &mut ports.may_be_nonzero,
+                &mut ports.ports_synced,
                 a_waves,
                 b_waves,
                 &mut sum_l_vec,
@@ -223,6 +268,8 @@ pub(crate) fn step_uncoupled_prefixes_fast(
                 &bp.fast_meta,
                 &bp.a_wave_gains,
                 str_coupled,
+                &mut ports.may_be_nonzero,
+                &mut ports.ports_synced,
                 a_waves,
                 b_waves,
                 &mut sum_l_vec,

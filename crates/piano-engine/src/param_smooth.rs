@@ -18,6 +18,11 @@ pub const SPACE_CROSSFADE_S: f32 = 0.008;
 /// Signal envelope threshold below which spatial switching occurs instantly without crossfade.
 pub const SPACE_SILENCE_ENV_THRESHOLD: f32 = 1.0e-7;
 
+/// Voicing dirty flag: hammer hardness / action felt parameters changed.
+pub const DIRTY_HAMMER: u8 = 1;
+/// Voicing dirty flag: string tuning / unison / length scale changed.
+pub const DIRTY_TUNING: u8 = 2;
+
 const DEFAULTS: [f32; 4] = [
     HAMMER_HARDNESS_DEFAULT,
     UNISON_DETUNE_SCALE_DEFAULT,
@@ -119,9 +124,19 @@ impl VoicingSmoother {
     }
 
     pub fn step_block(&mut self, frames: usize, sample_rate: f32) -> Option<VoicingSpec> {
+        self.step_block_with_dirty(frames, sample_rate)
+            .map(|(spec, _)| spec)
+    }
+
+    pub fn step_block_with_dirty(
+        &mut self,
+        frames: usize,
+        sample_rate: f32,
+    ) -> Option<(VoicingSpec, u8)> {
         if !self.active || frames == 0 || sample_rate <= 0.0 {
             return None;
         }
+        let prev = self.current;
         let dt = (frames as f32) / sample_rate;
         match self.curve {
             SmoothCurve::Exponential => {
@@ -151,12 +166,22 @@ impl VoicingSmoother {
         if self.current == self.target {
             self.active = false;
         }
+        let mut dirty = 0u8;
+        if self.current[0] != prev[0] {
+            dirty |= DIRTY_HAMMER;
+        }
+        if self.current[1] != prev[1] || self.current[2] != prev[2] || self.current[3] != prev[3] {
+            dirty |= DIRTY_TUNING;
+        }
+        if dirty == 0 {
+            return None;
+        }
         let mut spec = VoicingSpec::new();
         spec.hammer_hardness = self.current[0];
         spec.unison_detune_scale = self.current[1];
         spec.stretch_amount = self.current[2];
         spec.string_length_scale = self.current[3];
-        Some(spec)
+        Some((spec, dirty))
     }
 
     #[inline]
@@ -445,5 +470,16 @@ mod tests {
         let (w_out_end, w_in_end) = raised_cosine_weights(384, 384);
         assert_eq!(w_out_end, 0.0);
         assert_eq!(w_in_end, 1.0);
+    }
+
+    #[test]
+    fn voicing_dirty_mask_isolates_hammer_from_tuning() {
+        let mut sm = VoicingSmoother::new();
+        sm.set_target(0.85, 1.0, 1.0, 1.0);
+        let (_, d_h) = sm.step_block_with_dirty(128, 48_000.0).expect("dirty");
+        assert_eq!(d_h, DIRTY_HAMMER);
+        sm.set_target(0.85, 1.25, 1.0, 1.0);
+        let (_, d_u) = sm.step_block_with_dirty(128, 48_000.0).expect("dirty");
+        assert_ne!(d_u & DIRTY_TUNING, 0);
     }
 }

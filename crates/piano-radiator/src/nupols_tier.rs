@@ -55,8 +55,10 @@ pub(crate) struct NupolsTier {
     fdl_head: usize,
     pub(crate) acc_l: SplitComplexBuf,
     pub(crate) acc_r: SplitComplexBuf,
+    pub(crate) acc_dirty: bool,
     pub(crate) has_pending: bool,
     pub(crate) pending_s_in_end: usize,
+    pub(crate) fdl_nz: Vec<bool>,
 }
 
 impl NupolsTier {
@@ -90,8 +92,10 @@ impl NupolsTier {
             fdl_head: 0,
             acc_l: SplitComplexBuf::zeroed(spec_len),
             acc_r: SplitComplexBuf::zeroed(spec_len),
+            acc_dirty: false,
             has_pending: false,
             pending_s_in_end: 0,
+            fdl_nz: alloc::vec![false; p_count * PRESET_RADIATOR_ZONES],
         }
     }
 
@@ -136,9 +140,18 @@ impl NupolsTier {
         }
         self.acc_l.clear();
         self.acc_r.clear();
+        self.acc_dirty = false;
         self.fdl_head = 0;
         self.has_pending = false;
         self.pending_s_in_end = 0;
+        self.fdl_nz.fill(false);
+    }
+
+    #[inline]
+    pub(crate) fn clear_acc(&mut self) {
+        self.acc_l.clear();
+        self.acc_r.clear();
+        self.acc_dirty = false;
     }
 
     #[inline]
@@ -171,9 +184,14 @@ impl NupolsTier {
             if second > 0 {
                 work[first..fft_len].copy_from_slice(&src[..second]);
             }
-            let dst = &mut self.fdl[self.fdl_head * PRESET_RADIATOR_ZONES + z];
-            let (re, im) = dst.planes_mut();
-            self.fft.forward_split(work, re, im);
+            let nz = work[..fft_len].iter().any(|&v| v != 0.0);
+            let slot = self.fdl_head * PRESET_RADIATOR_ZONES + z;
+            self.fdl_nz[slot] = nz;
+            if nz {
+                let dst = &mut self.fdl[slot];
+                let (re, im) = dst.planes_mut();
+                self.fft.forward_split(work, re, im);
+            }
             z += 1;
         }
     }
@@ -188,11 +206,14 @@ impl NupolsTier {
 
             let mut z = 0;
             while z < PRESET_RADIATOR_ZONES {
-                let x_spec = &self.fdl[fdl_base + z];
-                self.acc_l
-                    .fma_accumulate(x_spec, &self.ir_spectra[ir_base + path_index(z, 0)]);
-                self.acc_r
-                    .fma_accumulate(x_spec, &self.ir_spectra[ir_base + path_index(z, 1)]);
+                if self.fdl_nz[fdl_base + z] {
+                    self.acc_dirty = true;
+                    let x_spec = &self.fdl[fdl_base + z];
+                    self.acc_l
+                        .fma_accumulate(x_spec, &self.ir_spectra[ir_base + path_index(z, 0)]);
+                    self.acc_r
+                        .fma_accumulate(x_spec, &self.ir_spectra[ir_base + path_index(z, 1)]);
+                }
                 z += 1;
             }
             p += 1;
@@ -206,6 +227,9 @@ impl NupolsTier {
         s_in_end: usize,
         time_scratch: &mut [f32],
     ) {
+        if !self.acc_dirty {
+            return;
+        }
         let b = self.block_size;
         let fft_len = b * 2;
         let write_start = s_in_end.wrapping_sub(b).wrapping_add(self.ir_offset) & OUT_RING_MASK;
@@ -229,8 +253,7 @@ impl NupolsTier {
         s_in_end: usize,
         time_scratch: &mut [f32],
     ) {
-        self.acc_l.clear();
-        self.acc_r.clear();
+        self.clear_acc();
         self.accumulate_partitions(0, self.p_count);
         self.inverse_channel_add(0, out_ring_l, s_in_end, time_scratch);
         self.inverse_channel_add(1, out_ring_r, s_in_end, time_scratch);

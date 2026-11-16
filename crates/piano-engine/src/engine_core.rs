@@ -311,21 +311,25 @@ impl EngineCore {
     }
 
     pub fn retire_silent_keys(&mut self) {
-        if self.action.sustain() > 0.0 {
-            return;
-        }
         for k in 0..NUM_KEYS {
             if !self.ringing[k] || self.key_down[k] || self.action.is_hammer_active(k) {
                 continue;
             }
-            if k < DAMPED_KEYS && self.action.damper_clearance_m(k) > DAMPER_ACTIVE_HOLD_CLEARANCE_M
-            {
+            let damper_closed = k >= DAMPED_KEYS
+                || self.action.damper_clearance_m(k) <= DAMPER_ACTIVE_HOLD_CLEARANCE_M;
+            let (v_rms, h_rms) = self.bank.measure_key_polarization_rms(k);
+            let peak_rms = v_rms.max(h_rms);
+            if peak_rms >= KEY_SILENCE_RMS_THRESHOLD {
                 continue;
             }
-            let (v_rms, h_rms) = self.bank.measure_key_polarization_rms(k);
-            if v_rms.max(h_rms) < KEY_SILENCE_RMS_THRESHOLD {
+            if damper_closed && self.action.sustain() == 0.0 {
                 self.ringing[k] = false;
                 self.bank.retire_key_struck_contact(k);
+            } else {
+                self.bank.retire_key_sav_dormant(k);
+                if damper_closed || peak_rms < 2.5e-5 {
+                    self.ringing[k] = false;
+                }
             }
         }
     }

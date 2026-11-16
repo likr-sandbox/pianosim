@@ -177,6 +177,18 @@ impl SavBank {
 }
 
 impl StringBank {
+    /// Demotes sustained decayed strings to passive linear bridge resonance by retiring
+    /// nonlinear SAV computation while retaining tail-damper readiness for pedal release.
+    #[inline]
+    pub fn retire_key_sav_dormant(&mut self, key_idx: usize) {
+        if let Some(entry) = self.choir_map.key(key_idx) {
+            for s_idx in entry.string_range.clone() {
+                self.ports.sav_dormant[s_idx] = true;
+                self.sav.reset_string(s_idx);
+            }
+        }
+    }
+
     #[inline]
     pub(crate) fn ensure_soa_mode(&mut self) {
         if self.soa_dirty {
@@ -250,6 +262,62 @@ impl StringBank {
     }
 }
 
+const ENERGY_HORIZON_SQ: f32 = 1.0e-18; // (-120 dBFS post-Stage-4 amplitude horizon, FTO #4/#7 pure energy check)
+const SAV_DORMANCY_RATIO: f64 = 1.581e-6; // E_nl / (2 * E_lin) threshold corresponding to -55 dB
+const SAV_DORMANCY_CHUNKS: u8 = 12;
+
+#[inline]
+fn shrink_tail_horizon(tl_soa: &mut ModalSoa, range: Range<usize>, active: &mut u16) {
+    let mut n = usize::from(*active).min(range.len());
+    let u = &mut tl_soa.u.as_f32x4_slice_mut()[range.clone()];
+    let v = &mut tl_soa.v.as_f32x4_slice_mut()[range];
+    while n > 0 {
+        let idx = n - 1;
+        let e4 = (u[idx] * u[idx] + v[idx] * v[idx]).to_array();
+        if e4[0] < ENERGY_HORIZON_SQ
+            && e4[1] < ENERGY_HORIZON_SQ
+            && e4[2] < ENERGY_HORIZON_SQ
+            && e4[3] < ENERGY_HORIZON_SQ
+        {
+            u[idx] = F32x4::zero();
+            v[idx] = F32x4::zero();
+            n -= 1;
+        } else {
+            break;
+        }
+    }
+    *active = n as u16;
+}
+
+pub(crate) fn update_sav_dormancy(
+    ports: &mut ContactPorts,
+    bp: &BridgePorts,
+    sav: &mut SavBank,
+    s_idx: usize,
+) {
+    if !ports.struck_active[s_idx] || ports.sav_dormant[s_idx] {
+        return;
+    }
+    let m = &bp.meta[s_idx];
+    let mut e_sq4 = F32x4::zero();
+    for st in &bp.state[m.beta_v_off..(m.beta_v_off + m.n_vh)] {
+        e_sq4 = st.u.mul_add(st.u, st.v.mul_add(st.v, e_sq4));
+    }
+    let e_sq = f64::from(e_sq4.reduce_sum());
+    let r = sav.r_sav[s_idx];
+    let e_nl = 0.5 * (r * r - 1.0).max(0.0);
+    if (r - 1.0).abs() < 1.0e-4 && e_nl <= SAV_DORMANCY_RATIO * e_sq.max(1.0e-14) {
+        let cnt = ports.sav_low_nl_chunks[s_idx].saturating_add(1);
+        ports.sav_low_nl_chunks[s_idx] = cnt;
+        if cnt >= SAV_DORMANCY_CHUNKS {
+            ports.sav_dormant[s_idx] = true;
+            sav.reset_string(s_idx);
+        }
+    } else {
+        ports.sav_low_nl_chunks[s_idx] = 0;
+    }
+}
+
 #[inline]
 fn flush_prefix_slice(slice: &mut [PrefixState]) -> bool {
     let mut any_nz = false;
@@ -269,9 +337,11 @@ pub(crate) fn flush_bridge_subnormals_core(
     sav: &mut SavBank,
     strings: &[StringMapEntry],
     key_has_hammer: &[bool; NUM_KEYS],
+    lossless: bool,
 ) {
     for (s_idx, entry) in strings.iter().enumerate() {
         if ports.may_be_nonzero[s_idx] {
+            let k = usize::from(entry.key_idx);
             let (p_range, tl_v, tl_h, tl_l) = {
                 let m = &bridge_ports.meta[s_idx];
                 (
@@ -285,13 +355,30 @@ pub(crate) fn flush_bridge_subnormals_core(
             let nz = if !ports.tail_nonzero[s_idx] {
                 nz_br
             } else {
-                let nz_tail = flush_subnormals_range(&mut bridge_ports.tl_soa, tl_v)
-                    | flush_subnormals_range(&mut bridge_ports.tl_soa, tl_h)
-                    | flush_subnormals_range(&mut bridge_ports.tl_soa, tl_l);
+                if !lossless && !key_has_hammer[k] {
+                    shrink_tail_horizon(
+                        &mut bridge_ports.tl_soa,
+                        tl_v.clone(),
+                        &mut ports.tl_v_active[s_idx],
+                    );
+                    shrink_tail_horizon(
+                        &mut bridge_ports.tl_soa,
+                        tl_h.clone(),
+                        &mut ports.tl_h_active[s_idx],
+                    );
+                }
+                let nv = usize::from(ports.tl_v_active[s_idx]).min(tl_v.len());
+                let nh = usize::from(ports.tl_h_active[s_idx]).min(tl_h.len());
+                let nz_tail =
+                    flush_subnormals_range(&mut bridge_ports.tl_soa, tl_v.start..(tl_v.start + nv))
+                        | flush_subnormals_range(
+                            &mut bridge_ports.tl_soa,
+                            tl_h.start..(tl_h.start + nh),
+                        )
+                        | flush_subnormals_range(&mut bridge_ports.tl_soa, tl_l);
                 ports.tail_nonzero[s_idx] = nz_tail;
                 nz_br | nz_tail
             };
-            let k = usize::from(entry.key_idx);
             if !nz {
                 ports.clear_string_state(s_idx);
                 sav.reset_string(s_idx);
@@ -334,6 +421,7 @@ impl StringBank {
             bridge,
             self.longitudinal_enabled,
             self.sav_phantom_enabled,
+            self.lossless,
             false,
             &mut out_l[..frames],
             &mut out_r[..frames],
@@ -350,6 +438,7 @@ impl StringBank {
                 &mut self.sav,
                 self.choir_map.strings(),
                 key_has_hammer,
+                self.lossless,
             );
         }
     }

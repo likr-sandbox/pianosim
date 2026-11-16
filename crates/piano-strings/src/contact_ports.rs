@@ -42,6 +42,10 @@ pub(crate) struct ContactPorts {
     pub tail_nonzero: [bool; TOTAL_STRINGS],
     pub struck_active: [bool; TOTAL_STRINGS],
     pub ports_synced: [bool; TOTAL_STRINGS],
+    pub tl_v_active: [u16; TOTAL_STRINGS],
+    pub tl_h_active: [u16; TOTAL_STRINGS],
+    pub sav_dormant: [bool; TOTAL_STRINGS],
+    pub sav_low_nl_chunks: [u8; TOTAL_STRINGS],
     pub y_clear_scratch: alloc::vec::Vec<[f32; 128]>,
 }
 
@@ -76,6 +80,10 @@ impl ContactPorts {
             tail_nonzero: [false; TOTAL_STRINGS],
             struck_active: [false; TOTAL_STRINGS],
             ports_synced: [true; TOTAL_STRINGS],
+            tl_v_active: [u16::MAX; TOTAL_STRINGS],
+            tl_h_active: [u16::MAX; TOTAL_STRINGS],
+            sav_dormant: [false; TOTAL_STRINGS],
+            sav_low_nl_chunks: [0; TOTAL_STRINGS],
             y_clear_scratch: alloc::vec![[0.0_f32; 128]; NUM_KEYS],
         };
         for (s_idx, entry) in map.strings().iter().enumerate() {
@@ -95,6 +103,10 @@ impl ContactPorts {
         self.tail_nonzero.fill(false);
         self.struck_active.fill(false);
         self.ports_synced.fill(true);
+        self.tl_v_active.fill(u16::MAX);
+        self.tl_h_active.fill(u16::MAX);
+        self.sav_dormant.fill(false);
+        self.sav_low_nl_chunks.fill(0);
     }
 
     #[inline]
@@ -102,6 +114,10 @@ impl ContactPorts {
         self.may_be_nonzero[s_idx] = false;
         self.tail_nonzero[s_idx] = false;
         self.struck_active[s_idx] = false;
+        self.tl_v_active[s_idx] = u16::MAX;
+        self.tl_h_active[s_idx] = u16::MAX;
+        self.sav_dormant[s_idx] = false;
+        self.sav_low_nl_chunks[s_idx] = 0;
         self.y_h[s_idx] = 0.0;
         self.v_h[s_idx] = 0.0;
         self.y_dv[s_idx] = 0.0;

@@ -22,23 +22,26 @@ fn store_vh_u_br(state: &mut [PrefixState], b: usize, u: &[F32x4; 2]) {
 
 #[derive(Copy, Clone)]
 pub(crate) struct SavSchedule {
-    pairs: [(u8, u8, u8); TOTAL_STRINGS / 2],
-    n_pairs: usize,
+    pairs: [(u8, u8); TOTAL_STRINGS / 2],
+    bucket_bounds: [u8; 6],
     singles: [u8; 8],
     n_singles: usize,
 }
 
 impl SavSchedule {
     pub const EMPTY: Self = Self {
-        pairs: [(0, 0, 0); TOTAL_STRINGS / 2],
-        n_pairs: 0,
+        pairs: [(0, 0); TOTAL_STRINGS / 2],
+        bucket_bounds: [0; 6],
         singles: [0; 8],
         n_singles: 0,
     };
 
     pub fn rebuild(&mut self, sav: &SavBank, sav_strings: &[u8], long_on: bool) {
-        self.n_pairs = 0;
+        self.bucket_bounds = [0; 6];
         self.n_singles = 0;
+        let mut raw = [(0_u8, 0_u8, 0_u8); TOTAL_STRINGS / 2];
+        let mut n_raw = 0_usize;
+        let mut counts = [0_usize; 5];
         let mut pending: [Option<u8>; MAX_PHANTOM_LONG_VECS + 1] =
             [None; MAX_PHANTOM_LONG_VECS + 1];
         for &s_u8 in sav_strings {
@@ -57,11 +60,30 @@ impl SavSchedule {
                 nl.min(MAX_PHANTOM_LONG_VECS)
             };
             if let Some(s0) = pending[bucket].take() {
-                self.pairs[self.n_pairs] = (s0, s_u8, bucket as u8);
-                self.n_pairs += 1;
+                raw[n_raw] = (s0, s_u8, bucket as u8);
+                n_raw += 1;
+                counts[bucket] += 1;
             } else {
                 pending[bucket] = Some(s_u8);
             }
+        }
+        let mut off = 0_usize;
+        for (b, &cnt) in counts.iter().enumerate() {
+            self.bucket_bounds[b] = off as u8;
+            off += cnt;
+        }
+        self.bucket_bounds[5] = off as u8;
+        let mut write = [
+            usize::from(self.bucket_bounds[0]),
+            usize::from(self.bucket_bounds[1]),
+            usize::from(self.bucket_bounds[2]),
+            usize::from(self.bucket_bounds[3]),
+            usize::from(self.bucket_bounds[4]),
+        ];
+        for &(s0, s1, b_u8) in &raw[..n_raw] {
+            let b = usize::from(b_u8);
+            self.pairs[write[b]] = (s0, s1);
+            write[b] += 1;
         }
         for s_u8 in pending.into_iter().flatten() {
             if self.n_singles < self.singles.len() {
@@ -73,28 +95,44 @@ impl SavSchedule {
 }
 
 #[cfg_attr(target_arch = "wasm32", inline(never))]
-fn step_sav_bucket_0(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
-    eval_sav_no_phantom_prefix(bp, sav, s0, s1);
+fn step_sav_bucket_0_slice(bp: &mut BridgePorts, sav: &mut SavBank, pairs: &[(u8, u8)]) {
+    for &(s0, s1) in pairs {
+        eval_sav_no_phantom_prefix(bp, sav, usize::from(s0), usize::from(s1));
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", inline(never))]
-fn step_sav_bucket_1(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
-    eval_sav_phantom_prefix::<1>(bp, sav, s0, s1, 1);
+fn step_sav_bucket_1_slice(bp: &mut BridgePorts, sav: &mut SavBank, pairs: &[(u8, u8)]) {
+    for &(s0, s1) in pairs {
+        eval_sav_phantom_prefix::<1>(bp, sav, usize::from(s0), usize::from(s1), 1);
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", inline(never))]
-fn step_sav_bucket_2(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
-    eval_sav_phantom_prefix::<2>(bp, sav, s0, s1, 2);
+fn step_sav_bucket_2_slice(bp: &mut BridgePorts, sav: &mut SavBank, pairs: &[(u8, u8)]) {
+    for &(s0, s1) in pairs {
+        eval_sav_phantom_prefix::<2>(bp, sav, usize::from(s0), usize::from(s1), 2);
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", inline(never))]
-fn step_sav_bucket_3(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
-    eval_sav_phantom_prefix::<3>(bp, sav, s0, s1, 3);
+fn step_sav_bucket_3_slice(bp: &mut BridgePorts, sav: &mut SavBank, pairs: &[(u8, u8)]) {
+    for &(s0, s1) in pairs {
+        eval_sav_phantom_prefix::<3>(bp, sav, usize::from(s0), usize::from(s1), 3);
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", inline(never))]
-fn step_sav_bucket_4(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
-    eval_sav_phantom_prefix::<MAX_PHANTOM_LONG_VECS>(bp, sav, s0, s1, 4);
+fn step_sav_bucket_4_slice(bp: &mut BridgePorts, sav: &mut SavBank, pairs: &[(u8, u8)]) {
+    for &(s0, s1) in pairs {
+        eval_sav_phantom_prefix::<MAX_PHANTOM_LONG_VECS>(
+            bp,
+            sav,
+            usize::from(s0),
+            usize::from(s1),
+            4,
+        );
+    }
 }
 
 pub(crate) fn step_sav_scheduled(
@@ -103,14 +141,19 @@ pub(crate) fn step_sav_scheduled(
     sched: &SavSchedule,
     long_on: bool,
 ) {
-    for &(s0_u8, s1_u8, bucket) in &sched.pairs[..sched.n_pairs] {
-        let (s0, s1) = (usize::from(s0_u8), usize::from(s1_u8));
+    let b = &sched.bucket_bounds;
+    for bucket in 0..5 {
+        let (s, e) = (usize::from(b[bucket]), usize::from(b[bucket + 1]));
+        if s == e {
+            continue;
+        }
+        let slice = &sched.pairs[s..e];
         match bucket {
-            0 => step_sav_bucket_0(bp, sav, s0, s1),
-            1 => step_sav_bucket_1(bp, sav, s0, s1),
-            2 => step_sav_bucket_2(bp, sav, s0, s1),
-            3 => step_sav_bucket_3(bp, sav, s0, s1),
-            _ => step_sav_bucket_4(bp, sav, s0, s1),
+            0 => step_sav_bucket_0_slice(bp, sav, slice),
+            1 => step_sav_bucket_1_slice(bp, sav, slice),
+            2 => step_sav_bucket_2_slice(bp, sav, slice),
+            3 => step_sav_bucket_3_slice(bp, sav, slice),
+            _ => step_sav_bucket_4_slice(bp, sav, slice),
         }
     }
     for &s_u8 in &sched.singles[..sched.n_singles] {

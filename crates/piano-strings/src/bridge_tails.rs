@@ -103,6 +103,7 @@ pub(crate) struct BridgeRun<'a> {
     pub zone_weights: [(u8, f32, u8, f32); TOTAL_STRINGS],
     pub long_on: bool,
     pub sav_on: bool,
+    pub lossless: bool,
 }
 
 #[inline]
@@ -113,7 +114,12 @@ pub(crate) fn add_zone_n(zone_buf: &mut [f32; 8], zw: (u8, f32, u8, f32), force_
 
 #[inline]
 pub(crate) fn sav_long_vecs(r: &BridgeRun<'_>, s_idx: usize) -> usize {
-    if !r.ports.struck_active[s_idx] || !r.sav_on || !r.long_on || r.sav.string_n_vh(s_idx) == 0 {
+    if !r.ports.struck_active[s_idx]
+        || r.ports.sav_dormant[s_idx]
+        || !r.sav_on
+        || !r.long_on
+        || r.sav.string_n_vh(s_idx) == 0
+    {
         return 0;
     }
     let (_, _, nl, m_ph) = r.sav.string_prefix_bounds(s_idx, true);
@@ -257,8 +263,6 @@ pub(crate) fn step_uncoupled_tails(
     let sub = sub_l.len();
     let mut acc_th = [F32x4::zero(); SUB];
     let mut acc_l = [F32x4::zero(); SUB];
-    let mut flat_l = [F32x4::zero(); SUB];
-    let mut flat_r = [F32x4::zero(); SUB];
 
     for k in 0..NUM_KEYS {
         if !matches!(plan.key_cat[k], KeyCat::Uncoupled | KeyCat::DampedSymp) {
@@ -267,38 +271,37 @@ pub(crate) fn step_uncoupled_tails(
         let kt = r.bridge_ports.key_tails[k];
         let sr = r.keys[k].string_range.clone();
         let any_tail_nz = plan.was_tail_nz[sr.clone()].iter().any(|&b| b);
-        let (th_s, th_e, l_e) = (
-            usize::from(kt.th_start),
-            usize::from(kt.th_end),
-            usize::from(kt.l_end),
-        );
-
         if !any_tail_nz {
-            let end_v = if r.long_on { l_e } else { th_e };
-            acc_th[..sub].fill(F32x4::zero());
-            accum_soa_range_in(&mut r.bridge_ports.tl_soa, th_s..end_v, &mut acc_th[..sub]);
-            let (pl_v, pr_v) = (F32x4::splat(kt.pan_l), F32x4::splat(kt.pan_r));
-            for t in 0..sub {
-                let a = acc_th[t];
-                flat_l[t] = a.mul_add(pl_v, flat_l[t]);
-                flat_r[t] = a.mul_add(pr_v, flat_r[t]);
-            }
-            if !r.long_on && th_e < l_e {
-                acc_l[..sub].fill(F32x4::zero());
-                accum_soa_range_in(&mut r.bridge_ports.tl_soa, th_e..l_e, &mut acc_l[..sub]);
-            }
             continue;
         }
-
+        let (th_e, l_e) = (usize::from(kt.th_end), usize::from(kt.l_end));
         acc_th[..sub].fill(F32x4::zero());
-        accum_soa_range_in(&mut r.bridge_ports.tl_soa, th_s..th_e, &mut acc_th[..sub]);
-
         let has_l = th_e < l_e;
         if has_l {
             acc_l[..sub].fill(F32x4::zero());
-            for s_idx in sr {
+        }
+        for s_idx in sr {
+            if !plan.was_tail_nz[s_idx] {
+                continue;
+            }
+            let (tl_v, tl_h, tl_l) = {
+                let m = &r.bridge_ports.meta[s_idx];
+                (m.tl_v.clone(), m.tl_h.clone(), m.tl_l.clone())
+            };
+            let nv = usize::from(r.ports.tl_v_active[s_idx]).min(tl_v.len());
+            let nh = usize::from(r.ports.tl_h_active[s_idx]).min(tl_h.len());
+            accum_soa_range_in(
+                &mut r.bridge_ports.tl_soa,
+                tl_v.start..(tl_v.start + nv),
+                &mut acc_th[..sub],
+            );
+            accum_soa_range_in(
+                &mut r.bridge_ports.tl_soa,
+                tl_h.start..(tl_h.start + nh),
+                &mut acc_th[..sub],
+            );
+            if has_l {
                 let nl_sav = sav_long_vecs(r, s_idx);
-                let tl_l = r.bridge_ports.meta[s_idx].tl_l.clone();
                 accum_soa_range_in(
                     &mut r.bridge_ports.tl_soa,
                     (tl_l.start + nl_sav)..tl_l.end,
@@ -318,10 +321,6 @@ pub(crate) fn step_uncoupled_tails(
             add_zone_n(&mut plan.zone_tail_n[t], zw, th_v * nt + fl * nl);
         }
     }
-    for t in 0..sub {
-        sub_l[t] += flat_l[t].reduce_sum();
-        sub_r[t] += flat_r[t].reduce_sum();
-    }
 }
 
 pub(crate) fn prepare_sample_tails_and_hammers(
@@ -340,7 +339,12 @@ pub(crate) fn prepare_sample_tails_and_hammers(
         if k < NUM_KEYS {
             for s_idx in r.keys[k].string_range.clone() {
                 r.ports.may_be_nonzero[s_idx] = true;
+                r.ports.tail_nonzero[s_idx] = true;
                 r.ports.ports_synced[s_idx] = false;
+                r.ports.tl_v_active[s_idx] = u16::MAX;
+                r.ports.tl_h_active[s_idx] = u16::MAX;
+                r.ports.sav_dormant[s_idx] = false;
+                r.ports.sav_low_nl_chunks[s_idx] = 0;
             }
         }
     }
@@ -412,46 +416,40 @@ pub(crate) fn prepare_sample_tails_and_hammers(
             plan.hammer_forces[s_idx] = HammerStepForce { fh, fd_v, fd_h };
             if fh != 0.0 || fd_v != 0.0 || fd_h != 0.0 {
                 r.ports.tail_nonzero[s_idx] = true;
+                if fh != 0.0 || fd_v != 0.0 {
+                    r.ports.tl_v_active[s_idx] = u16::MAX;
+                }
+                if fh != 0.0 || fd_h != 0.0 {
+                    r.ports.tl_h_active[s_idx] = u16::MAX;
+                }
             }
             let entry = &r.strings[s_idx];
             let (tl_v, v_tail, tl_h, h_tail, tl_l, nt, nl_f) = {
                 let m = &r.bridge_ports.meta[s_idx];
+                let nv = usize::from(r.ports.tl_v_active[s_idx]).min(m.tl_v.len());
+                let nh = usize::from(r.ports.tl_h_active[s_idx]).min(m.tl_h.len());
+                let tr = |r: &Range<usize>, n: usize| r.start..(r.start + n);
                 (
-                    m.tl_v.clone(),
-                    m.v_tail.clone(),
-                    m.tl_h.clone(),
-                    m.h_tail.clone(),
+                    tr(&m.tl_v, nv),
+                    tr(&m.v_tail, nv),
+                    tr(&m.tl_h, nh),
+                    tr(&m.h_tail, nh),
                     m.tl_l.clone(),
                     r.bridge_ports.tail_n_trans[s_idx],
                     r.bridge_ports.tail_n_long[s_idx],
                 )
             };
             let (tv, th) = if has_hammer {
+                let tl = &mut r.bridge_ports.tl_soa;
+                let hd = key.has_damper;
                 (
-                    step_tail_pol_tl(
-                        &mut r.bridge_ports.tl_soa,
-                        r.ports,
-                        tl_v,
-                        v_tail,
-                        fh,
-                        fd_v,
-                        key.has_damper,
-                    ),
-                    step_tail_pol_tl(
-                        &mut r.bridge_ports.tl_soa,
-                        r.ports,
-                        tl_h,
-                        h_tail,
-                        fh,
-                        fd_h,
-                        key.has_damper,
-                    ),
+                    step_tail_pol_tl(tl, r.ports, tl_v, v_tail, fh, fd_v, hd),
+                    step_tail_pol_tl(tl, r.ports, tl_h, h_tail, fh, fd_h, hd),
                 )
             } else {
-                let (tv, ydv, vdv_raw) =
-                    step_tail_pol_damp_tl(&mut r.bridge_ports.tl_soa, r.ports, tl_v, v_tail, fd_v);
-                let (th, ydh, vdh_raw) =
-                    step_tail_pol_damp_tl(&mut r.bridge_ports.tl_soa, r.ports, tl_h, h_tail, fd_h);
+                let tl = &mut r.bridge_ports.tl_soa;
+                let (tv, ydv, vdv_raw) = step_tail_pol_damp_tl(tl, r.ports, tl_v, v_tail, fd_v);
+                let (th, ydh, vdh_raw) = step_tail_pol_damp_tl(tl, r.ports, tl_h, h_tail, fd_h);
                 plan.tail_partial_damp[s_idx] = TailDampPartial {
                     ydv,
                     vdv_raw,
@@ -463,11 +461,11 @@ pub(crate) fn prepare_sample_tails_and_hammers(
             let tl = if tl_l.is_empty() {
                 0.0
             } else {
+                let tl_soa = &mut r.bridge_ports.tl_soa;
                 if r.long_on && fh > 0.0 {
-                    let lv = &mut r.bridge_ports.tl_soa.u.as_f32x4_slice_mut()[tl_l.clone()];
+                    let lv = &mut tl_soa.u.as_f32x4_slice_mut()[tl_l.clone()];
                     r.long_bank.inject_precursor(s_idx, tl_l.len(), fh, lv);
                 }
-                let tl_soa = &mut r.bridge_ports.tl_soa;
                 let raw_l = step_string_modes(
                     &mut tl_soa.u.as_f32x4_slice_mut()[tl_l.clone()],
                     &mut tl_soa.v.as_f32x4_slice_mut()[tl_l.clone()],

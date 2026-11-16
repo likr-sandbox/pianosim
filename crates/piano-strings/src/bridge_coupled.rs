@@ -4,7 +4,7 @@
 
 use piano_spec::{LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS};
 
-use crate::bridge_diag::flush_bridge_subnormals_core;
+use crate::bridge_diag::{flush_bridge_subnormals_core, update_sav_dormancy};
 use crate::bridge_kernels::step_uncoupled_prefixes_fast;
 use crate::bridge_port::{BridgePortDriver, BridgePorts};
 use crate::bridge_prefix_step::step_coupled_prefixes;
@@ -31,7 +31,7 @@ fn step_all_strings_prefix_wdf(
     ts: usize,
 ) {
     let (ul, ur) =
-        step_uncoupled_prefixes_fast(r.bridge_ports, &plan.str_coupled, a_waves, b_waves);
+        step_uncoupled_prefixes_fast(r.bridge_ports, r.ports, &plan.str_coupled, a_waves, b_waves);
     out_pair.0[ts] += ul;
     out_pair.1[ts] += ur;
 
@@ -62,7 +62,11 @@ fn step_all_strings_prefix_wdf(
                     s_idx,
                     r.strings[s_idx].has_damper,
                 );
-            } else if sav_key && r.ports.struck_active[s_idx] && r.sav.string_n_vh(s_idx) > 0 {
+            } else if sav_key
+                && r.ports.struck_active[s_idx]
+                && !r.ports.sav_dormant[s_idx]
+                && r.sav.string_n_vh(s_idx) > 0
+            {
                 let m = &r.bridge_ports.meta[s_idx];
                 let tp = plan.tail_partial_damp[s_idx];
                 let vdv_br =
@@ -88,6 +92,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
     bridge: &mut impl BridgePortDriver,
     long_on: bool,
     sav_on: bool,
+    lossless: bool,
     flush_end: bool,
     out_l: &mut [f32],
     out_r: &mut [f32],
@@ -113,6 +118,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         zone_weights,
         long_on,
         sav_on,
+        lossless,
     };
     let (mut chunk_base, mut a_waves, mut b_waves, mut zone_out, mut dup_zone) = (
         0usize,
@@ -224,22 +230,15 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             }
             if r.sav_on && k < LONGITUDINAL_MAX_KEY_IDX {
                 for s_idx in sr {
-                    if r.ports.struck_active[s_idx] && r.sav.string_n_vh(s_idx) > 0 {
+                    if !r.lossless && !hammer && !mid_ev && r.ports.struck_active[s_idx] {
+                        update_sav_dormancy(r.ports, r.bridge_ports, r.sav, s_idx);
+                    }
+                    if r.ports.struck_active[s_idx]
+                        && !r.ports.sav_dormant[s_idx]
+                        && r.sav.string_n_vh(s_idx) > 0
+                    {
                         plan.sav_strings[plan.n_sav] = s_idx as u8;
                         plan.n_sav += 1;
-                    }
-                }
-            }
-        }
-
-        let mut n_rd = 0usize;
-        let mut resting_damped = [0u8; TOTAL_STRINGS];
-        for (k, key) in r.keys.iter().enumerate() {
-            if plan.key_cat[k] == KeyCat::DampedSymp {
-                for s_idx in key.string_range.clone() {
-                    if !plan.was_nz[s_idx] {
-                        resting_damped[n_rd] = s_idx as u8;
-                        n_rd += 1;
                     }
                 }
             }
@@ -261,9 +260,6 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                 &mut zone_out,
                 &mut dup_zone,
             );
-            for &s_u8 in &resting_damped[..n_rd] {
-                b_waves[usize::from(s_u8)] = 0.0;
-            }
             if let Some(zf) = zone_frames.as_deref_mut() {
                 for (dst, (&zo, &dz)) in zf[chunk_base + ts]
                     .iter_mut()
@@ -288,17 +284,8 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                 ts,
             );
         }
-        let any_bridge_wave = a_waves
-            .iter()
-            .zip(b_waves.iter())
-            .any(|(&a, &b)| a != 0.0 || b != 0.0);
         for s_idx in 0..TOTAL_STRINGS {
-            let k = usize::from(r.strings[s_idx].key_idx);
-            let is_open = plan.key_cat[k] == KeyCat::Uncoupled;
-            if !plan.str_coupled[s_idx]
-                && (r.ports.may_be_nonzero[s_idx] || (any_bridge_wave && is_open))
-            {
-                r.ports.may_be_nonzero[s_idx] = true;
+            if !plan.str_coupled[s_idx] && r.ports.may_be_nonzero[s_idx] {
                 r.ports.ports_synced[s_idx] = false;
             }
         }
@@ -319,5 +306,6 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         r.sav,
         r.strings,
         &plan.key_has_hammer,
+        r.lossless,
     );
 }

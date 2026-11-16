@@ -103,6 +103,7 @@ pub(crate) fn step_coupled_prefixes(
                 r.ports.y_dh[s_idx] = ydh_br + tp.ydh;
                 if !(r.sav_on
                     && r.ports.struck_active[s_idx]
+                    && !r.ports.sav_dormant[s_idx]
                     && k < LONGITUDINAL_MAX_KEY_IDX
                     && r.sav.string_n_vh(s_idx) > 0)
                 {

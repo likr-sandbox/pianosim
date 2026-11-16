@@ -108,7 +108,6 @@ pub(crate) const MAX_PREFIX_RUNS: usize = 16;
 /// Per-key contiguous ranges in `BridgePorts::tl_soa` across all unison strings of key `k`.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct KeyTailRanges {
-    pub th_start: u16,
     pub th_end: u16,
     pub l_end: u16,
     pub pan_l: f32,
@@ -119,7 +118,6 @@ pub(crate) struct KeyTailRanges {
 
 impl KeyTailRanges {
     pub const ZERO: Self = Self {
-        th_start: 0,
         th_end: 0,
         l_end: 0,
         pan_l: 0.0,
@@ -316,7 +314,6 @@ impl BridgePorts {
         for (k, key) in map.keys().iter().enumerate() {
             let spec = specs[k];
             let l_m = spec.speaking_length_m;
-            let th_start = tl_cur;
 
             for s_idx in key.string_range.clone() {
                 let entry = &map.strings()[s_idx];
@@ -451,7 +448,6 @@ impl BridgePorts {
             let s0 = key.string_range.start;
             let e0 = &map.strings()[s0];
             key_tails[k] = KeyTailRanges {
-                th_start: th_start as u16,
                 th_end: th_end as u16,
                 l_end: tl_cur as u16,
                 pan_l: e0.pan_l,

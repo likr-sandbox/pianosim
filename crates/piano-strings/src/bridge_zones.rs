@@ -42,6 +42,7 @@ impl StringBank {
             bridge,
             self.longitudinal_enabled,
             self.sav_phantom_enabled,
+            self.lossless,
             false,
             &mut out_l[..frames],
             &mut out_r[..frames],

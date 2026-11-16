@@ -18,6 +18,8 @@ use crate::nupols_tier::{
 pub(crate) struct NupolsTail {
     ir_len: usize,
     sample_pos: usize,
+    active_samples_rem: usize,
+    tail_clean: bool,
     in_ring: [AlignedBuf; PRESET_RADIATOR_ZONES],
     out_ring_l: AlignedBuf,
     out_ring_r: AlignedBuf,
@@ -45,6 +47,8 @@ impl NupolsTail {
         Self {
             ir_len,
             sample_pos: 0,
+            active_samples_rem: 0,
+            tail_clean: true,
             in_ring,
             out_ring_l: AlignedBuf::zeroed(OUT_RING_LEN),
             out_ring_r: AlignedBuf::zeroed(OUT_RING_LEN),
@@ -65,6 +69,11 @@ impl NupolsTail {
         for tier in &mut self.tiers {
             tier.load_ir(ir_flat, ir_len, work);
         }
+        if !self.tail_clean {
+            self.active_samples_rem = self
+                .active_samples_rem
+                .max(ir_len + IN_RING_LEN + 2 * MAX_TIER_FFT_LEN);
+        }
     }
 
     pub(crate) fn reset(&mut self) {
@@ -77,6 +86,8 @@ impl NupolsTail {
             tier.reset();
         }
         self.sample_pos = 0;
+        self.active_samples_rem = 0;
+        self.tail_clean = true;
     }
 
     /// Add scheduled tail outputs into `(out_l, out_r)`, record `frames` into the
@@ -91,6 +102,22 @@ impl NupolsTail {
     ) {
         let chunk = frames.len().min(out_l.len()).min(out_r.len());
         if chunk == 0 {
+            return;
+        }
+        let frame_nz = frames[..chunk]
+            .iter()
+            .any(|fr| fr.iter().any(|&v| v != 0.0 && v.is_finite()));
+        if frame_nz {
+            self.active_samples_rem = self.ir_len + IN_RING_LEN + 2 * MAX_TIER_FFT_LEN;
+            self.tail_clean = false;
+        } else if self.active_samples_rem == 0 && self.tiers.iter().all(|t| !t.has_pending) {
+            if !self.tail_clean {
+                for tier in &mut self.tiers {
+                    tier.fdl_nz.fill(false);
+                }
+                self.tail_clean = true;
+            }
+            self.sample_pos += chunk;
             return;
         }
 
@@ -133,6 +160,7 @@ impl NupolsTail {
         }
 
         self.sample_pos += chunk;
+        self.active_samples_rem = self.active_samples_rem.saturating_sub(chunk);
 
         // 3. Fire staggered 4x-sliced FFT tiers whenever a 64-sample slot completes.
         if (self.sample_pos & (HEAD_TAPS - 1)) == 0 {
@@ -179,8 +207,7 @@ impl NupolsTail {
                             1 => tier.forward_zones_range(&self.in_ring, s_in_end, 3, 6, work),
                             2 => {
                                 tier.forward_zones_range(&self.in_ring, s_in_end, 6, 9, work);
-                                tier.acc_l.clear();
-                                tier.acc_r.clear();
+                                tier.clear_acc();
                                 tier.accumulate_partitions(0, tier.p_count);
                             }
                             3 => {
@@ -215,8 +242,7 @@ impl NupolsTail {
                                 );
                             }
                             9 => {
-                                tier.acc_l.clear();
-                                tier.acc_r.clear();
+                                tier.clear_acc();
                                 tier.accumulate_partitions(0, p1);
                             }
                             10 => tier.accumulate_partitions(p1, p2),
@@ -247,8 +273,7 @@ impl NupolsTail {
                                 tier.forward_zones_range(&self.in_ring, s_in_end, z, z + 1, work);
                             }
                             39 => {
-                                tier.acc_l.clear();
-                                tier.acc_r.clear();
+                                tier.clear_acc();
                                 tier.accumulate_partitions(0, p1);
                             }
                             43 => tier.accumulate_partitions(p1, p2),

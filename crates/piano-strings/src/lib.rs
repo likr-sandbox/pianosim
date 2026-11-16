@@ -259,6 +259,10 @@ impl StringBank {
                 self.ports.tail_nonzero[s_idx] = true;
                 self.ports.struck_active[s_idx] = true;
                 self.ports.ports_synced[s_idx] = false;
+                self.ports.tl_v_active[s_idx] = u16::MAX;
+                self.ports.tl_h_active[s_idx] = u16::MAX;
+                self.ports.sav_dormant[s_idx] = false;
+                self.ports.sav_low_nl_chunks[s_idx] = 0;
             }
         }
     }
@@ -270,6 +274,8 @@ impl StringBank {
         if let Some(entry) = self.choir_map.key(key_idx) {
             for s_idx in entry.string_range.clone() {
                 self.ports.struck_active[s_idx] = false;
+                self.ports.sav_dormant[s_idx] = false;
+                self.ports.sav_low_nl_chunks[s_idx] = 0;
                 self.sav.reset_string(s_idx);
             }
         }
@@ -303,6 +309,10 @@ impl StringBank {
                 self.ports.tail_nonzero[str_idx] = true;
                 self.ports.struck_active[str_idx] = true;
                 self.ports.ports_synced[str_idx] = false;
+                self.ports.tl_v_active[str_idx] = u16::MAX;
+                self.ports.tl_h_active[str_idx] = u16::MAX;
+                self.ports.sav_dormant[str_idx] = false;
+                self.ports.sav_low_nl_chunks[str_idx] = 0;
             }
         }
     }
@@ -466,6 +476,7 @@ impl StringBank {
             bridge,
             self.longitudinal_enabled,
             self.sav_phantom_enabled,
+            self.lossless,
             true,
             &mut out_l[..frames],
             &mut out_r[..frames],
