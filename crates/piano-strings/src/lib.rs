@@ -10,8 +10,10 @@ extern crate alloc;
 
 pub mod action_driver;
 pub mod bridge_coupled;
+pub(crate) mod bridge_damp_kernels;
 mod bridge_diag;
 pub(crate) mod bridge_kernels;
+pub(crate) mod bridge_open_kernels;
 pub(crate) mod bridge_port;
 mod bridge_prefix_step;
 pub(crate) mod bridge_sav;

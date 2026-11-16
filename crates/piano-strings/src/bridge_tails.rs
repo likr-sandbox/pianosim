@@ -6,7 +6,6 @@ use piano_simd::F32x4;
 use piano_spec::{NUM_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_port::BridgePorts;
-use crate::bridge_sav::SavSchedule;
 use crate::choir_map::{KeyMapEntry, StringMapEntry};
 use crate::contact::{eval_hammer_choir, sample_damper, KeyActionDriver};
 use crate::contact_ports::{refresh_string_ports_bp, ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
@@ -73,11 +72,11 @@ pub(crate) struct ChunkPlan {
     pub active_keys: [u8; NUM_KEYS],
     pub sav_long_slices: [SavLongSlice; TOTAL_STRINGS],
     pub sav_strings: [u8; TOTAL_STRINGS],
-    pub sav_sched: SavSchedule,
-    pub sav_sched_dirty: bool,
     pub hammer_forces: [HammerStepForce; TOTAL_STRINGS],
     pub tail_partial_damp: [TailDampPartial; TOTAL_STRINGS],
-    pub symp_gains: [[f32; 2]; TOTAL_STRINGS],
+    pub symp_gv: [f32; TOTAL_STRINGS],
+    pub symp_gh: [f32; TOTAL_STRINGS],
+    pub symp_mask: [f32; TOTAL_STRINGS],
     pub symp_has_gains: [bool; TOTAL_STRINGS],
     pub zone_tail_n: [[f32; 8]; SUB],
     pub n_a: usize,
@@ -410,18 +409,22 @@ pub(crate) fn prepare_sample_tails_and_hammers(
         let damp_on = key.has_damper && yc < DAMPER_CLEAR_THRESHOLD_M;
         for (c, s_idx) in sr.enumerate() {
             let fh = fh_arr[c];
-            let (fd_v, fd_h) = if damp_on && r.ports.may_be_nonzero[s_idx] {
+            #[rustfmt::skip]
+            let (fd_v, fd_h) = if damp_on && r.ports.may_be_nonzero[s_idx] && (fh != 0.0 || r.ports.tail_nonzero[s_idx]) {
                 sample_damper(driver, r.ports, k, s_idx, yc)
             } else {
                 (0.0, 0.0)
             };
             plan.hammer_forces[s_idx] = HammerStepForce { fh, fd_v, fd_h };
-            if fh != 0.0 || fd_v != 0.0 || fd_h != 0.0 {
+            if fh != 0.0 {
                 r.ports.tail_nonzero[s_idx] = true;
-                if fh != 0.0 || fd_v != 0.0 {
+                r.ports.tl_v_active[s_idx] = u16::MAX;
+                r.ports.tl_h_active[s_idx] = u16::MAX;
+            } else if r.ports.tail_nonzero[s_idx] {
+                if fd_v != 0.0 {
                     r.ports.tl_v_active[s_idx] = u16::MAX;
                 }
-                if fh != 0.0 || fd_h != 0.0 {
+                if fd_h != 0.0 {
                     r.ports.tl_h_active[s_idx] = u16::MAX;
                 }
             }

@@ -83,4 +83,17 @@ pub trait KeyActionDriver {
     ) -> Option<(f32, f32)> {
         None
     }
+    /// Advances quiescent damper felt memory over `sub` samples and returns chunk linear V/H gains.
+    #[inline]
+    fn symp_linear_gains_for_chunk(
+        &mut self,
+        _key_idx: usize,
+        _str_idx: usize,
+        _r_dv: f32,
+        _r_dh: f32,
+        _yc_mid: f32,
+        _sub: usize,
+    ) -> Option<(f32, f32)> {
+        None
+    }
 }

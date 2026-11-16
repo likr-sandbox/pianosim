@@ -4,11 +4,12 @@
 
 use piano_spec::{LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS};
 
+use crate::bridge_damp_kernels::refresh_chunk_damp_y;
 use crate::bridge_diag::{flush_bridge_subnormals_core, update_sav_dormancy};
 use crate::bridge_kernels::step_uncoupled_prefixes_fast;
 use crate::bridge_port::{BridgePortDriver, BridgePorts};
 use crate::bridge_prefix_step::step_coupled_prefixes;
-use crate::bridge_sav::{step_sav_scheduled, SavSchedule};
+use crate::bridge_sav::step_sav_scheduled;
 use crate::bridge_tails::{
     prepare_sample_tails_and_hammers, sav_long_vecs, step_uncoupled_tails, BridgeRun, ChunkPlan,
     HammerStepForce, KeyCat, SavLongSlice, TailDampPartial, SUB,
@@ -21,6 +22,7 @@ use crate::contact_ports::{
 use crate::longitudinal::LongitudinalBank;
 use crate::sav_drift::SavBank;
 
+#[inline]
 fn step_all_strings_prefix_wdf(
     r: &mut BridgeRun<'_>,
     driver: &mut impl KeyActionDriver,
@@ -30,22 +32,23 @@ fn step_all_strings_prefix_wdf(
     out_pair: (&mut [f32], &mut [f32]),
     ts: usize,
 ) {
+    let n_cp = plan.n_coupled_strs;
     let (ul, ur) =
-        step_uncoupled_prefixes_fast(r.bridge_ports, r.ports, &plan.str_coupled, a_waves, b_waves);
+        step_uncoupled_prefixes_fast(r.bridge_ports, r.ports, plan, ts, a_waves, b_waves);
     out_pair.0[ts] += ul;
     out_pair.1[ts] += ur;
 
-    if plan.n_coupled_strs > 0 {
-        step_coupled_prefixes(r, driver, plan, a_waves, b_waves, out_pair, ts);
+    if n_cp > 0 {
+        step_coupled_prefixes(r, driver, plan, n_cp, a_waves, b_waves, out_pair, ts);
     }
 
     if r.sav_on && plan.n_sav > 0 {
-        if plan.sav_sched_dirty {
-            plan.sav_sched
-                .rebuild(r.sav, &plan.sav_strings[..plan.n_sav], r.long_on);
-            plan.sav_sched_dirty = false;
-        }
-        step_sav_scheduled(r.bridge_ports, r.sav, &plan.sav_sched, r.long_on);
+        step_sav_scheduled(
+            r.bridge_ports,
+            r.sav,
+            &plan.sav_strings[..plan.n_sav],
+            r.long_on,
+        );
     }
     for idx in 0..plan.n_a {
         let k = usize::from(plan.active_keys[idx]);
@@ -138,11 +141,11 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         coupled_strs: [0; TOTAL_STRINGS],
         sav_long_slices: [SavLongSlice::ZERO; TOTAL_STRINGS],
         sav_strings: [0; TOTAL_STRINGS],
-        sav_sched: SavSchedule::EMPTY,
-        sav_sched_dirty: false,
         hammer_forces: [HammerStepForce::ZERO; TOTAL_STRINGS],
         tail_partial_damp: [TailDampPartial::ZERO; TOTAL_STRINGS],
-        symp_gains: [[0.0; 2]; TOTAL_STRINGS],
+        symp_gv: [0.0; TOTAL_STRINGS],
+        symp_gh: [0.0; TOTAL_STRINGS],
+        symp_mask: [0.0; TOTAL_STRINGS],
         symp_has_gains: [false; TOTAL_STRINGS],
         zone_tail_n: [[0.0; 8]; SUB],
         n_a: 0,
@@ -165,8 +168,10 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         plan.key_has_mid_ev.fill(false);
         plan.str_coupled.fill(false);
         plan.symp_has_gains.fill(false);
+        plan.symp_gv.fill(0.0);
+        plan.symp_gh.fill(0.0);
+        plan.symp_mask.fill(0.0);
         (plan.n_a, plan.n_coupled_strs, plan.n_sl, plan.n_sav) = (0, 0, 0, 0);
-        plan.sav_sched_dirty = false;
         plan.zone_tail_n[..sub].fill([0.0; 8]);
 
         for (k, key) in r.keys.iter().enumerate() {
@@ -203,15 +208,49 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                     plan.push_coupled(s_idx);
                 }
             } else if min_c < DAMPER_CLEAR_THRESHOLD_M {
+                if !any_struck && key.has_damper && min_c >= 2.5e-5 {
+                    let mut all_clear = true;
+                    for s_idx in sr.clone() {
+                        if !plan.was_nz[s_idx] {
+                            continue;
+                        }
+                        if r.ports.tail_nonzero[s_idx] {
+                            all_clear = false;
+                            break;
+                        }
+                        if !r.ports.ports_synced[s_idx] {
+                            crate::contact_ports::refresh_prefix_damp_ports_bp(
+                                r.bridge_ports,
+                                r.ports,
+                                s_idx,
+                            );
+                            r.ports.ports_synced[s_idx] = true;
+                        }
+                        let lim = 0.5 * min_c;
+                        let bound_v =
+                            r.ports.y_dv[s_idx].abs() + 4.0e-3 * r.ports.v_dv[s_idx].abs();
+                        let bound_h =
+                            r.ports.y_dh[s_idx].abs() + 4.0e-3 * r.ports.v_dh[s_idx].abs();
+                        if bound_v > lim || bound_h > lim {
+                            all_clear = false;
+                            break;
+                        }
+                    }
+                    if all_clear {
+                        continue;
+                    }
+                }
                 plan.key_cat[k] = KeyCat::DampedSymp;
                 if key.has_damper {
                     let yc0 = r.ports.y_clear_scratch[k][0];
+                    let yc_end = r.ports.y_clear_scratch[k][sub - 1];
                     let const_closed = yc0 <= -5.0e-5
                         && r.ports.y_clear_scratch[k][..sub].iter().all(|&c| c == yc0);
+                    let closed_chunk = yc0 <= -5.0e-5 && yc_end <= -5.0e-5;
                     for s_idx in sr.clone() {
                         if plan.was_nz[s_idx] {
-                            plan.push_coupled(s_idx);
-                            if const_closed {
+                            let mut routed_fast = false;
+                            if closed_chunk {
                                 if !r.ports.ports_synced[s_idx] {
                                     crate::contact_ports::refresh_prefix_damp_ports_bp(
                                         r.bridge_ports,
@@ -220,20 +259,40 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                                     );
                                     r.ports.ports_synced[s_idx] = true;
                                 }
-                                if r.ports.y_dv[s_idx].abs() <= 5.0e-7
-                                    && r.ports.y_dh[s_idx].abs() <= 5.0e-7
-                                {
-                                    if let Some((gv, gh)) = driver.symp_linear_gains_if_settled(
-                                        k,
-                                        s_idx,
-                                        r.bridge_ports.r_damp_prefix_v[s_idx],
-                                        r.bridge_ports.r_damp_prefix_h[s_idx],
-                                        yc0,
-                                    ) {
-                                        plan.symp_gains[s_idx] = [gv, gh];
+                                let (yv, yh) =
+                                    (r.ports.y_dv[s_idx].abs(), r.ports.y_dh[s_idx].abs());
+                                if yv <= 6.5e-6 && yh <= 6.5e-6 {
+                                    let rv = r.bridge_ports.r_damp_prefix_v[s_idx];
+                                    let rh = r.bridge_ports.r_damp_prefix_h[s_idx];
+                                    let gains_opt = if const_closed {
+                                        driver
+                                            .symp_linear_gains_if_settled(k, s_idx, rv, rh, yc0)
+                                            .or_else(|| {
+                                                driver.symp_linear_gains_for_chunk(
+                                                    k, s_idx, rv, rh, yc0, sub,
+                                                )
+                                            })
+                                    } else {
+                                        driver.symp_linear_gains_for_chunk(
+                                            k,
+                                            s_idx,
+                                            rv,
+                                            rh,
+                                            0.5 * (yc0 + yc_end),
+                                            sub,
+                                        )
+                                    };
+                                    if let Some((gv, gh)) = gains_opt {
+                                        plan.symp_gv[s_idx] = gv;
+                                        plan.symp_gh[s_idx] = gh;
+                                        plan.symp_mask[s_idx] = 1.0;
                                         plan.symp_has_gains[s_idx] = true;
+                                        routed_fast = true;
                                     }
                                 }
+                            }
+                            if !routed_fast {
+                                plan.push_coupled(s_idx);
                             }
                         }
                     }
@@ -269,10 +328,6 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             }
         }
 
-        if r.sav_on && plan.n_sav > 0 {
-            plan.sav_sched
-                .rebuild(r.sav, &plan.sav_strings[..plan.n_sav], r.long_on);
-        }
         step_uncoupled_tails(&mut r, &mut plan, sub_l, sub_r);
         for ts in 0..sub {
             prepare_sample_tails_and_hammers(
@@ -309,8 +364,12 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                 ts,
             );
         }
+        refresh_chunk_damp_y(r.bridge_ports, r.ports, &plan.symp_has_gains);
         for s_idx in 0..TOTAL_STRINGS {
-            if !plan.str_coupled[s_idx] && r.ports.may_be_nonzero[s_idx] {
+            if !plan.str_coupled[s_idx]
+                && !plan.symp_has_gains[s_idx]
+                && r.ports.may_be_nonzero[s_idx]
+            {
                 r.ports.ports_synced[s_idx] = false;
             }
         }
@@ -319,7 +378,11 @@ pub(crate) fn render_subblock_bridge_coupled_core(
 
     if !flush_end {
         for (s_idx, entry) in r.strings.iter().enumerate() {
-            if r.ports.may_be_nonzero[s_idx] && !plan.key_has_hammer[usize::from(entry.key_idx)] {
+            if r.ports.may_be_nonzero[s_idx]
+                && !plan.key_has_hammer[usize::from(entry.key_idx)]
+                && !plan.symp_has_gains[s_idx]
+                && !plan.str_coupled[s_idx]
+            {
                 r.ports.ports_synced[s_idx] = false;
             }
         }

@@ -5,94 +5,71 @@ use core::ops::Range;
 use piano_simd::F32x4;
 use piano_spec::TOTAL_STRINGS;
 
-use crate::bridge_port::{
-    BridgePorts, FastPrefixMeta, PrefixCoef, PrefixState, C_SIGN_H_ARR, C_SIGN_V_ARR,
-};
+use crate::bridge_damp_kernels::{reduce_sum_4, step_prefix_quad_damp, step_single_prefix_damp};
+use crate::bridge_open_kernels::{step_open_quad_write, step_prefix_run_k_open};
+use crate::bridge_port::{BridgePorts, PrefixCoef, PrefixState, C_SIGN_H_ARR, C_SIGN_V_ARR};
+use crate::bridge_tails::ChunkPlan;
 use crate::contact_ports::ContactPorts;
 use crate::modal_soa::{C_HORIZ, C_VERT};
 use crate::zoh_kernel::zoh_rotate;
 
-#[inline(always)]
-fn reduce_sum_4(r0: F32x4, r1: F32x4, r2: F32x4, r3: F32x4) -> F32x4 {
-    let ac = r0.unpack_lo(r2) + r0.unpack_hi(r2);
-    let bd = r1.unpack_lo(r3) + r1.unpack_hi(r3);
-    ac.unpack_lo(bd) + ac.unpack_hi(bd)
-}
-
-#[inline(always)]
-fn step_one_prefix<const K: usize>(
-    st: &mut [PrefixState],
-    cf: &[PrefixCoef],
-    neg_vbr: F32x4,
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn step_open_quad_cold<const K: usize>(
+    st4: &mut [PrefixState],
+    cf4: &[PrefixCoef],
+    nvp: F32x4,
     h_proj: F32x4,
-) -> (F32x4, F32x4) {
-    let (c0, s0) = (cf[0], st[0]);
-    let (un0, mut acc_v) = zoh_rotate(s0.u, c0.beta.mul_add(neg_vbr, s0.v), c0.d, c0.s);
-    st[0] = PrefixState { u: un0, v: acc_v };
-    let mut acc_br = acc_v * c0.beta;
-    if K >= 2 {
-        let (c1, s1) = (cf[1], st[1]);
-        let (un1, vn1) = zoh_rotate(s1.u, c1.beta.mul_add(neg_vbr, s1.v), c1.d, c1.s);
-        st[1] = PrefixState { u: un1, v: vn1 };
-        acc_v = acc_v + vn1;
-        acc_br = vn1.mul_add(c1.beta, acc_br);
-    }
-    if K >= 3 {
-        let (c2, s2) = (cf[2], st[2]);
-        let (un2, vn2) = zoh_rotate(s2.u, c2.beta.mul_add(neg_vbr, s2.v), c2.d, c2.s);
-        st[2] = PrefixState { u: un2, v: vn2 };
-        acc_v = acc_v + vn2;
-        acc_br = vn2.mul_add(c2.beta, acc_br);
-    }
-    let (ch0, sh0) = (cf[K], st[K]);
-    let (unh0, mut acc_h) = zoh_rotate(sh0.u, ch0.beta.mul_add(neg_vbr, sh0.v), ch0.d, ch0.s);
-    st[K] = PrefixState { u: unh0, v: acc_h };
-    acc_br = acc_h.mul_add(ch0.beta, acc_br);
-    if K >= 2 {
-        let (ch1, sh1) = (cf[K + 1], st[K + 1]);
-        let (unh1, vnh1) = zoh_rotate(sh1.u, ch1.beta.mul_add(neg_vbr, sh1.v), ch1.d, ch1.s);
-        st[K + 1] = PrefixState { u: unh1, v: vnh1 };
-        acc_h = acc_h + vnh1;
-        acc_br = vnh1.mul_add(ch1.beta, acc_br);
-    }
-    if K >= 3 {
-        let (ch2, sh2) = (cf[K + 2], st[K + 2]);
-        let (unh2, vnh2) = zoh_rotate(sh2.u, ch2.beta.mul_add(neg_vbr, sh2.v), ch2.d, ch2.s);
-        st[K + 2] = PrefixState { u: unh2, v: vnh2 };
-        acc_h = acc_h + vnh2;
-        acc_br = vnh2.mul_add(ch2.beta, acc_br);
-    }
-    (acc_h.mul_add(h_proj, acc_v), acc_br)
+    gains: F32x4,
+    a_out: &mut [f32],
+) -> F32x4 {
+    step_open_quad_write::<K>(st4, cf4, nvp, h_proj, gains, a_out)
 }
 
-#[inline(always)]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn step_prefix_run_k<const K: usize>(
-    state: &mut [PrefixState],
-    coef: &[PrefixCoef],
+    bp: &mut BridgePorts,
+    ports: &mut ContactPorts,
+    p_off: usize,
     start_s: usize,
     count: usize,
-    meta: &[FastPrefixMeta; TOTAL_STRINGS],
-    gains: &[f32; TOTAL_STRINGS],
-    str_coupled: &[bool; TOTAL_STRINGS],
-    may_be_nonzero: &mut [bool; TOTAL_STRINGS],
-    ports_synced: &mut [bool; TOTAL_STRINGS],
+    ts: usize,
+    plan: &mut ChunkPlan,
     a_waves: &mut [f32; TOTAL_STRINGS],
     b_waves: &[f32; TOTAL_STRINGS],
     sum_l_vec: &mut F32x4,
     sum_r_vec: &mut F32x4,
 ) {
     let h_proj = F32x4::splat(C_HORIZ / C_VERT);
+    let c_sign_v = F32x4::from_array(C_SIGN_V_ARR);
     let neg_half = F32x4::splat(-0.5);
     let stride = 2 * K;
+    let total_vecs = count * stride;
+    let state = &mut bp.state[p_off..p_off + total_vecs];
+    let coef = &bp.coef[p_off..p_off + total_vecs];
+    let damp_bd = &bp.damp_bd[p_off..p_off + total_vecs];
+    let damp_ad = &bp.damp_ad[p_off..p_off + total_vecs];
+    let meta = &bp.fast_meta;
+    let gains = &bp.a_wave_gains;
+    let pan_l = &bp.pan_l;
+    let pan_r = &bp.pan_r;
     let mut idx = 0usize;
     while idx + 4 <= count {
         let s = start_s + idx;
-        if !(str_coupled[s] | str_coupled[s + 1] | str_coupled[s + 2] | str_coupled[s + 3]) {
-            let any_nz = may_be_nonzero[s]
-                | may_be_nonzero[s + 1]
-                | may_be_nonzero[s + 2]
-                | may_be_nonzero[s + 3];
+        if !(plan.str_coupled[s]
+            | plan.str_coupled[s + 1]
+            | plan.str_coupled[s + 2]
+            | plan.str_coupled[s + 3])
+        {
+            let all_nz = ports.may_be_nonzero[s]
+                & ports.may_be_nonzero[s + 1]
+                & ports.may_be_nonzero[s + 2]
+                & ports.may_be_nonzero[s + 3];
+            let any_nz = ports.may_be_nonzero[s]
+                | ports.may_be_nonzero[s + 1]
+                | ports.may_be_nonzero[s + 2]
+                | ports.may_be_nonzero[s + 3];
             let any_b = b_waves[s] != 0.0
                 || b_waves[s + 1] != 0.0
                 || b_waves[s + 2] != 0.0
@@ -102,104 +79,138 @@ fn step_prefix_run_k<const K: usize>(
                 idx += 4;
                 continue;
             }
-            if !any_nz || any_b {
+            if !all_nz && any_b {
                 for j in 0..4 {
-                    if !may_be_nonzero[s + j] && b_waves[s + j] != 0.0 {
-                        may_be_nonzero[s + j] = true;
-                        ports_synced[s + j] = false;
+                    if !ports.may_be_nonzero[s + j] && b_waves[s + j] != 0.0 {
+                        ports.may_be_nonzero[s + j] = true;
+                        ports.ports_synced[s + j] = false;
                     }
                 }
             }
             let nvp = neg_half
                 * (F32x4::from_slice(&a_waves[s..s + 4]) + F32x4::from_slice(&b_waves[s..s + 4]));
             let base = idx * stride;
-            let (st4, cf4) = (
-                &mut state[base..base + 4 * stride],
-                &coef[base..base + 4 * stride],
-            );
-            let (st01, st23) = st4.split_at_mut(2 * stride);
-            let (st0, st1) = st01.split_at_mut(stride);
-            let (st2, st3) = st23.split_at_mut(stride);
-            let (m0, br0) =
-                step_one_prefix::<K>(st0, &cf4[0..stride], nvp.splat_lane::<0>(), h_proj);
-            let (m1, br1) =
-                step_one_prefix::<K>(st1, &cf4[stride..2 * stride], nvp.splat_lane::<1>(), h_proj);
-            let (m2, br2) = step_one_prefix::<K>(
-                st2,
-                &cf4[2 * stride..3 * stride],
-                nvp.splat_lane::<2>(),
-                h_proj,
-            );
-            let (m3, br3) = step_one_prefix::<K>(
-                st3,
-                &cf4[3 * stride..4 * stride],
-                nvp.splat_lane::<3>(),
-                h_proj,
-            );
-            let aw4 = reduce_sum_4(br0, br1, br2, br3) * F32x4::from_slice(&gains[s..s + 4]);
-            aw4.write_to_slice(&mut a_waves[s..s + 4]);
-            let (fm0, fm1, fm2, fm3) = (meta[s], meta[s + 1], meta[s + 2], meta[s + 3]);
-            let pl01 = m0.mul_add(F32x4::splat(fm0.pan_l), m1 * F32x4::splat(fm1.pan_l));
-            let pl23 = m2.mul_add(F32x4::splat(fm2.pan_l), m3 * F32x4::splat(fm3.pan_l));
-            *sum_l_vec = *sum_l_vec + (pl01 + pl23);
-            let pr01 = m0.mul_add(F32x4::splat(fm0.pan_r), m1 * F32x4::splat(fm1.pan_r));
-            let pr23 = m2.mul_add(F32x4::splat(fm2.pan_r), m3 * F32x4::splat(fm3.pan_r));
-            *sum_r_vec = *sum_r_vec + (pr01 + pr23);
+            let st4 = &mut state[base..base + 4 * stride];
+            let cf4 = &coef[base..base + 4 * stride];
+            let any_damp = plan.symp_has_gains[s]
+                | plan.symp_has_gains[s + 1]
+                | plan.symp_has_gains[s + 2]
+                | plan.symp_has_gains[s + 3];
+            let ms4 = if !any_damp {
+                step_open_quad_cold::<K>(
+                    st4,
+                    cf4,
+                    nvp,
+                    h_proj,
+                    F32x4::from_slice(&gains[s..s + 4]),
+                    &mut a_waves[s..s + 4],
+                )
+            } else {
+                let (br4, ms4) = step_prefix_quad_damp::<K>(
+                    st4,
+                    cf4,
+                    &damp_bd[base..base + 4 * stride],
+                    &damp_ad[base..base + 4 * stride],
+                    nvp,
+                    h_proj,
+                    s,
+                    ts,
+                    &mut plan.str_coupled,
+                    &mut plan.coupled_strs,
+                    &mut plan.n_coupled_strs,
+                    &mut plan.symp_has_gains,
+                    &mut plan.symp_gv,
+                    &mut plan.symp_gh,
+                    &mut plan.symp_mask,
+                    ports,
+                );
+                let aw4 = br4 * F32x4::from_slice(&gains[s..s + 4]);
+                aw4.write_to_slice(&mut a_waves[s..s + 4]);
+                ms4
+            };
+            *sum_l_vec = ms4.mul_add(F32x4::from_slice(&pan_l[s..s + 4]), *sum_l_vec);
+            *sum_r_vec = ms4.mul_add(F32x4::from_slice(&pan_r[s..s + 4]), *sum_r_vec);
             idx += 4;
             continue;
         }
         for sub_i in 0..4 {
             let s_idx = s + sub_i;
-            if str_coupled[s_idx] {
+            if plan.str_coupled[s_idx] {
                 continue;
             }
-            if !may_be_nonzero[s_idx] && b_waves[s_idx] == 0.0 {
-                a_waves[s_idx] = 0.0;
-                continue;
-            }
-            if !may_be_nonzero[s_idx] {
-                may_be_nonzero[s_idx] = true;
-                ports_synced[s_idx] = false;
+            if !ports.may_be_nonzero[s_idx] {
+                if b_waves[s_idx] == 0.0 {
+                    a_waves[s_idx] = 0.0;
+                    continue;
+                }
+                ports.may_be_nonzero[s_idx] = true;
+                ports.ports_synced[s_idx] = false;
             }
             let off = (idx + sub_i) * stride;
             let neg_vbr = F32x4::splat(-0.5 * (a_waves[s_idx] + b_waves[s_idx]));
-            let (acc_m, acc_br) = step_one_prefix::<K>(
+            let (acc_m, acc_br) = step_single_prefix_damp::<K>(
+                s_idx,
+                ts,
                 &mut state[off..off + stride],
                 &coef[off..off + stride],
+                &damp_bd[off..off + stride],
+                &damp_ad[off..off + stride],
                 neg_vbr,
                 h_proj,
+                &mut plan.str_coupled,
+                &mut plan.coupled_strs,
+                &mut plan.n_coupled_strs,
+                &mut plan.symp_has_gains,
+                &mut plan.symp_gv,
+                &mut plan.symp_gh,
+                &mut plan.symp_mask,
+                ports,
             );
             let fm = meta[s_idx];
             a_waves[s_idx] = fm.a_wave_gain * acc_br.reduce_sum();
-            *sum_l_vec = acc_m.mul_add(F32x4::splat(fm.pan_l), *sum_l_vec);
-            *sum_r_vec = acc_m.mul_add(F32x4::splat(fm.pan_r), *sum_r_vec);
+            let mc = acc_m * c_sign_v;
+            *sum_l_vec = mc.mul_add(F32x4::splat(fm.pan_l), *sum_l_vec);
+            *sum_r_vec = mc.mul_add(F32x4::splat(fm.pan_r), *sum_r_vec);
         }
         idx += 4;
     }
     while idx < count {
         let s_idx = start_s + idx;
-        if !str_coupled[s_idx] {
-            if !may_be_nonzero[s_idx] && b_waves[s_idx] == 0.0 {
-                a_waves[s_idx] = 0.0;
-                idx += 1;
-                continue;
-            }
-            if !may_be_nonzero[s_idx] {
-                may_be_nonzero[s_idx] = true;
-                ports_synced[s_idx] = false;
+        if !plan.str_coupled[s_idx] {
+            if !ports.may_be_nonzero[s_idx] {
+                if b_waves[s_idx] == 0.0 {
+                    a_waves[s_idx] = 0.0;
+                    idx += 1;
+                    continue;
+                }
+                ports.may_be_nonzero[s_idx] = true;
+                ports.ports_synced[s_idx] = false;
             }
             let off = idx * stride;
             let neg_vbr = F32x4::splat(-0.5 * (a_waves[s_idx] + b_waves[s_idx]));
-            let (acc_m, acc_br) = step_one_prefix::<K>(
+            let (acc_m, acc_br) = step_single_prefix_damp::<K>(
+                s_idx,
+                ts,
                 &mut state[off..off + stride],
                 &coef[off..off + stride],
+                &damp_bd[off..off + stride],
+                &damp_ad[off..off + stride],
                 neg_vbr,
                 h_proj,
+                &mut plan.str_coupled,
+                &mut plan.coupled_strs,
+                &mut plan.n_coupled_strs,
+                &mut plan.symp_has_gains,
+                &mut plan.symp_gv,
+                &mut plan.symp_gh,
+                &mut plan.symp_mask,
+                ports,
             );
             let fm = meta[s_idx];
             a_waves[s_idx] = fm.a_wave_gain * acc_br.reduce_sum();
-            *sum_l_vec = acc_m.mul_add(F32x4::splat(fm.pan_l), *sum_l_vec);
-            *sum_r_vec = acc_m.mul_add(F32x4::splat(fm.pan_r), *sum_r_vec);
+            let mc = acc_m * c_sign_v;
+            *sum_l_vec = mc.mul_add(F32x4::splat(fm.pan_l), *sum_l_vec);
+            *sum_r_vec = mc.mul_add(F32x4::splat(fm.pan_r), *sum_r_vec);
         }
         idx += 1;
     }
@@ -210,7 +221,8 @@ fn step_prefix_run_k<const K: usize>(
 pub(crate) fn step_uncoupled_prefixes_fast(
     bp: &mut BridgePorts,
     ports: &mut ContactPorts,
-    str_coupled: &[bool; TOTAL_STRINGS],
+    plan: &mut ChunkPlan,
+    ts: usize,
     a_waves: &mut [f32; TOTAL_STRINGS],
     b_waves: &[f32; TOTAL_STRINGS],
 ) -> (f32, f32) {
@@ -222,54 +234,90 @@ pub(crate) fn step_uncoupled_prefixes_fast(
             usize::from(run.count),
             usize::from(run.p_off),
         );
-        match run.n_pol {
-            0 => {
-                for s_idx in start_s..start_s + count {
-                    if !str_coupled[s_idx] {
-                        a_waves[s_idx] = 0.0;
+        let run_has_symp = plan.symp_has_gains[start_s..start_s + count]
+            .iter()
+            .any(|&b| b);
+        match (run.n_pol, run_has_symp) {
+            (0, _) => {
+                for (a_wave, &coupled) in a_waves[start_s..start_s + count]
+                    .iter_mut()
+                    .zip(&plan.str_coupled[start_s..start_s + count])
+                {
+                    if !coupled {
+                        *a_wave = 0.0;
                     }
                 }
             }
-            1 => step_prefix_run_k::<1>(
-                &mut bp.state[p_off..],
-                &bp.coef[p_off..],
+            (1, false) => step_prefix_run_k_open::<1>(
+                bp,
+                ports,
+                p_off,
                 start_s,
                 count,
-                &bp.fast_meta,
-                &bp.a_wave_gains,
-                str_coupled,
-                &mut ports.may_be_nonzero,
-                &mut ports.ports_synced,
+                plan,
                 a_waves,
                 b_waves,
                 &mut sum_l_vec,
                 &mut sum_r_vec,
             ),
-            2 => step_prefix_run_k::<2>(
-                &mut bp.state[p_off..],
-                &bp.coef[p_off..],
+            (2, false) => step_prefix_run_k_open::<2>(
+                bp,
+                ports,
+                p_off,
                 start_s,
                 count,
-                &bp.fast_meta,
-                &bp.a_wave_gains,
-                str_coupled,
-                &mut ports.may_be_nonzero,
-                &mut ports.ports_synced,
+                plan,
                 a_waves,
                 b_waves,
                 &mut sum_l_vec,
                 &mut sum_r_vec,
             ),
-            _ => step_prefix_run_k::<3>(
-                &mut bp.state[p_off..],
-                &bp.coef[p_off..],
+            (_, false) => step_prefix_run_k_open::<3>(
+                bp,
+                ports,
+                p_off,
                 start_s,
                 count,
-                &bp.fast_meta,
-                &bp.a_wave_gains,
-                str_coupled,
-                &mut ports.may_be_nonzero,
-                &mut ports.ports_synced,
+                plan,
+                a_waves,
+                b_waves,
+                &mut sum_l_vec,
+                &mut sum_r_vec,
+            ),
+            (1, true) => step_prefix_run_k::<1>(
+                bp,
+                ports,
+                p_off,
+                start_s,
+                count,
+                ts,
+                plan,
+                a_waves,
+                b_waves,
+                &mut sum_l_vec,
+                &mut sum_r_vec,
+            ),
+            (2, true) => step_prefix_run_k::<2>(
+                bp,
+                ports,
+                p_off,
+                start_s,
+                count,
+                ts,
+                plan,
+                a_waves,
+                b_waves,
+                &mut sum_l_vec,
+                &mut sum_r_vec,
+            ),
+            (_, true) => step_prefix_run_k::<3>(
+                bp,
+                ports,
+                p_off,
+                start_s,
+                count,
+                ts,
+                plan,
                 a_waves,
                 b_waves,
                 &mut sum_l_vec,
@@ -277,11 +325,7 @@ pub(crate) fn step_uncoupled_prefixes_fast(
             ),
         }
     }
-    let c_sign_v = F32x4::from_array(C_SIGN_V_ARR);
-    (
-        (sum_l_vec * c_sign_v).reduce_sum(),
-        (sum_r_vec * c_sign_v).reduce_sum(),
-    )
+    (sum_l_vec.reduce_sum(), sum_r_vec.reduce_sum())
 }
 
 #[inline(always)]
@@ -442,31 +486,4 @@ fn step_string_prefix_wdf_symp_damp_vh_inner<const HAS_FD: bool>(
     let acc_c = acc_v.mul_add(c_sign_v, acc_h * c_sign_h);
     let port_sums = reduce_sum_4(acc_yd_v, acc_vd_v, acc_yd_h, acc_vd_h).to_array();
     (acc_c, acc_br, port_sums)
-}
-
-impl BridgePorts {
-    #[inline]
-    pub fn reset_resting(&mut self) {
-        let z = F32x4::zero();
-        self.state.fill(PrefixState { u: z, v: z });
-        self.tl_soa.reset_resting();
-    }
-
-    pub fn compute_a_waves(
-        &self,
-        may_be_nonzero: &[bool; TOTAL_STRINGS],
-        a_waves: &mut [f32; TOTAL_STRINGS],
-    ) {
-        for (s_idx, m) in self.meta.iter().enumerate() {
-            if !may_be_nonzero[s_idx] {
-                a_waves[s_idx] = 0.0;
-                continue;
-            }
-            let mut acc = F32x4::zero();
-            for i in m.beta_v_off..(m.beta_v_off + m.n_vh) {
-                acc = self.state[i].v.mul_add(self.coef[i].beta, acc);
-            }
-            a_waves[s_idx] = m.a_wave_gain * acc.reduce_sum();
-        }
-    }
 }

@@ -298,6 +298,7 @@ impl StringBank {
             self.bridge_ports.key_tails[k].tail_n_trans = self.bridge_ports.tail_n_trans[s0];
             self.bridge_ports.key_tails[k].tail_n_long = self.bridge_ports.tail_n_long[s0];
         }
+        self.bridge_ports.sync_damp_ports(&self.ports);
     }
 }
 

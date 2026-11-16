@@ -12,10 +12,12 @@ use crate::contact::KeyActionDriver;
 use crate::contact_ports::{refresh_prefix_damp_ports_bp, DAMPER_CLEAR_THRESHOLD_M};
 
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn step_coupled_prefixes(
     r: &mut BridgeRun<'_>,
     driver: &mut impl KeyActionDriver,
     plan: &mut ChunkPlan,
+    n_coupled: usize,
     a_waves: &mut [f32; TOTAL_STRINGS],
     b_waves: &[f32; TOTAL_STRINGS],
     out_pair: (&mut [f32], &mut [f32]),
@@ -24,7 +26,7 @@ pub(crate) fn step_coupled_prefixes(
     let c_sign_v = F32x4::from_array(C_SIGN_V_ARR);
     let c_sign_h = F32x4::from_array(C_SIGN_H_ARR);
     let (mut sum_l_vec, mut sum_r_vec) = (F32x4::zero(), F32x4::zero());
-    for i in 0..plan.n_coupled_strs {
+    for i in 0..n_coupled {
         let s_idx = usize::from(plan.coupled_strs[i]);
         let entry = &r.strings[s_idx];
         let k = usize::from(entry.key_idx);
@@ -46,7 +48,6 @@ pub(crate) fn step_coupled_prefixes(
                 if r.sav_on && k < LONGITUDINAL_MAX_KEY_IDX && r.sav.string_n_vh(s_idx) > 0 {
                     plan.sav_strings[plan.n_sav] = s_idx as u8;
                     plan.n_sav += 1;
-                    plan.sav_sched_dirty = true;
                 }
             }
             let nz_now = r.ports.may_be_nonzero[s_idx]
@@ -115,7 +116,7 @@ pub(crate) fn step_coupled_prefixes(
                 && r.ports.y_dv[s_idx].abs() <= 1.0e-6
                 && r.ports.y_dh[s_idx].abs() <= 1.0e-6
             {
-                let [gv, gh] = plan.symp_gains[s_idx];
+                let (gv, gh) = (plan.symp_gv[s_idx], plan.symp_gh[s_idx]);
                 let fd_v = gv * r.ports.v_dv[s_idx];
                 let fd_h = gh * r.ports.v_dh[s_idx];
                 let (acc_c, acc_br, [ydv, vdv_raw, ydh, vdh_raw]) =
@@ -137,6 +138,7 @@ pub(crate) fn step_coupled_prefixes(
                 r.ports.v_dv[s_idx] = alpha * vdv_raw;
                 r.ports.y_dh[s_idx] = ydh;
                 r.ports.v_dh[s_idx] = alpha * vdh_raw;
+                r.ports.ports_synced[s_idx] = true;
                 (acc_c, acc_br)
             } else {
                 plan.symp_has_gains[s_idx] = false;
@@ -145,40 +147,51 @@ pub(crate) fn step_coupled_prefixes(
                     if !r.ports.ports_synced[s_idx] {
                         refresh_prefix_damp_ports_bp(r.bridge_ports, r.ports, s_idx);
                     }
-                    let (raw_fv, raw_fh) = driver.step_damper_pair(
-                        k,
-                        s_idx,
-                        r.ports.y_dv[s_idx],
-                        r.ports.v_dv[s_idx],
-                        r_dv,
-                        r.ports.y_dh[s_idx],
-                        r.ports.v_dh[s_idx],
-                        r_dh,
-                        yc,
-                    );
-                    let fd_v = if raw_fv.is_finite() { raw_fv } else { 0.0 };
-                    let fd_h = if raw_fh.is_finite() { raw_fh } else { 0.0 };
-                    let (acc_c, acc_br, [ydv, vdv_raw, ydh, vdh_raw]) =
-                        step_string_prefix_wdf_symp_damp_vh(
-                            r.ports,
-                            r.bridge_ports,
-                            v_br_r,
-                            h_br_r,
-                            beta_v_off,
-                            beta_h_off,
-                            c_sign_v,
-                            c_sign_h,
-                            neg_vbr,
-                            fd_v,
-                            fd_h,
+                    if yc >= 2.5e-5
+                        && !r.ports.tail_nonzero[s_idx]
+                        && r.ports.y_dv[s_idx].abs() <= 0.25 * yc
+                        && r.ports.y_dh[s_idx].abs() <= 0.25 * yc
+                    {
+                        let (acc_c, acc_br) =
+                            step_string_prefix_wdf_br(r.bridge_ports, beta_v_off, nv, nh, neg_vbr);
+                        r.ports.ports_synced[s_idx] = false;
+                        (acc_c, acc_br)
+                    } else {
+                        let (raw_fv, raw_fh) = driver.step_damper_pair(
+                            k,
+                            s_idx,
+                            r.ports.y_dv[s_idx],
+                            r.ports.v_dv[s_idx],
+                            r_dv,
+                            r.ports.y_dh[s_idx],
+                            r.ports.v_dh[s_idx],
+                            r_dh,
+                            yc,
                         );
-                    let alpha = r.ports.alpha_vel[s_idx];
-                    r.ports.y_dv[s_idx] = ydv;
-                    r.ports.v_dv[s_idx] = alpha * vdv_raw;
-                    r.ports.y_dh[s_idx] = ydh;
-                    r.ports.v_dh[s_idx] = alpha * vdh_raw;
-                    r.ports.ports_synced[s_idx] = true;
-                    (acc_c, acc_br)
+                        let fd_v = if raw_fv.is_finite() { raw_fv } else { 0.0 };
+                        let fd_h = if raw_fh.is_finite() { raw_fh } else { 0.0 };
+                        let (acc_c, acc_br, [ydv, vdv_raw, ydh, vdh_raw]) =
+                            step_string_prefix_wdf_symp_damp_vh(
+                                r.ports,
+                                r.bridge_ports,
+                                v_br_r,
+                                h_br_r,
+                                beta_v_off,
+                                beta_h_off,
+                                c_sign_v,
+                                c_sign_h,
+                                neg_vbr,
+                                fd_v,
+                                fd_h,
+                            );
+                        let alpha = r.ports.alpha_vel[s_idx];
+                        r.ports.y_dv[s_idx] = ydv;
+                        r.ports.v_dv[s_idx] = alpha * vdv_raw;
+                        r.ports.y_dh[s_idx] = ydh;
+                        r.ports.v_dh[s_idx] = alpha * vdh_raw;
+                        r.ports.ports_synced[s_idx] = true;
+                        (acc_c, acc_br)
+                    }
                 } else {
                     let (acc_c, acc_br) =
                         step_string_prefix_wdf_br(r.bridge_ports, beta_v_off, nv, nh, neg_vbr);

@@ -78,12 +78,9 @@ pub(crate) struct FastPrefixMeta {
     pub pan_r: f32,
 }
 
+#[rustfmt::skip]
 impl FastPrefixMeta {
-    pub const ZERO: Self = Self {
-        a_wave_gain: 0.0,
-        pan_l: 0.0,
-        pan_r: 0.0,
-    };
+    pub const ZERO: Self = Self { a_wave_gain: 0.0, pan_l: 0.0, pan_r: 0.0 };
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -94,13 +91,9 @@ pub(crate) struct PrefixRun {
     pub p_off: u16,
 }
 
+#[rustfmt::skip]
 impl PrefixRun {
-    pub const ZERO: Self = Self {
-        start_s: 0,
-        count: 0,
-        n_pol: 0,
-        p_off: 0,
-    };
+    pub const ZERO: Self = Self { start_s: 0, count: 0, n_pol: 0, p_off: 0 };
 }
 
 pub(crate) const MAX_PREFIX_RUNS: usize = 16;
@@ -116,14 +109,10 @@ pub(crate) struct KeyTailRanges {
     pub tail_n_long: f32,
 }
 
+#[rustfmt::skip]
 impl KeyTailRanges {
     pub const ZERO: Self = Self {
-        th_end: 0,
-        l_end: 0,
-        pan_l: 0.0,
-        pan_r: 0.0,
-        tail_n_trans: 0.0,
-        tail_n_long: 0.0,
+        th_end: 0, l_end: 0, pan_l: 0.0, pan_r: 0.0, tail_n_trans: 0.0, tail_n_long: 0.0,
     };
 }
 
@@ -143,20 +132,12 @@ pub(crate) struct StringBridgeMeta {
     pub a_wave_gain: f32,
 }
 
+#[rustfmt::skip]
 impl StringBridgeMeta {
     const fn empty() -> Self {
         Self {
-            v_br: 0..0,
-            h_br: 0..0,
-            v_tail: 0..0,
-            h_tail: 0..0,
-            tl_v: 0..0,
-            tl_h: 0..0,
-            tl_l: 0..0,
-            beta_v_off: 0,
-            beta_h_off: 0,
-            n_vh: 0,
-            a_wave_gain: 0.0,
+            v_br: 0..0, h_br: 0..0, v_tail: 0..0, h_tail: 0..0, tl_v: 0..0, tl_h: 0..0,
+            tl_l: 0..0, beta_v_off: 0, beta_h_off: 0, n_vh: 0, a_wave_gain: 0.0,
         }
     }
 }
@@ -166,9 +147,13 @@ impl StringBridgeMeta {
 pub(crate) struct BridgePorts {
     pub state: Box<[PrefixState]>,
     pub coef: Box<[PrefixCoef]>,
+    pub damp_bd: Box<[F32x4]>,
+    pub damp_ad: Box<[F32x4]>,
     pub tl_soa: ModalSoa,
     pub fast_meta: [FastPrefixMeta; TOTAL_STRINGS],
     pub a_wave_gains: [f32; TOTAL_STRINGS],
+    pub pan_l: [f32; TOTAL_STRINGS],
+    pub pan_r: [f32; TOTAL_STRINGS],
     pub prefix_runs: [PrefixRun; MAX_PREFIX_RUNS],
     pub n_prefix_runs: usize,
     pub key_tails: [KeyTailRanges; NUM_KEYS],
@@ -191,8 +176,10 @@ pub(crate) fn count_prefix_modes(
         (1_250.0_f64, 12usize)
     } else if key_idx < 28 {
         (2_500.0_f64, 12usize)
+    } else if key_idx < 40 {
+        (3_800.0_f64, 8usize)
     } else {
-        (3_800.0_f64, 12usize)
+        (3_800.0_f64, 4usize)
     };
     let lim = cutoff_hz.min(nyquist_hz);
     let mut n = 0usize;
@@ -303,6 +290,8 @@ impl BridgePorts {
 
         let mut fast_meta = [FastPrefixMeta::ZERO; TOTAL_STRINGS];
         let mut a_wave_gains = [0.0_f32; TOTAL_STRINGS];
+        let mut pan_l = [0.0_f32; TOTAL_STRINGS];
+        let mut pan_r = [0.0_f32; TOTAL_STRINGS];
         let mut key_tails = [KeyTailRanges::ZERO; NUM_KEYS];
         let d_src = soa.d_coeff.as_f32x4_slice();
         let s_src = soa.s_coeff.as_f32x4_slice();
@@ -413,6 +402,8 @@ impl BridgePorts {
                     a_wave_gain: meta[s_idx].a_wave_gain,
                 };
                 a_wave_gains[s_idx] = meta[s_idx].a_wave_gain;
+                pan_l[s_idx] = entry.pan_l;
+                pan_r[s_idx] = entry.pan_r;
                 fast_meta[s_idx] = FastPrefixMeta {
                     a_wave_gain: meta[s_idx].a_wave_gain,
                     pan_l: entry.pan_l,
@@ -460,9 +451,16 @@ impl BridgePorts {
         let (mut prefix_runs, mut n_prefix_runs, mut s_run) =
             ([PrefixRun::ZERO; MAX_PREFIX_RUNS], 0usize, 0usize);
         while s_run < TOTAL_STRINGS {
-            let (n_pol, p_off) = (counts[s_run].1, meta[s_run].beta_v_off as u16);
+            let (n_pol, p_off, has_damp) = (
+                counts[s_run].1,
+                meta[s_run].beta_v_off as u16,
+                map.strings()[s_run].has_damper,
+            );
             let mut end_s = s_run + 1;
-            while end_s < TOTAL_STRINGS && counts[end_s].1 == n_pol {
+            while end_s < TOTAL_STRINGS
+                && counts[end_s].1 == n_pol
+                && map.strings()[end_s].has_damper == has_damp
+            {
                 end_s += 1;
             }
             assert!(n_prefix_runs < MAX_PREFIX_RUNS && n_pol <= 3);
@@ -475,12 +473,16 @@ impl BridgePorts {
             n_prefix_runs += 1;
             s_run = end_s;
         }
-        Self {
+        let mut built = Self {
             state,
             coef,
+            damp_bd: alloc::vec![z; cap_p].into_boxed_slice(),
+            damp_ad: alloc::vec![z; cap_p].into_boxed_slice(),
             tl_soa,
             fast_meta,
             a_wave_gains,
+            pan_l,
+            pan_r,
             prefix_runs,
             n_prefix_runs,
             key_tails,
@@ -490,6 +492,8 @@ impl BridgePorts {
             tail_n_trans,
             tail_n_long,
             meta,
-        }
+        };
+        built.sync_damp_ports(ports);
+        built
     }
 }

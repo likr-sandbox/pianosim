@@ -409,6 +409,7 @@ impl StringBank {
             }
         }
         debug_assert_eq!(cur, expected_len);
+        self.bridge_ports.sync_damp_ports(&self.ports);
         true
     }
 }

@@ -399,8 +399,6 @@ pub(crate) fn flush_bridge_subnormals_core(
             if !nz {
                 ports.clear_string_state(s_idx);
                 sav.reset_string(s_idx);
-            } else if !key_has_hammer[k] {
-                ports.ports_synced[s_idx] = false;
             }
         }
     }
