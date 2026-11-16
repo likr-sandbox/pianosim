@@ -1,7 +1,9 @@
 //! Native verification, WAV export, Wasm SIMD inspection, and static check CLI.
 
+mod bench_composite;
 mod bench_rt;
 mod check_lines;
+mod scenarios;
 mod wasm_check;
 mod wav_writer;
 
@@ -24,6 +26,7 @@ fn main() {
         Some("check-lines") => cmd_check_lines(&args[1..]),
         Some("check-wasm-simd") => cmd_check_wasm_simd(&args[1..]),
         Some("render-wav") => cmd_render_wav(&args[1..]),
+        Some("scenarios") => scenarios::run_scenarios(&args[1..]),
         _ => Err(usage()),
     };
 
@@ -35,7 +38,7 @@ fn main() {
 
 fn usage() -> String {
     String::from(
-        "Usage:\n  piano-cli bench\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli render-wav <out.wav>",
+        "Usage:\n  piano-cli bench\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli render-wav <out.wav>\n  piano-cli scenarios [--json] [--markdown]",
     )
 }
 
