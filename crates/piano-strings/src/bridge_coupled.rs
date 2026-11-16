@@ -42,18 +42,13 @@ fn step_coupled_prefixes(
         let s_idx = usize::from(plan.coupled_strs[i]);
         let entry = &r.strings[s_idx];
         let k = usize::from(entry.key_idx);
-        let (v_br_r, h_br_r, beta_v_off, beta_h_off, a_wave_gain, r_dv, r_dh) = {
-            let m = &r.bridge_ports.meta[s_idx];
-            (
-                m.v_br.clone(),
-                m.h_br.clone(),
-                m.beta_v_off,
-                m.beta_h_off,
-                m.a_wave_gain,
-                r.bridge_ports.r_damp_prefix_v[s_idx],
-                r.bridge_ports.r_damp_prefix_h[s_idx],
-            )
-        };
+        let m = &r.bridge_ports.meta[s_idx];
+        let (v_br_r, h_br_r) = (m.v_br.clone(), m.h_br.clone());
+        let (beta_v_off, beta_h_off, a_wave_gain) = (m.beta_v_off, m.beta_h_off, m.a_wave_gain);
+        let (r_dv, r_dh) = (
+            r.bridge_ports.r_damp_prefix_v[s_idx],
+            r.bridge_ports.r_damp_prefix_h[s_idx],
+        );
         let (nv, nh) = (v_br_r.len(), h_br_r.len());
         let v_br = 0.5 * (a_waves[s_idx] + b_waves[s_idx]);
         let neg_vbr = F32x4::splat(-v_br);
@@ -349,9 +344,14 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             let any_nz = plan.was_nz[sr.clone()].iter().any(|&b| b);
             if !mid_ev && !hammer && !any_nz {
                 if key.has_damper {
-                    let _ = step_clearance_subblock(driver, k, sub, None);
+                    let min_c = step_clearance_subblock(driver, k, sub, None);
+                    if min_c < DAMPER_CLEAR_THRESHOLD_M {
+                        plan.key_cat[k] = KeyCat::DampedSymp;
+                        continue;
+                    }
+                } else {
+                    continue;
                 }
-                continue;
             }
             let min_c = if mid_ev {
                 0.0
@@ -373,18 +373,14 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                 plan.active_keys[plan.n_a] = k as u8;
                 plan.n_a += 1;
                 for s_idx in sr.clone() {
-                    plan.str_coupled[s_idx] = true;
-                    plan.coupled_strs[plan.n_coupled_strs] = s_idx as u8;
-                    plan.n_coupled_strs += 1;
+                    plan.push_coupled(s_idx);
                 }
             } else if min_c < DAMPER_CLEAR_THRESHOLD_M {
                 plan.key_cat[k] = KeyCat::DampedSymp;
                 if key.has_damper {
                     for s_idx in sr.clone() {
                         if plan.was_nz[s_idx] {
-                            plan.str_coupled[s_idx] = true;
-                            plan.coupled_strs[plan.n_coupled_strs] = s_idx as u8;
-                            plan.n_coupled_strs += 1;
+                            plan.push_coupled(s_idx);
                         }
                     }
                 }
@@ -413,6 +409,19 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             }
         }
 
+        let mut n_rd = 0usize;
+        let mut resting_damped = [0u8; TOTAL_STRINGS];
+        for (k, key) in r.keys.iter().enumerate() {
+            if plan.key_cat[k] == KeyCat::DampedSymp {
+                for s_idx in key.string_range.clone() {
+                    if !plan.was_nz[s_idx] {
+                        resting_damped[n_rd] = s_idx as u8;
+                        n_rd += 1;
+                    }
+                }
+            }
+        }
+
         if r.sav_on && plan.n_sav > 0 {
             plan.sav_sched
                 .rebuild(r.sav, &plan.sav_strings[..plan.n_sav], r.long_on);
@@ -428,6 +437,9 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                 &mut b_waves,
                 &mut zone_out,
             );
+            for &s_u8 in &resting_damped[..n_rd] {
+                b_waves[usize::from(s_u8)] = 0.0;
+            }
             if let Some(zf) = zone_frames.as_deref_mut() {
                 zf[chunk_base + ts] = zone_out;
             }
@@ -452,7 +464,11 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             .zip(b_waves.iter())
             .any(|(&a, &b)| a != 0.0 || b != 0.0);
         for s_idx in 0..TOTAL_STRINGS {
-            if !plan.str_coupled[s_idx] && (r.ports.may_be_nonzero[s_idx] || any_bridge_wave) {
+            let k = usize::from(r.strings[s_idx].key_idx);
+            let is_open = plan.key_cat[k] == KeyCat::Uncoupled;
+            if !plan.str_coupled[s_idx]
+                && (r.ports.may_be_nonzero[s_idx] || (any_bridge_wave && is_open))
+            {
                 r.ports.may_be_nonzero[s_idx] = true;
                 r.ports.ports_synced[s_idx] = false;
             }

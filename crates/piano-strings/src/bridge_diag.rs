@@ -7,7 +7,7 @@ use piano_spec::{NUM_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_port::{BridgePorts, PrefixState, C_SIGN_H_ARR, C_SIGN_V_ARR};
 use crate::choir_map::StringMapEntry;
-use crate::contact_ports::ContactPorts;
+use crate::contact_ports::{ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
 use crate::modal_soa::{sqrt_f64, ModalSoa};
 use crate::phantom::{convolve_transverse_slopes, MAX_PHANTOM_TRANSVERSE_MODES};
 use crate::sav_drift::SavBank;
@@ -295,11 +295,24 @@ pub(crate) fn flush_bridge_subnormals_core(
                 ports.tail_nonzero[s_idx] = nz_tail;
                 nz_br | nz_tail
             };
+            let k = usize::from(entry.key_idx);
+            let is_damped =
+                entry.has_damper && ports.y_clear_scratch[k][127] < DAMPER_CLEAR_THRESHOLD_M;
             if !nz {
                 ports.clear_string_state(s_idx);
                 sav.reset_string(s_idx);
-            } else if !key_has_hammer[usize::from(entry.key_idx)] {
+            } else if !key_has_hammer[k] {
                 ports.ports_synced[s_idx] = false;
+                if is_damped
+                    && ports.y_dv[s_idx].abs() < 1.0e-5
+                    && ports.v_dv[s_idx].abs() < 1.0e-4
+                    && ports.y_dh[s_idx].abs() < 1.0e-5
+                    && ports.v_dh[s_idx].abs() < 1.0e-4
+                {
+                    ports.struck_active[s_idx] = false;
+                    ports.may_be_nonzero[s_idx] = false;
+                    sav.reset_string(s_idx);
+                }
             }
         }
     }

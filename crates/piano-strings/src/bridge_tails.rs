@@ -94,6 +94,15 @@ pub(crate) struct ChunkPlan {
     pub n_coupled_strs: usize,
 }
 
+impl ChunkPlan {
+    #[inline(always)]
+    pub fn push_coupled(&mut self, s_idx: usize) {
+        self.str_coupled[s_idx] = true;
+        self.coupled_strs[self.n_coupled_strs] = s_idx as u8;
+        self.n_coupled_strs += 1;
+    }
+}
+
 pub(crate) struct BridgeRun<'a> {
     pub ports: &'a mut ContactPorts,
     pub bridge_ports: &'a mut BridgePorts,
