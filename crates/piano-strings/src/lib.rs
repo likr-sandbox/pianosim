@@ -247,6 +247,18 @@ impl StringBank {
         }
     }
 
+    /// Retires struck contact state for all strings belonging to `key_idx` once
+    /// vibration decays below silence, transitioning the key from ActiveContact to DampedSymp.
+    #[inline]
+    pub fn retire_key_struck_contact(&mut self, key_idx: usize) {
+        if let Some(entry) = self.choir_map.key(key_idx) {
+            for s_idx in entry.string_range.clone() {
+                self.ports.struck_active[s_idx] = false;
+                self.sav.reset_string(s_idx);
+            }
+        }
+    }
+
     /// Injects a single-sample force impulse into `key_idx` across its choir strings
     /// weighted by `string_weights`. Intended for sample-accurate test/external impulses.
     pub fn apply_excitation_sample(

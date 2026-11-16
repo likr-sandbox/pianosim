@@ -24,7 +24,7 @@ const FINITE_EXP_BITS: u32 = 0x7f80_0000_u32;
 #[inline(always)]
 pub(crate) fn zoh_rotate(u0: F32x4, v0: F32x4, d0: F32x4, s0: F32x4) -> (F32x4, F32x4) {
     let du = d0.mul_add(u0, s0 * v0);
-    let dv = s0 * u0 - d0 * v0;
+    let dv = d0.nmul_add(v0, s0 * u0);
     (u0 - du, v0 + dv)
 }
 
@@ -400,35 +400,38 @@ pub(crate) fn accum_soa_range_in(soa: &mut ModalSoa, vr: Range<usize>, acc: &mut
             (u0, v0) = zoh_rotate(u0, v0, d0, s0);
             (u1, v1) = zoh_rotate(u1, v1, d1, s1);
             (u2, v2) = zoh_rotate(u2, v2, d2, s2);
-            a0 = v0.mul_add(c0, v1.mul_add(c1, v2.mul_add(c2, a0)));
+            let m01_0 = v0.mul_add(c0, v1 * c1);
+            a0 = v2.mul_add(c2, a0) + m01_0;
             (u0, v0) = zoh_rotate(u0, v0, d0, s0);
             (u1, v1) = zoh_rotate(u1, v1, d1, s1);
             (u2, v2) = zoh_rotate(u2, v2, d2, s2);
-            a1 = v0.mul_add(c0, v1.mul_add(c1, v2.mul_add(c2, a1)));
+            let m01_1 = v0.mul_add(c0, v1 * c1);
+            a1 = v2.mul_add(c2, a1) + m01_1;
             (u0, v0) = zoh_rotate(u0, v0, d0, s0);
             (u1, v1) = zoh_rotate(u1, v1, d1, s1);
             (u2, v2) = zoh_rotate(u2, v2, d2, s2);
-            a2 = v0.mul_add(c0, v1.mul_add(c1, v2.mul_add(c2, a2)));
+            let m01_2 = v0.mul_add(c0, v1 * c1);
+            a2 = v2.mul_add(c2, a2) + m01_2;
             (u0, v0) = zoh_rotate(u0, v0, d0, s0);
             (u1, v1) = zoh_rotate(u1, v1, d1, s1);
             (u2, v2) = zoh_rotate(u2, v2, d2, s2);
-            a3 = v0.mul_add(c0, v1.mul_add(c1, v2.mul_add(c2, a3)));
+            let m01_3 = v0.mul_add(c0, v1 * c1);
+            a3 = v2.mul_add(c2, a3) + m01_3;
             (chunk[0], chunk[1], chunk[2], chunk[3]) = (a0, a1, a2, a3);
         }
         for slot in &mut acc[full4..c_len] {
             (u0, v0) = zoh_rotate(u0, v0, d0, s0);
             (u1, v1) = zoh_rotate(u1, v1, d1, s1);
             (u2, v2) = zoh_rotate(u2, v2, d2, s2);
-            *slot = v0.mul_add(c0, v1.mul_add(c1, v2.mul_add(c2, *slot)));
+            let m01 = v0.mul_add(c0, v1 * c1);
+            *slot = v2.mul_add(c2, *slot) + m01;
         }
-        (
-            u[idx],
-            v[idx],
-            u[idx + 1],
-            v[idx + 1],
-            u[idx + 2],
-            v[idx + 2],
-        ) = (u0, v0, u1, v1, u2, v2);
+        u[idx] = u0;
+        v[idx] = v0;
+        u[idx + 1] = u1;
+        v[idx + 1] = v1;
+        u[idx + 2] = u2;
+        v[idx + 2] = v2;
         idx += 3;
     }
     while idx < n {

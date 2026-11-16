@@ -32,12 +32,9 @@ pub(crate) struct HammerStepForce {
     pub fd_h: f32,
 }
 
+#[rustfmt::skip]
 impl HammerStepForce {
-    pub const ZERO: Self = Self {
-        fh: 0.0,
-        fd_v: 0.0,
-        fd_h: 0.0,
-    };
+    pub const ZERO: Self = Self { fh: 0.0, fd_v: 0.0, fd_h: 0.0 };
 }
 
 #[derive(Copy, Clone)]
@@ -47,12 +44,9 @@ pub(crate) struct SavLongSlice {
     pub end: u16,
 }
 
+#[rustfmt::skip]
 impl SavLongSlice {
-    pub const ZERO: Self = Self {
-        s_idx: 0,
-        start: 0,
-        end: 0,
-    };
+    pub const ZERO: Self = Self { s_idx: 0, start: 0, end: 0 };
 }
 
 #[derive(Copy, Clone)]
@@ -63,13 +57,9 @@ pub(crate) struct TailDampPartial {
     pub vdh_raw: f32,
 }
 
+#[rustfmt::skip]
 impl TailDampPartial {
-    pub const ZERO: Self = Self {
-        ydv: 0.0,
-        vdv_raw: 0.0,
-        ydh: 0.0,
-        vdh_raw: 0.0,
-    };
+    pub const ZERO: Self = Self { ydv: 0.0, vdv_raw: 0.0, ydh: 0.0, vdh_raw: 0.0 };
 }
 
 pub(crate) struct ChunkPlan {
@@ -163,16 +153,26 @@ fn step_tail_pol_tl(
     let c = &tl_soa.c_bridge.as_f32x4_slice()[tl_r];
     let bh = &ports.b_strike.as_f32x4_slice()[port_r.clone()];
     let bd = &ports.b_damp.as_f32x4_slice()[port_r];
-    let (fh_v, fd_v) = (F32x4::splat(f_h), F32x4::splat(f_d));
+    let (fh_v, fd_v) = (
+        F32x4::splat(f_h),
+        F32x4::splat(if has_damper { f_d } else { 0.0 }),
+    );
     let mut acc = F32x4::zero();
-    for i in 0..u_sl.len() {
-        let base = fh_v.mul_add(bh[i], u_sl[i]);
-        let u_inj = if has_damper {
-            fd_v.mul_add(bd[i], base)
-        } else {
-            base
-        };
-        let (un, vn) = zoh_rotate(u_inj, v_sl[i], d[i], s[i]);
+    let n = u_sl.len();
+    let mut i = 0usize;
+    while i + 1 < n {
+        let inj0 = fd_v.mul_add(bd[i], fh_v.mul_add(bh[i], u_sl[i]));
+        let inj1 = fd_v.mul_add(bd[i + 1], fh_v.mul_add(bh[i + 1], u_sl[i + 1]));
+        let (un0, vn0) = zoh_rotate(inj0, v_sl[i], d[i], s[i]);
+        let (un1, vn1) = zoh_rotate(inj1, v_sl[i + 1], d[i + 1], s[i + 1]);
+        (u_sl[i], v_sl[i]) = (un0, vn0);
+        (u_sl[i + 1], v_sl[i + 1]) = (un1, vn1);
+        acc = vn0.mul_add(c[i], vn1.mul_add(c[i + 1], acc));
+        i += 2;
+    }
+    if i < n {
+        let inj = fd_v.mul_add(bd[i], fh_v.mul_add(bh[i], u_sl[i]));
+        let (un, vn) = zoh_rotate(inj, v_sl[i], d[i], s[i]);
         (u_sl[i], v_sl[i]) = (un, vn);
         acc = vn.mul_add(c[i], acc);
     }
@@ -214,14 +214,32 @@ fn step_tail_pol_damp_tl_inner<const HAS_FD: bool>(
     let ad = &ports.a_damp.as_f32x4_slice()[port_r];
     let fd_v = F32x4::splat(f_d);
     let (mut acc_c, mut acc_yd, mut acc_vd) = (F32x4::zero(), F32x4::zero(), F32x4::zero());
-    for i in 0..u_sl.len() {
+    let n = u_sl.len();
+    let mut i = 0usize;
+    while i + 1 < n {
+        let (bd0, bd1) = (bd[i], bd[i + 1]);
+        let (inj0, inj1) = if HAS_FD {
+            (fd_v.mul_add(bd0, u_sl[i]), fd_v.mul_add(bd1, u_sl[i + 1]))
+        } else {
+            (u_sl[i], u_sl[i + 1])
+        };
+        let (un0, vn0) = zoh_rotate(inj0, v_sl[i], d[i], s[i]);
+        let (un1, vn1) = zoh_rotate(inj1, v_sl[i + 1], d[i + 1], s[i + 1]);
+        (u_sl[i], v_sl[i]) = (un0, vn0);
+        (u_sl[i + 1], v_sl[i + 1]) = (un1, vn1);
+        acc_c = vn0.mul_add(c[i], vn1.mul_add(c[i + 1], acc_c));
+        acc_yd = vn0.mul_add(ad[i], vn1.mul_add(ad[i + 1], acc_yd));
+        acc_vd = un0.mul_add(bd0, un1.mul_add(bd1, acc_vd));
+        i += 2;
+    }
+    if i < n {
         let bdi = bd[i];
-        let u_inj = if HAS_FD {
+        let inj = if HAS_FD {
             fd_v.mul_add(bdi, u_sl[i])
         } else {
             u_sl[i]
         };
-        let (un, vn) = zoh_rotate(u_inj, v_sl[i], d[i], s[i]);
+        let (un, vn) = zoh_rotate(inj, v_sl[i], d[i], s[i]);
         (u_sl[i], v_sl[i]) = (un, vn);
         acc_c = vn.mul_add(c[i], acc_c);
         acc_yd = vn.mul_add(ad[i], acc_yd);

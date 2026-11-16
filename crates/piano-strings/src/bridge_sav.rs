@@ -72,6 +72,31 @@ impl SavSchedule {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn step_sav_bucket_0(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
+    eval_sav_no_phantom_prefix(bp, sav, s0, s1);
+}
+
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn step_sav_bucket_1(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
+    eval_sav_phantom_prefix::<1>(bp, sav, s0, s1, 1);
+}
+
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn step_sav_bucket_2(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
+    eval_sav_phantom_prefix::<2>(bp, sav, s0, s1, 2);
+}
+
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn step_sav_bucket_3(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
+    eval_sav_phantom_prefix::<3>(bp, sav, s0, s1, 3);
+}
+
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn step_sav_bucket_4(bp: &mut BridgePorts, sav: &mut SavBank, s0: usize, s1: usize) {
+    eval_sav_phantom_prefix::<MAX_PHANTOM_LONG_VECS>(bp, sav, s0, s1, 4);
+}
+
 pub(crate) fn step_sav_scheduled(
     bp: &mut BridgePorts,
     sav: &mut SavBank,
@@ -81,11 +106,11 @@ pub(crate) fn step_sav_scheduled(
     for &(s0_u8, s1_u8, bucket) in &sched.pairs[..sched.n_pairs] {
         let (s0, s1) = (usize::from(s0_u8), usize::from(s1_u8));
         match bucket {
-            0 => eval_sav_no_phantom_prefix(bp, sav, s0, s1),
-            1 => eval_sav_phantom_prefix::<1>(bp, sav, s0, s1, 1),
-            2 => eval_sav_phantom_prefix::<2>(bp, sav, s0, s1, 2),
-            3 => eval_sav_phantom_prefix::<3>(bp, sav, s0, s1, 3),
-            _ => eval_sav_phantom_prefix::<MAX_PHANTOM_LONG_VECS>(bp, sav, s0, s1, 4),
+            0 => step_sav_bucket_0(bp, sav, s0, s1),
+            1 => step_sav_bucket_1(bp, sav, s0, s1),
+            2 => step_sav_bucket_2(bp, sav, s0, s1),
+            3 => step_sav_bucket_3(bp, sav, s0, s1),
+            _ => step_sav_bucket_4(bp, sav, s0, s1),
         }
     }
     for &s_u8 in &sched.singles[..sched.n_singles] {

@@ -116,26 +116,12 @@ fn step_prefix_run_k<const K: usize>(
             let aw4 = reduce_sum_4(br0, br1, br2, br3) * F32x4::from_slice(&gains[s..s + 4]);
             aw4.write_to_slice(&mut a_waves[s..s + 4]);
             let (fm0, fm1, fm2, fm3) = (meta[s], meta[s + 1], meta[s + 2], meta[s + 3]);
-            *sum_l_vec = m3.mul_add(
-                F32x4::splat(fm3.pan_l),
-                m2.mul_add(
-                    F32x4::splat(fm2.pan_l),
-                    m1.mul_add(
-                        F32x4::splat(fm1.pan_l),
-                        m0.mul_add(F32x4::splat(fm0.pan_l), *sum_l_vec),
-                    ),
-                ),
-            );
-            *sum_r_vec = m3.mul_add(
-                F32x4::splat(fm3.pan_r),
-                m2.mul_add(
-                    F32x4::splat(fm2.pan_r),
-                    m1.mul_add(
-                        F32x4::splat(fm1.pan_r),
-                        m0.mul_add(F32x4::splat(fm0.pan_r), *sum_r_vec),
-                    ),
-                ),
-            );
+            let pl01 = m0.mul_add(F32x4::splat(fm0.pan_l), m1 * F32x4::splat(fm1.pan_l));
+            let pl23 = m2.mul_add(F32x4::splat(fm2.pan_l), m3 * F32x4::splat(fm3.pan_l));
+            *sum_l_vec = *sum_l_vec + (pl01 + pl23);
+            let pr01 = m0.mul_add(F32x4::splat(fm0.pan_r), m1 * F32x4::splat(fm1.pan_r));
+            let pr23 = m2.mul_add(F32x4::splat(fm2.pan_r), m3 * F32x4::splat(fm3.pan_r));
+            *sum_r_vec = *sum_r_vec + (pr01 + pr23);
             idx += 4;
             continue;
         }

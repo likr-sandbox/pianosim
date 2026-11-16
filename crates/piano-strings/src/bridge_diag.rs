@@ -7,7 +7,7 @@ use piano_spec::{NUM_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_port::{BridgePorts, PrefixState, C_SIGN_H_ARR, C_SIGN_V_ARR};
 use crate::choir_map::StringMapEntry;
-use crate::contact_ports::{ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
+use crate::contact_ports::ContactPorts;
 use crate::modal_soa::{sqrt_f64, ModalSoa};
 use crate::phantom::{convolve_transverse_slopes, MAX_PHANTOM_TRANSVERSE_MODES};
 use crate::sav_drift::SavBank;
@@ -102,42 +102,39 @@ impl BridgePorts {
         let tc = self.tl_soa.c_bridge.as_f32x4_slice();
         let cv = F32x4::from_array(C_SIGN_V_ARR);
         let ch = F32x4::from_array(C_SIGN_H_ARR);
-        let (mut sv, mut cv_n, mut sh, mut ch_n) = (0.0_f64, 0usize, 0.0_f64, 0usize);
+        let (mut acc_v, mut cv_n) = (F32x4::zero(), 0usize);
+        let (mut acc_h, mut ch_n) = (F32x4::zero(), 0usize);
         for s_idx in string_range {
             let m = &self.meta[s_idx];
             for st in &self.state[m.beta_v_off..m.beta_v_off + m.v_br.len()] {
-                for val in (st.v * cv).to_array() {
-                    sv += f64::from(val) * f64::from(val);
-                }
+                let v = st.v * cv;
+                acc_v = v.mul_add(v, acc_v);
                 cv_n += 4;
             }
             for idx in m.tl_v.clone() {
-                for val in (tv[idx] * tc[idx]).to_array() {
-                    sv += f64::from(val) * f64::from(val);
-                }
+                let v = tv[idx] * tc[idx];
+                acc_v = v.mul_add(v, acc_v);
                 cv_n += 4;
             }
             for st in &self.state[m.beta_h_off..m.beta_h_off + m.h_br.len()] {
-                for val in (st.v * ch).to_array() {
-                    sh += f64::from(val) * f64::from(val);
-                }
+                let v = st.v * ch;
+                acc_h = v.mul_add(v, acc_h);
                 ch_n += 4;
             }
             for idx in m.tl_h.clone() {
-                for val in (tv[idx] * tc[idx]).to_array() {
-                    sh += f64::from(val) * f64::from(val);
-                }
+                let v = tv[idx] * tc[idx];
+                acc_h = v.mul_add(v, acc_h);
                 ch_n += 4;
             }
         }
-        let rms = |s: f64, n: usize| {
+        let rms = |acc: F32x4, n: usize| {
             if n > 0 {
-                sqrt_f64(s / n as f64) as f32
+                sqrt_f64((acc.reduce_sum() as f64) / n as f64) as f32
             } else {
                 0.0
             }
         };
-        (rms(sv, cv_n), rms(sh, ch_n))
+        (rms(acc_v, cv_n), rms(acc_h, ch_n))
     }
 }
 
@@ -232,17 +229,16 @@ impl StringBank {
         let c = self.soa.c_bridge.as_f32x4_slice();
         let strings = &self.choir_map.strings()[key_entry.string_range.clone()];
         let calc = |sel: fn(&StringMapEntry) -> Range<usize>| {
-            let (mut sum, mut cnt) = (0.0_f64, 0usize);
+            let (mut acc, mut cnt) = (F32x4::zero(), 0usize);
             for entry in strings {
                 for idx in sel(entry) {
-                    for val in (v[idx] * c[idx]).to_array() {
-                        sum += f64::from(val) * f64::from(val);
-                    }
+                    let prod = v[idx] * c[idx];
+                    acc = prod.mul_add(prod, acc);
                     cnt += 4;
                 }
             }
             if cnt > 0 {
-                sqrt_f64(sum / cnt as f64) as f32
+                sqrt_f64((acc.reduce_sum() as f64) / cnt as f64) as f32
             } else {
                 0.0
             }
@@ -296,23 +292,11 @@ pub(crate) fn flush_bridge_subnormals_core(
                 nz_br | nz_tail
             };
             let k = usize::from(entry.key_idx);
-            let is_damped =
-                entry.has_damper && ports.y_clear_scratch[k][127] < DAMPER_CLEAR_THRESHOLD_M;
             if !nz {
                 ports.clear_string_state(s_idx);
                 sav.reset_string(s_idx);
             } else if !key_has_hammer[k] {
                 ports.ports_synced[s_idx] = false;
-                if is_damped
-                    && ports.y_dv[s_idx].abs() < 1.0e-5
-                    && ports.v_dv[s_idx].abs() < 1.0e-4
-                    && ports.y_dh[s_idx].abs() < 1.0e-5
-                    && ports.v_dh[s_idx].abs() < 1.0e-4
-                {
-                    ports.struck_active[s_idx] = false;
-                    ports.may_be_nonzero[s_idx] = false;
-                    sav.reset_string(s_idx);
-                }
             }
         }
     }
