@@ -247,13 +247,13 @@ impl PianoEngine {
         &self.space_guard
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_felt_memory_enabled(&mut self, enabled: bool) {
+    /// Diagnostic toggle for Stulov wool hysteresis memory.
+    pub fn set_felt_memory_enabled(&mut self, enabled: bool) {
         self.core.action.set_memory_enabled(enabled);
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_nonlinear_coupling(
+    /// Diagnostic toggle for longitudinal precursor and SAV coupling.
+    pub fn set_nonlinear_coupling(
         &mut self,
         longitudinal_enabled: bool,
         sav_phantom_enabled: bool,
