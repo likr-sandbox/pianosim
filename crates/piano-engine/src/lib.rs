@@ -5,6 +5,7 @@ pub mod engine;
 pub(crate) mod engine_core;
 pub mod event_queue;
 pub mod param_smooth;
+pub mod space_guard;
 pub mod telemetry;
 
 pub use engine::PianoEngine;

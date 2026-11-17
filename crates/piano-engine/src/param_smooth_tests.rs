@@ -1,4 +1,5 @@
 use super::*;
+use piano_spec::{LidState, ListenerPerspective};
 
 #[test]
 fn voicing_smoother_settles_and_idles() {
