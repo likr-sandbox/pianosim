@@ -96,7 +96,7 @@ fn una_corda_felt_softening_extends_contact_and_lowers_centroid() {
             let (dur_off_b, _, pulse_b) = measure_pulse(key_idx, vel_u16, false);
             assert_eq!(pulse_a, pulse_b);
 
-            let (dur_uc, cent_uc, _) = measure_pulse(key_idx, vel_u16, true);
+            let (dur_uc, cent_uc, pulse_uc) = measure_pulse(key_idx, vel_u16, true);
             assert!(
                 dur_uc > dur_off_a,
                 "k={key_idx} v={vel_u16}: dur_uc={dur_uc} <= dur_off={dur_off_a}"
@@ -104,6 +104,13 @@ fn una_corda_felt_softening_extends_contact_and_lowers_centroid() {
             assert!(
                 cent_uc < cent_off_a,
                 "k={key_idx} v={vel_u16}: cent_uc={cent_uc} >= cent_off={cent_off_a}"
+            );
+            let peak_off = pulse_a.iter().copied().fold(0.0_f32, f32::max);
+            let peak_uc = pulse_uc.iter().copied().fold(0.0_f32, f32::max);
+            let ratio = peak_uc / peak_off.max(1e-6);
+            assert!(
+                (0.45..=0.85).contains(&ratio),
+                "k={key_idx} v={vel_u16}: una corda peak ratio={ratio} out of realistic [0.45, 0.85]"
             );
             let _ = dur_off_b;
         }
