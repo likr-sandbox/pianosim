@@ -1,15 +1,82 @@
 //! Coupled-string prefix WDF + hammer/damper stepping kernel (`no_std`).
 
 use piano_simd::F32x4;
-use piano_spec::{LONGITUDINAL_MAX_KEY_IDX, TOTAL_STRINGS};
+use piano_spec::{DAMPED_KEYS, LONGITUDINAL_MAX_KEY_IDX, TOTAL_STRINGS};
 
 use crate::bridge_kernels::{
     step_pol_prefix_wdf_inj, step_string_prefix_wdf_br, step_string_prefix_wdf_symp_damp_vh,
 };
 use crate::bridge_port::{C_SIGN_H_ARR, C_SIGN_V_ARR};
-use crate::bridge_tails::{BridgeRun, ChunkPlan, KeyCat};
+use crate::bridge_tails::{BridgeRun, ChunkPlan, KeyCat, SUB};
 use crate::contact::KeyActionDriver;
 use crate::contact_ports::{refresh_prefix_damp_ports_bp, DAMPER_CLEAR_THRESHOLD_M};
+use crate::zoh_kernel::TILE;
+
+#[inline]
+pub(crate) fn step_clearance_subblock_with_peel(
+    driver: &mut impl KeyActionDriver,
+    k: usize,
+    sub: usize,
+    mut dst_clear: Option<&mut [f32]>,
+    dst_peel: &mut [f32],
+) -> (f32, bool) {
+    let (mut min_c, mut any_peel, mut b) = (f32::MAX, false, 0usize);
+    let (mut tmp_c, mut tmp_p) = ([0.0_f32; TILE], [0.0_f32; TILE]);
+    while b < sub {
+        let t_len = (sub - b).min(TILE);
+        let (mc, tile_peel) =
+            driver.step_key_clearance_tile_with_peel(k, t_len, &mut tmp_c, &mut tmp_p);
+        min_c = min_c.min(mc);
+        if let Some(ref mut out) = dst_clear {
+            out[b..b + t_len].copy_from_slice(&tmp_c[..t_len]);
+        }
+        if tile_peel {
+            if !any_peel && b > 0 {
+                dst_peel[..b].fill(0.0);
+            }
+            dst_peel[b..b + t_len].copy_from_slice(&tmp_p[..t_len]);
+            any_peel = true;
+        } else if any_peel {
+            dst_peel[b..b + t_len].fill(0.0);
+        }
+        b += t_len;
+    }
+    (min_c, any_peel)
+}
+
+#[inline]
+pub(crate) fn step_idle_clearance_check_peel(
+    driver: &mut impl KeyActionDriver,
+    k: usize,
+    sub: usize,
+    dst_clear: &mut [f32],
+    dst_peel: &mut [f32],
+) -> (f32, bool) {
+    let (mut min_c, mut any_peel, mut b) = (f32::MAX, false, 0usize);
+    let (mut tmp_c, mut tmp_p) = ([0.0_f32; TILE], [0.0_f32; TILE]);
+    while b < sub {
+        let t_len = (sub - b).min(TILE);
+        let (mc, tile_peel) =
+            driver.step_key_clearance_tile_with_peel(k, t_len, &mut tmp_c, &mut tmp_p);
+        min_c = min_c.min(mc);
+        if tile_peel {
+            if !any_peel {
+                if b > 0 {
+                    dst_clear[..b].fill(tmp_c[0]);
+                    dst_peel[..b].fill(0.0);
+                }
+                any_peel = true;
+            }
+            dst_clear[b..b + t_len].copy_from_slice(&tmp_c[..t_len]);
+            dst_peel[b..b + t_len].copy_from_slice(&tmp_p[..t_len]);
+        } else if any_peel {
+            dst_clear[b..b + t_len].copy_from_slice(&tmp_c[..t_len]);
+            dst_peel[b..b + t_len].fill(0.0);
+        }
+        b += t_len;
+    }
+    (min_c, any_peel)
+}
 
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
@@ -22,6 +89,8 @@ pub(crate) fn step_coupled_prefixes(
     b_waves: &[f32; TOTAL_STRINGS],
     out_pair: (&mut [f32], &mut [f32]),
     ts: usize,
+    peel_slot: &[u8; DAMPED_KEYS],
+    peel_buf: &[[f32; SUB]],
 ) {
     let c_sign_v = F32x4::from_array(C_SIGN_V_ARR);
     let c_sign_h = F32x4::from_array(C_SIGN_H_ARR);
@@ -30,6 +99,23 @@ pub(crate) fn step_coupled_prefixes(
         let s_idx = usize::from(plan.coupled_strs[i]);
         let entry = &r.strings[s_idx];
         let k = usize::from(entry.key_idx);
+        let f_peel = if !entry.has_damper {
+            0.0
+        } else if plan.key_has_mid_ev[k] {
+            let f = driver.damper_peel_force_n(k);
+            if f.is_finite() {
+                f
+            } else {
+                0.0
+            }
+        } else {
+            let slot = usize::from(peel_slot[k]);
+            if slot < peel_buf.len() {
+                peel_buf[slot][ts]
+            } else {
+                0.0
+            }
+        };
         let m = &r.bridge_ports.meta[s_idx];
         let (v_br_r, h_br_r) = (m.v_br.clone(), m.h_br.clone());
         let (beta_v_off, beta_h_off, a_wave_gain) = (m.beta_v_off, m.beta_h_off, m.a_wave_gain);
@@ -54,6 +140,7 @@ pub(crate) fn step_coupled_prefixes(
                 || hf.fh != 0.0
                 || hf.fd_v != 0.0
                 || hf.fd_h != 0.0
+                || f_peel != 0.0
                 || v_br != 0.0;
             r.ports.may_be_nonzero[s_idx] = nz_now;
             if plan.key_has_hammer[k] {
@@ -65,7 +152,7 @@ pub(crate) fn step_coupled_prefixes(
                     c_sign_v,
                     neg_vbr,
                     hf.fh,
-                    hf.fd_v,
+                    hf.fd_v + f_peel,
                     entry.has_damper,
                 );
                 let (ch_v, br_h_v) = step_pol_prefix_wdf_inj(
@@ -92,7 +179,7 @@ pub(crate) fn step_coupled_prefixes(
                         c_sign_v,
                         c_sign_h,
                         neg_vbr,
-                        hf.fd_v,
+                        hf.fd_v + f_peel,
                         hf.fd_h,
                     );
                 let tp = plan.tail_partial_damp[s_idx];
@@ -111,8 +198,15 @@ pub(crate) fn step_coupled_prefixes(
                 r.ports.ports_synced[s_idx] = true;
                 (acc_c, acc_br)
             }
-        } else if cat == KeyCat::DampedSymp && entry.has_damper && r.ports.may_be_nonzero[s_idx] {
+        } else if cat == KeyCat::DampedSymp
+            && entry.has_damper
+            && (r.ports.may_be_nonzero[s_idx] || f_peel != 0.0)
+        {
+            if f_peel != 0.0 {
+                r.ports.may_be_nonzero[s_idx] = true;
+            }
             if plan.symp_has_gains[s_idx]
+                && f_peel == 0.0
                 && r.ports.y_dv[s_idx].abs() <= 1.0e-6
                 && r.ports.y_dh[s_idx].abs() <= 1.0e-6
             {
@@ -147,7 +241,8 @@ pub(crate) fn step_coupled_prefixes(
                     if !r.ports.ports_synced[s_idx] {
                         refresh_prefix_damp_ports_bp(r.bridge_ports, r.ports, s_idx);
                     }
-                    if yc >= 2.5e-5
+                    if f_peel == 0.0
+                        && yc >= 2.5e-5
                         && !r.ports.tail_nonzero[s_idx]
                         && r.ports.y_dv[s_idx].abs() <= 0.25 * yc
                         && r.ports.y_dh[s_idx].abs() <= 0.25 * yc
@@ -168,7 +263,7 @@ pub(crate) fn step_coupled_prefixes(
                             r_dh,
                             yc,
                         );
-                        let fd_v = if raw_fv.is_finite() { raw_fv } else { 0.0 };
+                        let fd_v = (if raw_fv.is_finite() { raw_fv } else { 0.0 }) + f_peel;
                         let fd_h = if raw_fh.is_finite() { raw_fh } else { 0.0 };
                         let (acc_c, acc_br, [ydv, vdv_raw, ydh, vdh_raw]) =
                             step_string_prefix_wdf_symp_damp_vh(
@@ -192,6 +287,28 @@ pub(crate) fn step_coupled_prefixes(
                         r.ports.ports_synced[s_idx] = true;
                         (acc_c, acc_br)
                     }
+                } else if f_peel != 0.0 {
+                    let (acc_c, acc_br, [ydv, vdv_raw, ydh, vdh_raw]) =
+                        step_string_prefix_wdf_symp_damp_vh(
+                            r.ports,
+                            r.bridge_ports,
+                            v_br_r,
+                            h_br_r,
+                            beta_v_off,
+                            beta_h_off,
+                            c_sign_v,
+                            c_sign_h,
+                            neg_vbr,
+                            f_peel,
+                            0.0,
+                        );
+                    let alpha = r.ports.alpha_vel[s_idx];
+                    r.ports.y_dv[s_idx] = ydv;
+                    r.ports.v_dv[s_idx] = alpha * vdv_raw;
+                    r.ports.y_dh[s_idx] = ydh;
+                    r.ports.v_dh[s_idx] = alpha * vdh_raw;
+                    r.ports.ports_synced[s_idx] = true;
+                    (acc_c, acc_br)
                 } else {
                     let (acc_c, acc_br) =
                         step_string_prefix_wdf_br(r.bridge_ports, beta_v_off, nv, nh, neg_vbr);
@@ -214,4 +331,124 @@ pub(crate) fn step_coupled_prefixes(
     }
     out_pair.0[ts] += sum_l_vec.reduce_sum();
     out_pair.1[ts] += sum_r_vec.reduce_sum();
+}
+
+#[cfg(test)]
+mod tests {
+    use piano_spec::{VoicingSpec, TOTAL_STRINGS};
+
+    use crate::bridge_port::BridgePortDriver;
+    use crate::contact::KeyActionDriver;
+    use crate::StringBank;
+
+    struct PeelTestAction {
+        clear: f32,
+        peel: [f32; 88],
+    }
+
+    impl KeyActionDriver for PeelTestAction {
+        fn is_hammer_active(&self, _key_idx: usize) -> bool {
+            false
+        }
+        fn damper_clearance_m(&self, _key_idx: usize) -> f32 {
+            self.clear
+        }
+        fn strike_weights(&self, _key_idx: usize) -> [f32; 3] {
+            [1.0; 3]
+        }
+        fn step_key_clearance(&mut self, _key_idx: usize) -> f32 {
+            self.clear
+        }
+        fn step_key_clearance_tile(
+            &mut self,
+            _key_idx: usize,
+            t_len: usize,
+            out_clears: &mut [f32; 8],
+        ) -> f32 {
+            out_clears[..t_len.min(8)].fill(self.clear);
+            self.clear
+        }
+        fn damper_peel_force_n(&self, key_idx: usize) -> f32 {
+            self.peel.get(key_idx).copied().unwrap_or(0.0)
+        }
+        fn step_hammer_sample(&mut self, _: usize, _: f32, _: f32, _: f32) -> f32 {
+            0.0
+        }
+        fn step_damper_sample(
+            &mut self,
+            _: usize,
+            _: usize,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+        ) -> f32 {
+            0.0
+        }
+    }
+
+    struct ZeroBridge {
+        r0: [f32; TOTAL_STRINGS],
+        zw: [(u8, f32, u8, f32); TOTAL_STRINGS],
+    }
+
+    impl BridgePortDriver for ZeroBridge {
+        fn port_resistances(&self) -> &[f32; TOTAL_STRINGS] {
+            &self.r0
+        }
+        fn zone_weights(&self) -> &[(u8, f32, u8, f32); TOTAL_STRINGS] {
+            &self.zw
+        }
+        fn step_bridge_sample(
+            &mut self,
+            _: &[f32; TOTAL_STRINGS],
+            _: &[f32; 8],
+            b_waves_out: &mut [f32; TOTAL_STRINGS],
+            zone_out: &mut [f32; 8],
+        ) -> (f32, f32) {
+            b_waves_out.fill(0.0);
+            zone_out.fill(0.0);
+            (0.0, 0.0)
+        }
+    }
+
+    #[test]
+    fn peel_off_excites_prefix_modes_only_leaving_tl_soa_zero_and_tail_nonzero_false() {
+        let mut bank = StringBank::new_bridge_coupled(48_000.0, &VoicingSpec::default());
+        let mut bridge = ZeroBridge {
+            r0: *bank.bridge_port_resistances(),
+            zw: [(0, 1.0, 0, 0.0); TOTAL_STRINGS],
+        };
+        let mut action = PeelTestAction {
+            clear: 1.0e-5,
+            peel: [0.0; 88],
+        };
+        action.peel[39] = 1.5e-3;
+
+        let mut out_l = [0.0_f32; 128];
+        let mut out_r = [0.0_f32; 128];
+        bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut out_l, &mut out_r);
+
+        let peak_audio = out_l
+            .iter()
+            .chain(out_r.iter())
+            .fold(0.0_f32, |m, &x| m.max(x.abs()));
+        assert!(
+            peak_audio > 1.0e-8,
+            "peel force did not excite prefix audio"
+        );
+
+        // C4 (key 39) strings must stay tail_nonzero == false and tl_soa must stay strictly zero.
+        for s_idx in bank.choir_map.key(39).unwrap().string_range.clone() {
+            assert!(bank.ports.may_be_nonzero[s_idx]);
+            assert!(!bank.ports.tail_nonzero[s_idx]);
+        }
+        let tl_u = bank.bridge_ports.tl_soa.u.as_slice();
+        let tl_v = bank.bridge_ports.tl_soa.v.as_slice();
+        assert!(tl_u.iter().all(|&x| x == 0.0) && tl_v.iter().all(|&x| x == 0.0));
+        // Neighbor key 40 must remain completely idle.
+        for s_idx in bank.choir_map.key(40).unwrap().string_range.clone() {
+            assert!(!bank.ports.may_be_nonzero[s_idx]);
+        }
+    }
 }

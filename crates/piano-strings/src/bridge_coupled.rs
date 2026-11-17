@@ -2,27 +2,32 @@
 //! bridge port coupling, `1x` unilateral dampers, key-batched `CHUNK = 128` tails,
 //! 2-string paired SAV drift regulation, and zero `ModalSoa` touches in steady state.
 
-use piano_spec::{LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS};
+use piano_spec::{DAMPED_KEYS, LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_damp_kernels::refresh_chunk_damp_y;
 use crate::bridge_diag::{flush_bridge_subnormals_core, update_sav_dormancy};
 use crate::bridge_kernels::step_uncoupled_prefixes_fast;
 use crate::bridge_port::{BridgePortDriver, BridgePorts};
-use crate::bridge_prefix_step::step_coupled_prefixes;
+use crate::bridge_prefix_step::{
+    step_clearance_subblock_with_peel, step_coupled_prefixes, step_idle_clearance_check_peel,
+};
 use crate::bridge_sav::step_sav_scheduled;
 use crate::bridge_tails::{
     prepare_sample_tails_and_hammers, sav_long_vecs, step_uncoupled_tails, BridgeRun, ChunkPlan,
     HammerStepForce, KeyCat, SavLongSlice, TailDampPartial, SUB,
 };
 use crate::choir_map::ChoirMap;
-use crate::contact::{step_clearance_subblock, KeyActionDriver};
+use crate::contact::KeyActionDriver;
 use crate::contact_ports::{
     accum_prefix_damp_vel_bp, refresh_string_ports_bp, ContactPorts, DAMPER_CLEAR_THRESHOLD_M,
 };
 use crate::longitudinal::LongitudinalBank;
 use crate::sav_drift::SavBank;
 
+const MAX_PEEL_SLOTS: usize = 24;
+
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn step_all_strings_prefix_wdf(
     r: &mut BridgeRun<'_>,
     driver: &mut impl KeyActionDriver,
@@ -31,6 +36,8 @@ fn step_all_strings_prefix_wdf(
     b_waves: &[f32; TOTAL_STRINGS],
     out_pair: (&mut [f32], &mut [f32]),
     ts: usize,
+    peel_slot: &[u8; DAMPED_KEYS],
+    peel_buf: &[[f32; SUB]; MAX_PEEL_SLOTS],
 ) {
     let n_cp = plan.n_coupled_strs;
     let (ul, ur) =
@@ -39,7 +46,9 @@ fn step_all_strings_prefix_wdf(
     out_pair.1[ts] += ur;
 
     if n_cp > 0 {
-        step_coupled_prefixes(r, driver, plan, n_cp, a_waves, b_waves, out_pair, ts);
+        step_coupled_prefixes(
+            r, driver, plan, n_cp, a_waves, b_waves, out_pair, ts, peel_slot, peel_buf,
+        );
     }
 
     if r.sav_on && plan.n_sav > 0 {
@@ -154,6 +163,9 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         n_sav: 0,
     };
 
+    let mut peel_buf = [[0.0_f32; SUB]; MAX_PEEL_SLOTS];
+    let mut peel_slot = [u8::MAX; DAMPED_KEYS];
+
     while chunk_base < total {
         let sub = (total - chunk_base).min(SUB);
         let (sub_l, sub_r) = (
@@ -171,6 +183,8 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         plan.symp_gv.fill(0.0);
         plan.symp_gh.fill(0.0);
         plan.symp_mask.fill(0.0);
+        peel_slot.fill(u8::MAX);
+        let mut n_peel_slots = 0usize;
         (plan.n_a, plan.n_coupled_strs, plan.n_sl, plan.n_sav) = (0, 0, 0, 0);
         plan.zone_tail_n[..sub].fill([0.0; 8]);
 
@@ -179,23 +193,56 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             let mid_ev = driver.has_mid_block_event(k, chunk_base, sub);
             let hammer = driver.is_hammer_active(k);
             let any_nz = plan.was_nz[sr.clone()].iter().any(|&b| b);
-            if !mid_ev && !hammer && !any_nz {
+            let (min_c, has_peel) = if mid_ev {
+                (0.0, false)
+            } else if !hammer && !any_nz {
                 if key.has_damper {
-                    step_clearance_subblock(driver, k, sub, None);
+                    if n_peel_slots < MAX_PEEL_SLOTS {
+                        let (mc, ap) = step_idle_clearance_check_peel(
+                            driver,
+                            k,
+                            sub,
+                            &mut r.ports.y_clear_scratch[k][..sub],
+                            &mut peel_buf[n_peel_slots][..sub],
+                        );
+                        if !ap {
+                            continue;
+                        }
+                        peel_slot[k] = n_peel_slots as u8;
+                        n_peel_slots += 1;
+                        (mc, true)
+                    } else {
+                        let _ = crate::contact::step_clearance_subblock(driver, k, sub, None);
+                        continue;
+                    }
+                } else {
+                    continue;
                 }
-                continue;
-            }
-            let min_c = if mid_ev {
-                0.0
             } else if key.has_damper {
-                step_clearance_subblock(
-                    driver,
-                    k,
-                    sub,
-                    Some(&mut r.ports.y_clear_scratch[k][..sub]),
-                )
+                if n_peel_slots < MAX_PEEL_SLOTS {
+                    let (mc, ap) = step_clearance_subblock_with_peel(
+                        driver,
+                        k,
+                        sub,
+                        Some(&mut r.ports.y_clear_scratch[k][..sub]),
+                        &mut peel_buf[n_peel_slots][..sub],
+                    );
+                    if ap {
+                        peel_slot[k] = n_peel_slots as u8;
+                        n_peel_slots += 1;
+                    }
+                    (mc, ap)
+                } else {
+                    let mc = crate::contact::step_clearance_subblock(
+                        driver,
+                        k,
+                        sub,
+                        Some(&mut r.ports.y_clear_scratch[k][..sub]),
+                    );
+                    (mc, false)
+                }
             } else {
-                f32::MAX
+                (f32::MAX, false)
             };
             let any_struck = r.ports.struck_active[sr.clone()].iter().any(|&b| b);
             if mid_ev || hammer || (any_struck && min_c < DAMPER_CLEAR_THRESHOLD_M) {
@@ -207,8 +254,8 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                 for s_idx in sr.clone() {
                     plan.push_coupled(s_idx);
                 }
-            } else if min_c < DAMPER_CLEAR_THRESHOLD_M {
-                if !any_struck && key.has_damper && min_c >= 2.5e-5 {
+            } else if has_peel || min_c < DAMPER_CLEAR_THRESHOLD_M {
+                if !has_peel && !any_struck && key.has_damper && min_c >= 2.5e-5 {
                     let mut all_clear = true;
                     for s_idx in sr.clone() {
                         if !plan.was_nz[s_idx] {
@@ -248,7 +295,9 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                         && r.ports.y_clear_scratch[k][..sub].iter().all(|&c| c == yc0);
                     let closed_chunk = yc0 <= -5.0e-5 && yc_end <= -5.0e-5;
                     for s_idx in sr.clone() {
-                        if plan.was_nz[s_idx] {
+                        if has_peel {
+                            plan.push_coupled(s_idx);
+                        } else if plan.was_nz[s_idx] {
                             let mut routed_fast = false;
                             if closed_chunk {
                                 if !r.ports.ports_synced[s_idx] {
@@ -362,6 +411,8 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                 &b_waves,
                 (sub_l, sub_r),
                 ts,
+                &peel_slot,
+                &peel_buf,
             );
         }
         refresh_chunk_damp_y(r.bridge_ports, r.ports, &plan.symp_has_gains);

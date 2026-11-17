@@ -21,6 +21,29 @@ pub trait KeyActionDriver {
         t_len: usize,
         out_clears: &mut [f32; TILE],
     ) -> f32;
+    /// Returns the instantaneous damper peel-off adhesion force (`N`, `>= 0`) for `key_idx`
+    /// produced by the most recent clearance step.
+    #[inline]
+    fn damper_peel_force_n(&self, _key_idx: usize) -> f32 {
+        0.0
+    }
+    /// Advances damper rail smoother by `t_len` samples (<= 8), fills `out_clears[..t_len]`
+    /// and per-sample peel-off adhesion forces `out_peel_n[..t_len]` (`N`), and returns
+    /// `(min_clear_m, any_peel_nonzero)`.
+    #[inline]
+    fn step_key_clearance_tile_with_peel(
+        &mut self,
+        key_idx: usize,
+        t_len: usize,
+        out_clears: &mut [f32; TILE],
+        out_peel_n: &mut [f32; TILE],
+    ) -> (f32, bool) {
+        let min_c = self.step_key_clearance_tile(key_idx, t_len, out_clears);
+        let peel = self.damper_peel_force_n(key_idx);
+        let n = t_len.min(TILE);
+        out_peel_n[..n].fill(peel);
+        (min_c, peel != 0.0)
+    }
     /// Returns `true` if `key_idx` has a sample-accurate NoteOn/NoteOff inside `[chunk_base, chunk_base + sub)`.
     #[inline]
     fn has_mid_block_event(&self, _key_idx: usize, _chunk_base: usize, _sub: usize) -> bool {
