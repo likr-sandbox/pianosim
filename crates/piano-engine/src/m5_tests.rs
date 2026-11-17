@@ -158,9 +158,11 @@ fn m5_gate1_two_stage_decay_c3_a4() {
 
 #[test]
 fn m5_gate1_c4_and_gate2_lehtonen_sustain_cluster() {
-    let c4_dry = render_note_hold(60, 48_000, 0, 3.8);
+    // mf (~1.35 m/s under I-2 curve, equivalent to pre-I-2 48_000 ~ 1.44 m/s).
+    const MF_VEL_U16: u16 = 33_025;
+    let c4_dry = render_note_hold(60, MF_VEL_U16, 0, 3.8);
     assert_two_stage_decay("C4", &c4_dry, 3.6);
-    let c4_sus = render_note_hold(60, 48_000, u16::MAX, 3.8);
+    let c4_sus = render_note_hold(60, MF_VEL_U16, u16::MAX, 3.8);
 
     // Lehtonen et al. (JASA 2007 §II.C) harmonic-notched background resonance residual (1.0..3.7 s).
     let n_fft = 16_384_usize;

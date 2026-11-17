@@ -172,13 +172,13 @@ fn gate1_velocity_sweep_dynamic_range_centroid_and_aliasing() {
         );
     }
 
-    // A4 @ u7_to_u16(100) pitch accuracy in [435, 445] Hz.
+    // A4 @ mf (u7_to_u16(64) ~ 1.35 m/s under I-2 curve) pitch accuracy in [435, 445] Hz.
     engine.reset();
     let a4 = [SampleEvent {
         sample_offset: 0,
         kind: EventKind::NoteOn {
             midi_key: 69,
-            velocity_u16: u7_to_u16(100),
+            velocity_u16: u7_to_u16(64),
         },
     }];
     let (l, r) = render_chunks(&mut engine, 16_384, 128, &a4);
