@@ -25,7 +25,6 @@ pub const BORIN_LUT_SIZE: usize = 2048;
 pub struct BorinKLut {
     exponent_p: f32,
     inv_p: f64,
-    inv_p_minus_1: f64,
     p_max: f32,
     inv_dp: f32,
     last_idx: usize,
@@ -56,7 +55,6 @@ impl BorinKLut {
         Self {
             exponent_p: p as f32,
             inv_p: 1.0 / p,
-            inv_p_minus_1: 1.0 / (p - 1.0),
             p_max: safe_p_max,
             inv_dp: (last_idx as f32) / safe_p_max,
             last_idx,
@@ -69,6 +67,13 @@ impl BorinKLut {
     #[inline]
     pub const fn exponent_p(&self) -> f32 {
         self.exponent_p
+    }
+
+    /// Heap table payload size in bytes.
+    #[must_use]
+    #[inline]
+    pub fn table_bytes(&self) -> usize {
+        self.y_table.len() * core::mem::size_of::<f32>()
     }
 
     /// Solves `y_tilde + y_tilde^p = p_tilde` (`0.0` if `p_tilde <= 0`).
@@ -91,16 +96,44 @@ impl BorinKLut {
         y0 + frac * (y1 - y0)
     }
 
+    /// Solves `y_tilde + y_tilde^p = p_tilde` interpolated across `(self, other)` at blend `t`.
+    /// Zero heap allocation and panic-free (`NaN` in `t` clamps to `0.0`).
+    #[must_use]
+    #[inline]
+    pub fn solve_dimless_lerp(&self, other: &Self, t: f32, p_tilde: f32) -> f32 {
+        if !p_tilde.is_finite() || p_tilde <= 0.0 {
+            return 0.0;
+        }
+        let t_clamped = if t >= 1.0 {
+            1.0
+        } else if t > 0.0 {
+            t
+        } else {
+            0.0
+        };
+        if self.last_idx == other.last_idx && self.p_max == other.p_max && p_tilde < self.p_max {
+            let pos = p_tilde * self.inv_dp;
+            let idx = (pos as usize).min(self.last_idx - 1);
+            let frac = pos - (idx as f32);
+            let lo0 = self.y_table[idx];
+            let lo1 = self.y_table[idx + 1];
+            let hi0 = other.y_table[idx];
+            let hi1 = other.y_table[idx + 1];
+            let y_lo = lo0 + frac * (lo1 - lo0);
+            let y_hi = hi0 + frac * (hi1 - hi0);
+            (1.0 - t_clamped) * y_lo + t_clamped * y_hi
+        } else {
+            let y_lo = self.solve_dimless(p_tilde);
+            let y_hi = other.solve_dimless(p_tilde);
+            (1.0 - t_clamped) * y_lo + t_clamped * y_hi
+        }
+    }
+
     /// Computes scaling factor `lambda = delta_scale * (delta_scale / (k_loop * k_inst))^(1/(p-1))`.
     #[must_use]
     #[inline]
     pub fn compute_lambda(&self, delta_scale_m: f32, k_loop_m_per_n: f32, k_inst_n: f32) -> f32 {
-        let denom = f64::from(k_loop_m_per_n) * f64::from(k_inst_n);
-        if !denom.is_finite() || denom <= 0.0 || delta_scale_m <= 0.0 {
-            return 0.0;
-        }
-        let ratio = f64::from(delta_scale_m) / denom;
-        (f64::from(delta_scale_m) * pow_nonneg_f64(ratio, self.inv_p_minus_1)) as f32
+        compute_lambda_for_p(self.exponent_p, delta_scale_m, k_loop_m_per_n, k_inst_n)
     }
 
     #[inline(never)]
@@ -141,6 +174,25 @@ fn solve_dimless_newton_f64(p_tilde: f64, p: f64) -> f64 {
         y = next;
     }
     y
+}
+
+/// Computes scaling factor `lambda = delta_scale * (delta_scale / (k_loop * k_inst))^(1/(p-1))`
+/// dynamically for continuous exponent `exponent_p`. Zero-alloc and `#![no_std]` compatible.
+#[must_use]
+#[inline]
+pub fn compute_lambda_for_p(
+    exponent_p: f32,
+    delta_scale_m: f32,
+    k_loop_m_per_n: f32,
+    k_inst_n: f32,
+) -> f32 {
+    let p = f64::from(exponent_p.clamp(1.2, 6.0));
+    let denom = f64::from(k_loop_m_per_n) * f64::from(k_inst_n);
+    if !denom.is_finite() || denom <= 0.0 || delta_scale_m <= 0.0 {
+        return 0.0;
+    }
+    let ratio = f64::from(delta_scale_m) / denom;
+    (f64::from(delta_scale_m) * pow_nonneg_f64(ratio, 1.0 / (p - 1.0))) as f32
 }
 
 /// Parameters for one coupled `8x` oversampled K-method + Stulov + ADAA substep.
@@ -195,6 +247,52 @@ pub fn solve_coupled_substep(
 
     let u_end = delta_end * inv_scale;
     let phi_adaa = adaa_state.process(adaa_lut, u_end);
+
+    let z_next = inp.a_fast_sub * (*z_fast) + (1.0 - inp.a_fast_sub) * phi_adaa;
+    *z_fast = z_next;
+
+    let force_n = (inp.f_scale_eff_n * (phi_adaa - inp.eps_eff * z_next)).max(0.0);
+    let u_norm_mid = (0.5 * (inp.delta_prev_m.max(0.0) + delta_end) * inv_scale).max(0.0);
+
+    CoupledSubstepOutput {
+        force_n,
+        u_norm_mid,
+    }
+}
+
+/// Resolves one `8x` hammer-string substep using linearly interpolated `(lo, hi)` LUTs
+/// across the shared 24-point `p`-grid at blend weight `p_t in [0.0, 1.0]`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn solve_coupled_substep_lerp(
+    adaa_lo: &AdaaPowerLut,
+    adaa_hi: &AdaaPowerLut,
+    borin_lo: &BorinKLut,
+    borin_hi: &BorinKLut,
+    p_t: f32,
+    adaa_state: &mut AdaaState,
+    z_fast: &mut f32,
+    inp: CoupledSubstepInput,
+) -> CoupledSubstepOutput {
+    let inv_scale = 1.0 / inp.delta_scale_m;
+    let c_inst = 1.0 - inp.eps_eff * (1.0 - inp.a_fast_sub);
+    let k_inst = inp.f_scale_eff_n * c_inst;
+    let f_hist = inp.f_scale_eff_n * inp.eps_eff * inp.a_fast_sub * (*z_fast);
+
+    let delta_end = if inp.p_end_m <= 0.0
+        || inp.k_loop_end <= 0.0
+        || inp.lambda_end <= 0.0
+        || k_inst * adaa_lo.eval_f_lerp(adaa_hi, p_t, inp.p_end_m * inv_scale) <= f_hist
+    {
+        0.0
+    } else {
+        let p_eff = inp.p_end_m + inp.k_loop_end * f_hist;
+        let y_tilde = borin_lo.solve_dimless_lerp(borin_hi, p_t, p_eff / inp.lambda_end);
+        (inp.lambda_end * y_tilde).max(0.0)
+    };
+
+    let u_end = delta_end * inv_scale;
+    let phi_adaa = adaa_state.process_lerp(adaa_lo, adaa_hi, p_t, u_end);
 
     let z_next = inp.a_fast_sub * (*z_fast) + (1.0 - inp.a_fast_sub) * phi_adaa;
     *z_fast = z_next;

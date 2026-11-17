@@ -9,7 +9,6 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use piano_simd::AdaaPowerLut;
 use piano_spec::{PedalKind, VoicingSpec, NUM_KEYS};
 
 pub mod damper_pad;
@@ -18,6 +17,7 @@ pub mod k_method;
 pub mod keybed;
 mod math;
 pub mod oversample;
+pub mod p_grid;
 pub mod pedals;
 pub mod shank_timoshenko;
 
@@ -32,22 +32,17 @@ mod tests_hammer;
 
 use damper_pad::DamperPadBank;
 use felt_stulov::{FeltSharedCoeffs, FeltState, KeyFeltSpec};
-use k_method::{BorinKLut, BORIN_LUT_SIZE, BORIN_P_MAX};
 use keybed::KeybedBank;
 use oversample::{DecimationFir16, HammerOversampleState};
+use p_grid::PGridLuts;
 use pedals::PedalBank;
 use shank_timoshenko::{velocity_from_u16, ShankParams};
-
-const ADAA_LUT_SIZE: usize = 1024;
-const ADAA_LUT_U_MAX: f32 = 1.0;
 
 #[derive(Clone, Debug)]
 struct KeyActionSlot {
     shank_params: ShankParams,
     felt_spec: KeyFeltSpec,
     felt_state: FeltState,
-    adaa_lut: AdaaPowerLut,
-    borin_lut: BorinKLut,
     hammer: HammerOversampleState,
 }
 
@@ -55,15 +50,11 @@ impl KeyActionSlot {
     fn new(key_idx: usize, sample_rate: f64, voicing: &VoicingSpec) -> Self {
         let shank_params = ShankParams::for_key(key_idx, sample_rate);
         let felt_spec = KeyFeltSpec::for_key(key_idx, sample_rate, voicing);
-        let adaa_lut = AdaaPowerLut::new(felt_spec.exponent_p, ADAA_LUT_U_MAX, ADAA_LUT_SIZE);
-        let borin_lut = BorinKLut::new(felt_spec.exponent_p, BORIN_P_MAX, BORIN_LUT_SIZE);
 
         Self {
             shank_params,
             felt_spec,
             felt_state: FeltState::default(),
-            adaa_lut,
-            borin_lut,
             hammer: HammerOversampleState::default(),
         }
     }
@@ -79,6 +70,7 @@ pub struct ActionBank {
     sample_rate: f32,
     memory_enabled: bool,
     felt_coeffs: FeltSharedCoeffs,
+    p_grid: PGridLuts,
     decimation_fir: DecimationFir16,
     pedals: PedalBank,
     damper_pad: DamperPadBank,
@@ -108,6 +100,7 @@ impl ActionBank {
             sample_rate: sr,
             memory_enabled: true,
             felt_coeffs: FeltSharedCoeffs::new(sr_f64),
+            p_grid: PGridLuts::new(),
             decimation_fir: DecimationFir16::new(),
             pedals: PedalBank::new(sr),
             damper_pad: DamperPadBank::new(sr, voicing),
@@ -270,13 +263,18 @@ impl ActionBank {
         let Some(slot) = self.keys.get_mut(key_idx) else {
             return 0.0;
         };
+        let (p_lo, p_hi, p_t) = self.p_grid.lookup(slot.felt_spec.exponent_p);
+        let (adaa_lo, adaa_hi, borin_lo, borin_hi) = self.p_grid.luts_for(p_lo, p_hi);
         slot.hammer.step_host_sample(
             &slot.shank_params,
             &slot.felt_spec,
             &self.felt_coeffs,
             &mut slot.felt_state,
-            &slot.adaa_lut,
-            &slot.borin_lut,
+            adaa_lo,
+            adaa_hi,
+            borin_lo,
+            borin_hi,
+            p_t,
             &self.decimation_fir,
             self.memory_enabled,
             uc_mod,
@@ -408,5 +406,10 @@ impl ActionBank {
         self.keys
             .get(key_idx)
             .map_or(0.0, |slot| slot.felt_state.z_mem)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lut_table_bytes(&self) -> usize {
+        self.p_grid.table_bytes()
     }
 }

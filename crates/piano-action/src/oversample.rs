@@ -6,7 +6,9 @@ use core::f64::consts::{PI, TAU};
 use piano_simd::{AdaaPowerLut, AdaaState};
 
 use crate::felt_stulov::{FeltSharedCoeffs, FeltState, KeyFeltSpec};
-use crate::k_method::{solve_coupled_substep, BorinKLut, CoupledSubstepInput};
+use crate::k_method::{
+    compute_lambda_for_p, solve_coupled_substep_lerp, BorinKLut, CoupledSubstepInput,
+};
 use crate::math::sin_cos_f64;
 use crate::shank_timoshenko::{ShankParams, ShankState, HAMMER_LET_OFF_Y0_M};
 
@@ -139,8 +141,11 @@ impl HammerOversampleState {
         felt_spec: &KeyFeltSpec,
         felt_coeffs: &FeltSharedCoeffs,
         felt_state: &mut FeltState,
-        adaa_lut: &AdaaPowerLut,
-        borin_lut: &BorinKLut,
+        adaa_lo: &AdaaPowerLut,
+        adaa_hi: &AdaaPowerLut,
+        borin_lo: &BorinKLut,
+        borin_hi: &BorinKLut,
+        p_t: f32,
         fir: &DecimationFir16,
         memory_enabled: bool,
         una_corda_mod: (f32, f32),
@@ -185,7 +190,8 @@ impl HammerOversampleState {
             };
             let c_inst = 1.0 - eps_eff * (1.0 - felt_coeffs.a_fast_sub);
             let k_ham_nom = self.shank.predict_free(shank_params).k_ham;
-            let lambda_end = borin_lut.compute_lambda(
+            let lambda_end = compute_lambda_for_p(
+                felt_spec.exponent_p,
                 felt_spec.delta_scale_m,
                 k_ham_nom + k_str_end,
                 f_scale_eff_n * c_inst,
@@ -200,9 +206,12 @@ impl HammerOversampleState {
                 let p_end_m = pred.y_h_free - y_s_free;
                 let k_loop_end = pred.k_ham + k_str_end;
 
-                let out = solve_coupled_substep(
-                    adaa_lut,
-                    borin_lut,
+                let out = solve_coupled_substep_lerp(
+                    adaa_lo,
+                    adaa_hi,
+                    borin_lo,
+                    borin_hi,
+                    p_t,
                     &mut self.adaa_state,
                     &mut felt_state.z_fast,
                     CoupledSubstepInput {

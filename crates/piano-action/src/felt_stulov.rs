@@ -116,20 +116,15 @@ impl KeyFeltSpec {
         compute_key_felt_spec(key_idx, sample_rate, voicing, None)
     }
 
-    /// Updates stiffness and scaling parameters in-place for `voicing` without reallocating
-    /// LUT tables (`exponent_p` remains pinned to the preallocated power LUTs).
+    /// Updates `exponent_p`, stiffness, and scaling parameters in-place for `voicing`
+    /// with zero heap allocations using the shared `p`-grid LUT.
     pub fn update_voicing_in_place(
         &mut self,
         key_idx: usize,
         sample_rate: f64,
         voicing: &VoicingSpec,
     ) {
-        *self = compute_key_felt_spec(
-            key_idx,
-            sample_rate,
-            voicing,
-            Some(f64::from(self.exponent_p)),
-        );
+        *self = compute_key_felt_spec(key_idx, sample_rate, voicing, None);
     }
 }
 
@@ -263,19 +258,19 @@ mod tests {
     }
 
     #[test]
-    fn update_voicing_in_place_matches_default_and_scales_stiffness_preserving_exponent() {
+    fn update_voicing_in_place_matches_default_and_updates_exponent_and_stiffness() {
         let nominal = VoicingSpec::default();
         for &k in &[0_usize, 39, 48, 87] {
             let baseline = KeyFeltSpec::for_key(k, 48_000.0, &nominal);
             let mut spec = baseline;
 
-            // Default re-application keeps exponent_p pinned and matches baseline.
+            // Default re-application matches baseline exactly.
             spec.update_voicing_in_place(k, 48_000.0, &nominal);
             assert_eq!(spec.exponent_p, baseline.exponent_p);
             assert!((spec.k0_si - baseline.k0_si).abs() <= baseline.k0_si * 1e-6);
             assert!((spec.delta_scale_m - baseline.delta_scale_m).abs() <= 1e-7);
 
-            // Global + per-note hardness updates stiffness and LUT scaling with fixed exponent_p.
+            // Global + per-note hardness updates exponent_p, stiffness, and LUT scaling dynamically.
             let mut soft = nominal.clone();
             soft.hammer_hardness = 0.1;
             let mut hard = nominal.clone();
@@ -287,8 +282,13 @@ mod tests {
             let mut s_hard = baseline;
             s_hard.update_voicing_in_place(k, 48_000.0, &hard);
 
-            assert_eq!(s_soft.exponent_p, baseline.exponent_p);
-            assert_eq!(s_hard.exponent_p, baseline.exponent_p);
+            let fresh_soft = KeyFeltSpec::for_key(k, 48_000.0, &soft);
+            let fresh_hard = KeyFeltSpec::for_key(k, 48_000.0, &hard);
+            assert_eq!(s_soft.exponent_p, fresh_soft.exponent_p);
+            assert_eq!(s_hard.exponent_p, fresh_hard.exponent_p);
+            assert!(
+                s_soft.exponent_p < baseline.exponent_p && baseline.exponent_p < s_hard.exponent_p
+            );
             assert!(s_soft.k0_si < baseline.k0_si && baseline.k0_si < s_hard.k0_si);
             assert!(s_hard.delta_scale_m < s_soft.delta_scale_m);
             assert!(s_hard.f_scale_n > s_soft.f_scale_n);

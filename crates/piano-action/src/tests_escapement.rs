@@ -135,6 +135,8 @@ fn keybed_and_voicing_update_work_in_place_on_action_bank() {
     bank.reset();
     assert_eq!(bank.step_keybed_force_sample(), 0.0);
 
+    assert_eq!(bank.lut_table_bytes(), 384 * 1024);
+
     let orig_p = bank.keys[48].felt_spec.exponent_p;
     let strike_stats = |b: &mut ActionBank| -> (f32, f32) {
         b.reset();
@@ -159,14 +161,27 @@ fn keybed_and_voicing_update_work_in_place_on_action_bank() {
         ..VoicingSpec::default()
     };
     bank.update_voicing_in_place(&vspec(0.1));
-    assert_eq!(bank.keys[48].felt_spec.exponent_p, orig_p);
+    assert!(bank.keys[48].felt_spec.exponent_p < orig_p);
     let (dur_soft, cent_soft) = strike_stats(&mut bank);
     bank.update_voicing_in_place(&vspec(0.9));
-    assert_eq!(bank.keys[48].felt_spec.exponent_p, orig_p);
+    assert!(bank.keys[48].felt_spec.exponent_p > orig_p);
     let (dur_hard, cent_hard) = strike_stats(&mut bank);
     assert!(dur_hard < dur_soft && cent_hard > cent_soft);
 
+    // Live hammer hardness update reflects dynamic exponent_p immediately for active hammers
+    // and lazily on next note_on for resting keys.
     bank.update_voicing_in_place(&nominal);
+    assert_eq!(bank.keys[48].felt_spec.exponent_p, orig_p);
+    let orig_p39 = bank.keys[39].felt_spec.exponent_p;
+    bank.note_on(48, 51_602);
+    bank.update_hammer_hardness_in_place(&vspec(0.9));
+    assert!(bank.keys[48].felt_spec.exponent_p > orig_p);
+    assert_eq!(bank.keys[39].felt_spec.exponent_p, orig_p39);
+    bank.note_on(39, 51_602);
+    assert!(bank.keys[39].felt_spec.exponent_p > orig_p39);
+
+    bank.update_voicing_in_place(&nominal);
+    assert_eq!(bank.keys[48].felt_spec.exponent_p, orig_p);
     let (dur_restored, cent_restored) = strike_stats(&mut bank);
     assert!((dur_restored - dur_nom).abs() <= 1.0 && (cent_restored - cent_nom).abs() < 1e-2);
 }
