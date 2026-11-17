@@ -1,6 +1,7 @@
-import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defineConfig, transformWithEsbuild, type Plugin } from 'vite';
+import { build as esbuild } from 'esbuild';
+import { defineConfig, type Plugin } from 'vite';
 
 const BLOB_SUFFIXES = ['?worklet', '?blobworker'] as const;
 
@@ -44,14 +45,27 @@ function audioWorkletPlugin(): Plugin {
       }
       const filePath = id.slice(0, -suffix.length);
       this.addWatchFile(filePath);
-      const source = await readFile(filePath, 'utf8');
-      const result = await transformWithEsbuild(source, filePath, {
-        loader: 'ts',
-        target: 'es2022',
+      const result = await esbuild({
+        entryPoints: [filePath],
+        bundle: true,
+        write: false,
         format: 'esm',
+        target: 'es2022',
         minify: isBuild,
+        metafile: true,
+        platform: 'browser',
+        absWorkingDir: appRoot,
       });
-      return `export default ${JSON.stringify(result.code)};`;
+      if (result.metafile) {
+        for (const input of Object.keys(result.metafile.inputs)) {
+          this.addWatchFile(path.resolve(appRoot, input));
+        }
+      }
+      const code = result.outputFiles?.[0]?.text;
+      if (!code) {
+        throw new Error(`esbuild produced no output for ${filePath}`);
+      }
+      return `export default ${JSON.stringify(code)};`;
     },
   };
 }
