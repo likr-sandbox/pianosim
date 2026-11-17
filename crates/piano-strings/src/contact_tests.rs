@@ -226,9 +226,11 @@ fn port_duality_conservation_and_damper_profile_invariants() {
             }
         }
 
-        // 1-sample impulse duality check on A0 and C4.
+        // 1-sample impulse duality check on A0 and C4 (linear energy & smooth velocity duality).
         for &k in &[0usize, 39] {
             bank.reset();
+            bank.sav_phantom_enabled = false;
+            bank.longitudinal_enabled = false;
             let s_idx = map.keys()[k].string_range.start;
             let expected_beta = f64::from(bank.ports.alpha_vel[s_idx]) / f64::from(sr);
             let rel_beta =
@@ -243,12 +245,30 @@ fn port_duality_conservation_and_damper_profile_invariants() {
                 bank.ports
                     .linear_energy_joules(s_idx, &bank.soa, map.strings()[s_idx].all_vecs());
             assert!(h_lin > 0.0 && h_lin.is_finite());
-            let yh = bank.ports.y_h[s_idx];
-            let vh = bank.ports.v_h[s_idx];
-            assert!(yh > 0.0 && vh > 0.0);
-            let y_dot_approx = yh * sr;
-            let rel = (y_dot_approx - vh).abs() / vh;
-            assert!(rel < 0.05, "sr={sr} k={k} yh*sr={y_dot_approx} vs vh={vh}");
+            let f_str = 10.0 / (map.keys()[k].string_range.len() as f64);
+            let expected_h =
+                0.5 * f64::from(bank.ports.r_port_strike[s_idx]) * f_str * f_str / f64::from(sr);
+            let rel_h = (h_lin - expected_h).abs() / expected_h.max(1e-20);
+            assert!(
+                rel_h < 1e-3,
+                "sr={sr} k={k} h_lin={h_lin} vs expected={expected_h}"
+            );
+            let (yh, vh) = (bank.ports.y_h[s_idx], bank.ports.v_h[s_idx]);
+            assert!(yh > 0.0 && vh.is_finite());
+            bank.reset();
+            let mut drv_s = MockAction::new(sr);
+            drv_s.strike(k, 1.8);
+            let (mut sl, mut sr_buf) = ([0.0_f32; 256], [0.0_f32; 256]);
+            bank.render_subblock_coupled(&mut drv_s, &mut sl, &mut sr_buf);
+            (drv_s.hammer_active[k], drv_s.y_h[k], drv_s.v_h[k]) = (true, -0.05, 0.0);
+            let (mut sl1, mut sr1) = ([0.0_f32; 1], [0.0_f32; 1]);
+            bank.render_subblock_coupled(&mut drv_s, &mut sl1, &mut sr1);
+            let (yh0, vh0) = (bank.ports.y_h[s_idx], bank.ports.v_h[s_idx]);
+            bank.render_subblock_coupled(&mut drv_s, &mut sl1, &mut sr1);
+            let (yh1, vh1) = (bank.ports.y_h[s_idx], bank.ports.v_h[s_idx]);
+            let (y_dot, v_mid) = ((yh1 - yh0) * sr, 0.5 * (vh0 + vh1));
+            let rel = (y_dot - v_mid).abs() / v_mid.abs().max(1e-9);
+            assert!(rel < 0.05, "sr={sr} k={k} y_dot={y_dot} vs v_mid={v_mid}");
         }
     }
 }
@@ -458,4 +478,21 @@ fn orthogonal_vh_damper_kills_null_space_decay() {
         }
     }
     assert!(failures.is_empty(), "failures={failures:?}");
+}
+
+#[test]
+fn strike_phi_singularity_guard_near_u_equals_one_on_short_treble_strings() {
+    use crate::contact_ports::{hammer_contact_width_m, strike_phi};
+    for k in [0usize, 39, 75, 87] {
+        let w_h = hammer_contact_width_m(k);
+        // Exact u = 1.0 (e.g., short string length L = j * w_h) must never yield NaN/Inf.
+        for j in 1..=8 {
+            let l_exact = (j as f64) * w_h;
+            let p_exact = strike_phi(k, j, l_exact);
+            let p_left = strike_phi(k, j, l_exact * 1.000_05);
+            let p_right = strike_phi(k, j, l_exact * 0.999_95);
+            assert!(p_exact.is_finite() && p_left.is_finite() && p_right.is_finite());
+            assert!((p_exact - 0.5 * (p_left + p_right)).abs() < 1e-4);
+        }
+    }
 }

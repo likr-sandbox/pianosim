@@ -5,7 +5,7 @@
 //! ~512 KB for ~26,184 modes (`~6,546` `F32x4` vectors). Stereo pan is applied
 //! once per string after summing `v_next * c_bridge`.
 
-use core::f64::consts::{LN_10, PI, TAU};
+use core::f64::consts::{LN_10, TAU};
 use piano_simd::AlignedBuf;
 use piano_spec::{
     count_longitudinal_partials, count_transverse_partials, effective_string_f0_hz,
@@ -14,10 +14,8 @@ use piano_spec::{
 };
 
 use crate::choir_map::{ChoirMap, StringMapEntry};
-#[allow(unused_imports)]
-pub(crate) use crate::damping_law::{
-    t60_transverse_partial, t60_vert_fundamental, t60_wire_fundamental,
-};
+use crate::contact_ports::{hammer_contact_time_s, strike_phi};
+use crate::damping_law::t60_transverse_partial;
 #[allow(unused_imports)]
 pub(crate) use crate::math::{exp_f64, one_minus_exp_neg_f64, sin_cos_f64, sqrt_f64};
 
@@ -121,10 +119,10 @@ struct PolParams {
     mode_count: usize,
     slot_cap: usize,
     key_idx: usize,
+    spec: StringPhysicalParams,
     f0_hz: f64,
-    b_inharm: f64,
     sample_rate: f64,
-    t60_v_base: f64,
+    tau_c: f64,
     hold_mult: f64,
     c_bridge: f32,
     exc_scale: f64,
@@ -133,12 +131,17 @@ struct PolParams {
 }
 
 #[inline]
-fn strike_mode_shape(key_idx: usize, partial_index: usize) -> f64 {
-    let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
-    let beta = 0.137 - 0.042 * x;
-    let strike_sin = sin_cos_f64((partial_index as f64) * PI * beta).0.abs();
-    let slope = 0.12 + 1.80 * x;
-    (0.35 + 0.65 * strike_sin) / (1.0 + slope * ((partial_index - 1) as f64))
+fn strike_mode_shape(
+    key_idx: usize,
+    partial_index: usize,
+    speaking_length_m: f64,
+    f_j: f64,
+    tau_c: f64,
+) -> f64 {
+    let ft = 2.0 * f_j * tau_c;
+    let ft2 = ft * ft;
+    let pulse_env = 1.0 / (1.0 + 0.85 * ft2 / (1.0 + 0.032 * ft2));
+    strike_phi(key_idx, partial_index, speaking_length_m) * pulse_env
 }
 
 #[inline]
@@ -182,11 +185,7 @@ pub(crate) fn populate_string_modes_with_mode(
     let s_choir = entry.string_in_choir as usize;
     let spec = specs[k];
     let b_inharm = spec.inharmonicity_b;
-    let t60_v_base = if bridge_coupled {
-        t60_wire_fundamental(k)
-    } else {
-        t60_vert_fundamental(k)
-    };
+    let tau_c = hammer_contact_time_s(k);
     let h_mult = 2.8;
 
     let f0_vert = effective_string_f0_hz(k, s_choir, Polarization::Vertical, specs, voicing);
@@ -206,14 +205,16 @@ pub(crate) fn populate_string_modes_with_mode(
     for j in 1..=v_modes {
         let f_j = partial_frequency_hz(f0_vert, b_inharm, j);
         if f_j > 0.0 && f_j < nyquist {
-            let w = strike_mode_shape(k, j) * f64::from(C_VERT);
+            let w = strike_mode_shape(k, j, spec.speaking_length_m, f_j, tau_c) * f64::from(C_VERT);
             energy_sq += w * w;
         }
     }
     for j in 1..=h_modes {
         let f_j = partial_frequency_hz(f0_horiz, b_inharm, j);
         if f_j > 0.0 && f_j < nyquist {
-            let w = 0.85 * strike_mode_shape(k, j) * f64::from(C_HORIZ);
+            let w = 0.85
+                * strike_mode_shape(k, j, spec.speaking_length_m, f_j, tau_c)
+                * f64::from(C_HORIZ);
             energy_sq += w * w;
         }
     }
@@ -230,10 +231,10 @@ pub(crate) fn populate_string_modes_with_mode(
             mode_count: v_modes,
             slot_cap: v_cap,
             key_idx: k,
+            spec,
             f0_hz: f0_vert,
-            b_inharm,
             sample_rate,
-            t60_v_base,
+            tau_c,
             hold_mult: 1.0,
             c_bridge: C_VERT,
             exc_scale: norm,
@@ -248,10 +249,10 @@ pub(crate) fn populate_string_modes_with_mode(
             mode_count: h_modes,
             slot_cap: h_cap,
             key_idx: k,
+            spec,
             f0_hz: f0_horiz,
-            b_inharm,
             sample_rate,
-            t60_v_base,
+            tau_c,
             hold_mult: h_mult,
             c_bridge: C_HORIZ,
             exc_scale: 0.85 * norm,
@@ -282,15 +283,16 @@ pub(crate) fn populate_string_modes_with_mode(
 
 fn populate_transverse_pol(soa: &mut ModalSoa, p: &PolParams) {
     for j in 1..=p.mode_count {
-        let f_j = partial_frequency_hz(p.f0_hz, p.b_inharm, j);
+        let f_j = partial_frequency_hz(p.f0_hz, p.spec.inharmonicity_b, j);
         let t60_h = if p.lossless {
             f64::INFINITY
         } else {
-            t60_transverse_partial(p.t60_v_base, f_j, j, p.hold_mult, p.bridge_coupled)
+            t60_transverse_partial(p.key_idx, &p.spec, f_j, p.hold_mult, p.bridge_coupled)
         };
 
         if let Some(poles) = coupled_pole_f32(f_j, p.sample_rate, t60_h) {
-            let b = (strike_mode_shape(p.key_idx, j) * p.exc_scale) as f32;
+            let b = (strike_mode_shape(p.key_idx, j, p.spec.speaking_length_m, f_j, p.tau_c)
+                * p.exc_scale) as f32;
             let c_signed = if j % 2 == 1 { p.c_bridge } else { -p.c_bridge };
             soa.write_slot(p.base_slot + (j - 1), poles, c_signed, b);
         } else {

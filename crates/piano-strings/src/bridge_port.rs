@@ -1,5 +1,5 @@
 //! Stage 2 <-> Stage 3 Wave Digital Filter (WDF) displacement-bridge port
-//! precomputation, L1d-packed `< 3,800 Hz` prefix tables, and contiguous tail SoA (`no_std`).
+//! precomputation, L1d-packed prefix tables, and contiguous tail SoA (`no_std`).
 
 use alloc::boxed::Box;
 use core::ops::Range;
@@ -89,7 +89,7 @@ impl PrefixRun {
     pub const ZERO: Self = Self { start_s: 0, count: 0, n_pol: 0, p_off: 0 };
 }
 
-pub(crate) const MAX_PREFIX_RUNS: usize = 16;
+pub(crate) const MAX_PREFIX_RUNS: usize = 48;
 
 /// Per-key contiguous ranges in `BridgePorts::tl_soa` across all unison strings of key `k`.
 #[derive(Copy, Clone, Debug)]
@@ -166,13 +166,13 @@ pub(crate) fn count_prefix_modes(
     nyquist_hz: f64,
 ) -> usize {
     let (cutoff_hz, max_j) = if key_idx < 16 {
-        (1_250.0_f64, 12usize)
+        (1_250.0_f64, 24usize)
     } else if key_idx < 28 {
         (2_500.0_f64, 12usize)
     } else if key_idx < 40 {
         (3_800.0_f64, 8usize)
     } else {
-        (3_800.0_f64, 4usize)
+        (6_000.0_f64, 4usize)
     };
     let lim = cutoff_hz.min(nyquist_hz);
     let mut n = 0usize;

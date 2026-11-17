@@ -79,8 +79,8 @@ fn update_prefix_pol(
     gain: f64,
     b_inharm: f64,
 ) -> f64 {
-    let mut beta_tmp = [0.0_f32; 16];
-    let n_vecs = br.len().min(4);
+    let mut beta_tmp = [0.0_f32; 24];
+    let n_vecs = br.len().min(6);
     let clamped_cut = n_cut.min(n_vecs * 4);
     let sum_sq = fill_pol_beta(&mut beta_tmp, clamped_cut, gain, b_inharm);
     for vi in 0..n_vecs {
@@ -148,10 +148,10 @@ fn update_string_bridge_ports(
     };
     let nv_cut = count_prefix_modes(k, v_modes, f0_v, spec.inharmonicity_b, nyquist)
         .min(v_br.len() * 4)
-        .min(16);
+        .min(24);
     let nh_cut = count_prefix_modes(k, h_modes, f0_h, spec.inharmonicity_b, nyquist)
         .min(h_br.len() * 4)
-        .min(16);
+        .min(24);
 
     let l_m = spec.speaking_length_m;
     let gain_v = gamma * (2.0 * (2.0 * l_m * f0_v) * ts / l_m) * f64::from(C_VERT);

@@ -155,11 +155,41 @@ impl ContactPorts {
 }
 
 #[inline]
-pub(crate) fn strike_phi(key_idx: usize, partial_index: usize) -> f64 {
+pub(crate) fn hammer_beta(key_idx: usize) -> f64 {
     let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
-    let beta = 0.137 - 0.042 * x;
-    let s = sin_cos_f64((partial_index as f64) * PI * beta).0;
-    s / (1.0 + (0.25 + 4.40 * x) * ((partial_index - 1) as f64))
+    0.138 - 0.043 * x
+}
+
+#[inline]
+pub(crate) fn hammer_contact_width_m(key_idx: usize) -> f64 {
+    let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
+    let r = x / 0.26;
+    (0.11 / (1.0 + r * r * r)).max(0.0035)
+}
+
+#[inline]
+pub(crate) fn hammer_contact_time_s(key_idx: usize) -> f64 {
+    let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
+    (0.0032 * exp_f64(-0.35 * x - 2.75 * x * x * x)).max(0.00014)
+}
+
+#[inline]
+pub(crate) fn strike_phi(key_idx: usize, partial_index: usize, speaking_length_m: f64) -> f64 {
+    let jf = partial_index as f64;
+    let beta = hammer_beta(key_idx);
+    let w_h = hammer_contact_width_m(key_idx);
+    let sin_term = sin_cos_f64(jf * PI * beta).0;
+    let u = if speaking_length_m > 0.0 {
+        jf * w_h / speaking_length_m
+    } else {
+        0.0
+    };
+    let window = if (1.0 - u).abs() < 1.0e-4 {
+        core::f64::consts::FRAC_PI_4 - (PI / 8.0) * (u - 1.0)
+    } else {
+        sin_cos_f64(0.5 * PI * u).1 / (1.0 - u * u)
+    };
+    sin_term * window
 }
 
 #[inline]
@@ -192,10 +222,11 @@ pub(crate) fn populate_string_ports(
 
     let x = (k as f64) / ((NUM_KEYS - 1) as f64);
     let m_h = 0.0112 - 0.0077 * x;
-    let tau_c = (0.0032 * exp_f64(-0.35 * x - 2.75 * x * x * x)).max(0.00014);
+    let tau_c = hammer_contact_time_s(k);
     let z_choir = (entry.choir_size as f64) * 2.0 * f0_v * m_str;
     let i_mf = (1.55 * m_h * 1.8).min(1.45 * z_choir * tau_c * 1.8);
 
+    let mut s_raw_sq = 0.0_f64;
     let mut s_eff_sq = 0.0_f64;
     let (vb, vm) = (
         entry.vert_vecs.start * 4,
@@ -223,14 +254,21 @@ pub(crate) fn populate_string_ports(
         for j in 1..=modes {
             let f_j = partial_frequency_hz(f0, spec.inharmonicity_b, j);
             if f_j > 0.0 && f_j < nyquist {
-                let sinc = 1.0 / sqrt_f64(1.0 + (2.0 * f_j * tau_c) * (2.0 * f_j * tau_c));
-                let w = hs * strike_phi(k, j) * c_b * sinc;
+                let ph_raw = hs * strike_phi(k, j, spec.speaking_length_m);
+                s_raw_sq += ph_raw * ph_raw;
+                let ft = 2.0 * f_j * tau_c;
+                let sinc = 1.0 / (1.0 + ft * ft);
+                let w = ph_raw * c_b * sinc;
                 s_eff_sq += w * w;
             }
         }
     }
 
-    let target_rms = 0.062 * (1.0 + 0.28 * x * x);
+    let r_raw_48k = (2.0 / (48_000.0 * m_str)) * s_raw_sq;
+    let c_port = 1.0 / sqrt_f64(1.0 + r_raw_48k / 0.025);
+
+    let mid_lift = sin_cos_f64(PI * x).0;
+    let target_rms = 0.060 * (1.0 + 0.72 * mid_lift * mid_lift) * (1.0 - 0.15 * x * x);
     let gamma_k = if s_eff_sq > 0.0 {
         target_rms * m_str / (i_mf * sqrt_f64(s_eff_sq))
     } else {
@@ -256,7 +294,7 @@ pub(crate) fn populate_string_ports(
             let f_j = partial_frequency_hz(f0, spec.inharmonicity_b, j);
             if f_j > 0.0 && f_j < nyquist {
                 let omega = TAU * f_j;
-                let ph = hs * strike_phi(k, j);
+                let ph = hs * c_port * strike_phi(k, j, spec.speaking_length_m);
                 let (bh, ah) = ((b_gain * ph) as f32, (ph / (omega * gamma_k)) as f32);
                 bh_s[base + (j - 1)] = bh;
                 ah_s[base + (j - 1)] = ah;

@@ -238,6 +238,39 @@ pub(crate) fn step_uncoupled_prefixes_fast(
         let run_has_symp = plan.symp_has_gains[start_s..start_s + count]
             .iter()
             .any(|&b| b);
+        macro_rules! dispatch_open {
+            ($k:literal) => {
+                step_prefix_run_k_open::<$k>(
+                    bp,
+                    ports,
+                    p_off,
+                    start_s,
+                    count,
+                    plan,
+                    a_waves,
+                    b_waves,
+                    &mut sum_l_vec,
+                    &mut sum_r_vec,
+                )
+            };
+        }
+        macro_rules! dispatch_damp {
+            ($k:literal) => {
+                step_prefix_run_k::<$k>(
+                    bp,
+                    ports,
+                    p_off,
+                    start_s,
+                    count,
+                    ts,
+                    plan,
+                    a_waves,
+                    b_waves,
+                    &mut sum_l_vec,
+                    &mut sum_r_vec,
+                )
+            };
+        }
         match (run.n_pol, run_has_symp) {
             (0, _) => {
                 for (a_wave, &coupled) in a_waves[start_s..start_s + count]
@@ -249,81 +282,18 @@ pub(crate) fn step_uncoupled_prefixes_fast(
                     }
                 }
             }
-            (1, false) => step_prefix_run_k_open::<1>(
-                bp,
-                ports,
-                p_off,
-                start_s,
-                count,
-                plan,
-                a_waves,
-                b_waves,
-                &mut sum_l_vec,
-                &mut sum_r_vec,
-            ),
-            (2, false) => step_prefix_run_k_open::<2>(
-                bp,
-                ports,
-                p_off,
-                start_s,
-                count,
-                plan,
-                a_waves,
-                b_waves,
-                &mut sum_l_vec,
-                &mut sum_r_vec,
-            ),
-            (_, false) => step_prefix_run_k_open::<3>(
-                bp,
-                ports,
-                p_off,
-                start_s,
-                count,
-                plan,
-                a_waves,
-                b_waves,
-                &mut sum_l_vec,
-                &mut sum_r_vec,
-            ),
-            (1, true) => step_prefix_run_k::<1>(
-                bp,
-                ports,
-                p_off,
-                start_s,
-                count,
-                ts,
-                plan,
-                a_waves,
-                b_waves,
-                &mut sum_l_vec,
-                &mut sum_r_vec,
-            ),
-            (2, true) => step_prefix_run_k::<2>(
-                bp,
-                ports,
-                p_off,
-                start_s,
-                count,
-                ts,
-                plan,
-                a_waves,
-                b_waves,
-                &mut sum_l_vec,
-                &mut sum_r_vec,
-            ),
-            (_, true) => step_prefix_run_k::<3>(
-                bp,
-                ports,
-                p_off,
-                start_s,
-                count,
-                ts,
-                plan,
-                a_waves,
-                b_waves,
-                &mut sum_l_vec,
-                &mut sum_r_vec,
-            ),
+            (1, false) => dispatch_open!(1),
+            (2, false) => dispatch_open!(2),
+            (3, false) => dispatch_open!(3),
+            (4, false) => dispatch_open!(4),
+            (5, false) => dispatch_open!(5),
+            (_, false) => dispatch_open!(6),
+            (1, true) => dispatch_damp!(1),
+            (2, true) => dispatch_damp!(2),
+            (3, true) => dispatch_damp!(3),
+            (4, true) => dispatch_damp!(4),
+            (5, true) => dispatch_damp!(5),
+            (_, true) => dispatch_damp!(6),
         }
     }
     (sum_l_vec.reduce_sum(), sum_r_vec.reduce_sum())

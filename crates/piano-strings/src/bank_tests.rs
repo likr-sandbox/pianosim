@@ -260,3 +260,38 @@ impl StringBank {
         }
     }
 }
+
+#[test]
+fn prefix_modes_cover_bass_20_to_24_and_treble_6khz_cutoff_including_c8() {
+    use crate::bridge_port::count_prefix_modes;
+    use piano_spec::partial_frequency_hz;
+
+    let voicing = VoicingSpec::default();
+    let specs = build_scale_design(&voicing);
+    let nyquist = 0.49 * 48_000.0;
+
+    // II-1: Bass k < 16 spans up to 20..24 modes (n_pol <= 6).
+    let n_a0 = count_prefix_modes(0, 250, specs[0].f0_et_hz, specs[0].inharmonicity_b, nyquist);
+    assert!((20..=24).contains(&n_a0), "A0 prefix modes={n_a0}");
+    let bank = StringBank::new(48_000.0, &voicing);
+    let bp = &bank.bridge_ports;
+    for s_idx in 0..piano_spec::TOTAL_STRINGS {
+        let meta = &bp.meta[s_idx];
+        let k = usize::from(bank.choir_map().strings()[s_idx].key_idx);
+        let n_pol = meta.v_br.len();
+        if k < 16 {
+            assert!((5..=6).contains(&n_pol), "k={k} n_pol={n_pol}");
+        } else {
+            assert!(n_pol <= 3, "k={k} n_pol={n_pol} must stay <= 3");
+        }
+    }
+
+    // II-2: Treble 6,000 Hz WDF cutoff reconnects A#7 (k=85), B7 (k=86), and C8 (k=87).
+    for k in [85usize, 86, 87] {
+        let s0 = bank.choir_map().keys()[k].string_range.start;
+        let f1 = partial_frequency_hz(specs[k].f0_et_hz, specs[k].inharmonicity_b, 1);
+        assert!(f1 < 6_000.0);
+        assert_eq!(bp.meta[s0].v_br.len(), 1, "k={k} must have n_pol=1");
+        assert!(bp.r0[s0] > 0.0, "k={k} must couple to Stage 3 WDF bridge");
+    }
+}

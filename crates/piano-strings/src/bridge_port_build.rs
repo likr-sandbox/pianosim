@@ -269,7 +269,7 @@ impl BridgePorts {
             {
                 end_s += 1;
             }
-            assert!(n_prefix_runs < MAX_PREFIX_RUNS && n_pol <= 3);
+            assert!(n_prefix_runs < MAX_PREFIX_RUNS && n_pol <= 6);
             prefix_runs[n_prefix_runs] = PrefixRun {
                 start_s: s_run as u8,
                 count: (end_s - s_run) as u8,
