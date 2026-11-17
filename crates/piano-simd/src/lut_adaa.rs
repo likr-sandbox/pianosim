@@ -142,6 +142,96 @@ impl AdaaPowerLut {
             (self.eval_f1(x) - self.eval_f1(x_prev)) / dx
         }
     }
+
+    /// Evaluates linearly interpolated `f(x) = (1 - t) * self.f(x) + t * other.f(x)`.
+    ///
+    /// Clamps `t` safely to `[0.0, 1.0]` (`NaN` maps to `0.0`). Zero-allocation and panic-free.
+    #[must_use]
+    #[inline]
+    pub fn eval_f_lerp(&self, other: &Self, t: f32, x: f32) -> f32 {
+        let t = clamp_unit(t);
+        if x <= 0.0 || x.is_nan() {
+            return 0.0;
+        }
+        if self.last_idx == other.last_idx && self.x_max == other.x_max {
+            if x >= self.x_max {
+                return lerp_f32(
+                    self.f_table[self.last_idx],
+                    other.f_table[other.last_idx],
+                    t,
+                );
+            }
+            let (f_lo, f_hi) =
+                sample_lut_pair(&self.f_table, &other.f_table, x, self.inv_dx, self.last_idx);
+            lerp_f32(f_lo, f_hi, t)
+        } else {
+            lerp_f32(self.eval_f(x), other.eval_f(x), t)
+        }
+    }
+
+    /// Evaluates linearly interpolated antiderivative
+    /// `F_1(x) = (1 - t) * self.F_1(x) + t * other.F_1(x)`.
+    ///
+    /// Clamps `t` safely to `[0.0, 1.0]` (`NaN` maps to `0.0`). Zero-allocation and panic-free.
+    #[must_use]
+    #[inline]
+    pub fn eval_f1_lerp(&self, other: &Self, t: f32, x: f32) -> f32 {
+        let t = clamp_unit(t);
+        let (f1_lo, f1_hi) = eval_f1_pair(self, other, x);
+        lerp_f32(f1_lo, f1_hi, t)
+    }
+
+    /// Evaluates first-order ADAA across `x_prev -> x` for the interpolated nonlinearity
+    /// `(1 - t) * self + t * other` using the exact consistent antiderivative
+    /// `(1 - t) * self.F_1 + t * other.F_1`.
+    ///
+    /// Falls back to midpoint `self.eval_f_lerp(other, t, 0.5 * (x + x_prev))` when
+    /// `|x - x_prev| < ADAA_DIFF_EPS` (or non-finite `x - x_prev`), matching `dF_1_lerp/dx`.
+    #[must_use]
+    #[inline]
+    pub fn adaa1_lerp(&self, other: &Self, t: f32, x: f32, x_prev: f32) -> f32 {
+        if (x <= 0.0 || x.is_nan()) && (x_prev <= 0.0 || x_prev.is_nan()) {
+            return 0.0;
+        }
+        let t = clamp_unit(t);
+        let dx = x - x_prev;
+        if abs_f32(dx) >= ADAA_DIFF_EPS && dx.is_finite() {
+            let (cur_lo, cur_hi) = eval_f1_pair(self, other, x);
+            let (prev_lo, prev_hi) = eval_f1_pair(self, other, x_prev);
+            lerp_f32(cur_lo - prev_lo, cur_hi - prev_hi, t) / dx
+        } else {
+            self.eval_f_lerp(other, t, 0.5 * (x + x_prev))
+        }
+    }
+}
+
+/// Evaluates first-order ADAA across `x_prev -> x` between two adjacent LUTs at blend `t`.
+#[must_use]
+#[inline]
+pub fn adaa1_lerp(
+    lut_lo: &AdaaPowerLut,
+    lut_hi: &AdaaPowerLut,
+    t: f32,
+    x: f32,
+    x_prev: f32,
+) -> f32 {
+    lut_lo.adaa1_lerp(lut_hi, t, x, x_prev)
+}
+
+#[inline]
+fn clamp_unit(t: f32) -> f32 {
+    if t >= 1.0 {
+        1.0
+    } else if t > 0.0 {
+        t
+    } else {
+        0.0
+    }
+}
+
+#[inline]
+fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
+    (1.0 - t) * a + t * b
 }
 
 #[inline]
@@ -152,6 +242,42 @@ fn sample_lut(table: &[f32], x: f32, inv_dx: f32, last_idx: usize) -> f32 {
     let y0 = table[idx];
     let y1 = table[idx + 1];
     y0 + frac * (y1 - y0)
+}
+
+#[inline]
+fn sample_lut_pair(
+    table_lo: &[f32],
+    table_hi: &[f32],
+    x: f32,
+    inv_dx: f32,
+    last_idx: usize,
+) -> (f32, f32) {
+    let pos = x * inv_dx;
+    let idx = (pos as usize).min(last_idx - 1);
+    let frac = pos - (idx as f32);
+    let lo0 = table_lo[idx];
+    let lo1 = table_lo[idx + 1];
+    let hi0 = table_hi[idx];
+    let hi1 = table_hi[idx + 1];
+    (lo0 + frac * (lo1 - lo0), hi0 + frac * (hi1 - hi0))
+}
+
+#[inline]
+fn eval_f1_pair(lo: &AdaaPowerLut, hi: &AdaaPowerLut, x: f32) -> (f32, f32) {
+    if x <= 0.0 || x.is_nan() {
+        return (0.0, 0.0);
+    }
+    if lo.last_idx == hi.last_idx && lo.x_max == hi.x_max {
+        if x >= lo.x_max {
+            let dx_over = x - lo.x_max;
+            let f1_lo = lo.f1_table[lo.last_idx] + lo.f_table[lo.last_idx] * dx_over;
+            let f1_hi = hi.f1_table[hi.last_idx] + hi.f_table[hi.last_idx] * dx_over;
+            return (f1_lo, f1_hi);
+        }
+        sample_lut_pair(&lo.f1_table, &hi.f1_table, x, lo.inv_dx, lo.last_idx)
+    } else {
+        (lo.eval_f1(x), hi.eval_f1(x))
+    }
 }
 
 /// Stateful per-voice 1st-order ADAA processor storing `x[n - 1]`.
@@ -184,6 +310,21 @@ impl AdaaState {
     #[inline]
     pub fn process(&mut self, lut: &AdaaPowerLut, x: f32) -> f32 {
         let out = lut.adaa1(x, self.x_prev);
+        self.x_prev = x;
+        out
+    }
+
+    /// Advances one sample across two linearly interpolated LUTs and returns the
+    /// antialiased nonlinearity output.
+    #[inline]
+    pub fn process_lerp(
+        &mut self,
+        lut_lo: &AdaaPowerLut,
+        lut_hi: &AdaaPowerLut,
+        t: f32,
+        x: f32,
+    ) -> f32 {
+        let out = lut_lo.adaa1_lerp(lut_hi, t, x, self.x_prev);
         self.x_prev = x;
         out
     }
