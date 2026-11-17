@@ -283,3 +283,92 @@ fn m7_precomputed_space_and_voicing_blobs_apply_click_free_with_parity() {
     eng.render_block(&[], &mut l, &mut r);
     assert!(l.iter().any(|&x| x.abs() > 1e-4));
 }
+
+fn render_a4_blocks(engine: &mut PianoEngine, blocks: usize) -> Vec<f32> {
+    let ev = [note_on(69, piano_spec::u7_to_u16(100), 0)];
+    let mut out = Vec::with_capacity(blocks * 128);
+    let (mut l, mut r) = ([0.0_f32; 128], [0.0_f32; 128]);
+    for idx in 0..blocks {
+        let slice = if idx == 0 { &ev[..] } else { &[] };
+        engine.render_block(slice, &mut l, &mut r);
+        out.extend_from_slice(&l);
+    }
+    out
+}
+
+fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .fold(0.0_f32, |m, (&x, &y)| m.max((x - y).abs()))
+}
+
+#[test]
+fn m7_apply_precomputed_voicing_preserves_live_hammer_hardness_settled_and_mid_ramp() {
+    let v_soft_415 = VoicingSpec::from_globals_with_a4(0.15, 1.0, 1.0, 1.0, 415.0);
+    let v_hard_415 = VoicingSpec::from_globals_with_a4(0.95, 1.0, 1.0, 1.0, 415.0);
+    let v_init = VoicingSpec::from_globals_with_a4(0.15, 1.0, 1.0, 1.0, 440.0);
+
+    let mut vc_prep = piano_strings::VoicingPrepContext::new(SR);
+    let stale_blob = vc_prep.prepare_voicing(&v_soft_415);
+
+    let mut ref_hard = PianoEngine::new_with_voicing(SR, &v_hard_415);
+    let wave_hard = render_a4_blocks(&mut ref_hard, 24);
+    let mut ref_soft = PianoEngine::new_with_voicing(SR, &v_soft_415);
+    let wave_soft = render_a4_blocks(&mut ref_soft, 24);
+    assert!(
+        max_abs_diff(&wave_hard, &wave_soft) > 0.05,
+        "reference 0.95 vs 0.15 waveforms must differ noticeably"
+    );
+
+    // Case 1: setHammer(0.95) settles before stale prepVoicing(0.15, A4=415) arrives.
+    let mut raced = PianoEngine::new_with_voicing(SR, &v_init);
+    raced.set_hammer_hardness(0.95);
+    let (mut l, mut r) = ([0.0_f32; 128], [0.0_f32; 128]);
+    for _ in 0..80 {
+        raced.render_block(&[], &mut l, &mut r);
+    }
+    assert!(!raced.voicing_smoother().is_active());
+    assert!((raced.voicing_smoother().current_hammer_hardness() - 0.95).abs() < 1e-6);
+
+    assert!(raced.apply_precomputed_voicing(v_soft_415.clone(), stale_blob));
+    assert!(!raced.voicing_smoother().is_active());
+    assert!((raced.voicing_smoother().current_hammer_hardness() - 0.95).abs() < 1e-6);
+    assert!((raced.voicing_smoother().current_a4_freq_hz() - 415.0).abs() < 1e-4);
+
+    let wave_raced = render_a4_blocks(&mut raced, 24);
+    let diff_hard = max_abs_diff(&wave_raced, &wave_hard);
+    let diff_soft = max_abs_diff(&wave_raced, &wave_soft);
+    assert!(
+        diff_hard < 1e-4,
+        "settled raced waveform diverged from clean 0.95: max_diff={diff_hard}"
+    );
+    assert!(
+        diff_soft > 0.05,
+        "settled raced waveform fell back to stale 0.15: max_diff={diff_soft}"
+    );
+
+    // Case 2: setHammer(0.95) is still mid-ramp when stale prepVoicing(0.15, A4=415) arrives.
+    let mut mid_ramp = PianoEngine::new_with_voicing(SR, &v_init);
+    mid_ramp.set_hammer_hardness(0.95);
+    for _ in 0..5 {
+        mid_ramp.render_block(&[], &mut l, &mut r);
+    }
+    assert!(mid_ramp.voicing_smoother().is_active());
+    let mid_h = mid_ramp.voicing_smoother().current_hammer_hardness();
+    assert!(mid_h > 0.2 && mid_h < 0.9);
+
+    assert!(mid_ramp.apply_precomputed_voicing(v_soft_415, stale_blob));
+    assert!(mid_ramp.voicing_smoother().is_active());
+    assert_eq!(mid_ramp.voicing_smoother().current_hammer_hardness(), mid_h);
+
+    for _ in 0..80 {
+        mid_ramp.render_block(&[], &mut l, &mut r);
+    }
+    assert!(!mid_ramp.voicing_smoother().is_active());
+    assert!((mid_ramp.voicing_smoother().current_hammer_hardness() - 0.95).abs() < 1e-6);
+    let wave_mid = render_a4_blocks(&mut mid_ramp, 24);
+    assert!(
+        max_abs_diff(&wave_mid, &wave_hard) < 1e-4,
+        "mid-ramp raced waveform did not converge to clean 0.95"
+    );
+}

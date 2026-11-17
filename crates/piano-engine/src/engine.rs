@@ -125,7 +125,7 @@ impl PianoEngine {
 
     /// Installs an off-thread precomputed Stage 2/3 tuning table blob with zero allocations.
     pub fn apply_precomputed_voicing(&mut self, spec: VoicingSpec, blob: &[f32]) -> bool {
-        let v = spec.sanitized();
+        let mut v = spec.sanitized();
         if !self.core.bank.install_precomputed_voicing(&v, blob) {
             return false;
         }
@@ -133,6 +133,7 @@ impl PianoEngine {
         self.core
             .bridge
             .set_port_resistances(self.core.bank.bridge_port_resistances());
+        v.hammer_hardness = self.voicing_smoother.current_hammer_hardness();
         self.core.action.update_voicing_in_place(&v);
         self.voicing_smoother.set_tuning_applied_with_a4(
             v.unison_detune_scale,
