@@ -1,13 +1,17 @@
 /** High-precision lookahead MIDI score playback scheduler synchronized to Web Audio clock. */
 
 import {
+  cc7ToU16,
   PEDAL_SOSTENUTO,
   PEDAL_SUSTAIN,
   PEDAL_UNA_CORDA,
   u7ToU16,
+  WEB_AUDIO_SAMPLE_RATE,
 } from '../audio/abi';
 import type { WasmAudioHost } from '../audio/wasm-host';
 import type { ParsedSmf } from './smf-parser';
+
+const LOOKAHEAD_SECONDS = 0.06;
 
 export interface MidiPlayerCallbacks {
   onNotePress?(midiKey: number, velocity: number): void;
@@ -101,11 +105,14 @@ export class MidiPlayer {
       ) {
         this.seek(0);
         this.startScoreTime = 0;
+      } else if (this.nextEventIndex > 0) {
+        this.restorePedalsUpTo(this.nextEventIndex);
       }
 
       this.isPlayingState = true;
       this.callbacks.onStateChange?.(true);
 
+      this.tick();
       this.timerId = window.setInterval(() => this.tick(), 15);
     } finally {
       this.isStarting = false;
@@ -125,12 +132,22 @@ export class MidiPlayer {
       this.timerId = null;
     }
 
-    // Flush active notes with dampers engaging for natural acoustic decay
+    // Rewind pointer to playhead so lookahead-queued future events are not skipped on resume
+    if (this.score) {
+      const events = this.score.events;
+      let idx = 0;
+      while (idx < events.length && events[idx].timeSeconds < this.playheadSeconds) {
+        idx++;
+      }
+      this.nextEventIndex = idx;
+    }
+
+    // Clear queued future events and flush ringing voices cleanly
     for (const note of this.activeNotes) {
-      this.host.noteOff(note, 0, 0);
       this.callbacks.onNoteRelease?.(note);
     }
     this.activeNotes.clear();
+    this.host.allNotesOff();
 
     this.callbacks.onStateChange?.(false);
   }
@@ -156,12 +173,12 @@ export class MidiPlayer {
     const dur = this.score?.durationSeconds ?? 0;
     const clamped = Math.max(0, Math.min(dur, targetSeconds));
 
-    // Release currently ringing voices to avoid hanging notes
+    // Release UI keys and discard any queued future lookahead events
     for (const note of this.activeNotes) {
-      this.host.noteOff(note, 0, 0);
       this.callbacks.onNoteRelease?.(note);
     }
     this.activeNotes.clear();
+    this.host.allNotesOff();
 
     this.playheadSeconds = clamped;
     this.startScoreTime = clamped;
@@ -169,7 +186,7 @@ export class MidiPlayer {
     const ctx = this.host.getAudioContext();
     this.startAudioTime = ctx ? ctx.currentTime : 0;
 
-    // Fast-forward or rewind event pointer
+    // Fast-forward or rewind event pointer and restore prior CC64/CC66/CC67 pedal states
     if (this.score) {
       const events = this.score.events;
       let idx = 0;
@@ -177,9 +194,14 @@ export class MidiPlayer {
         idx++;
       }
       this.nextEventIndex = idx;
+      this.restorePedalsUpTo(idx);
     }
 
     this.callbacks.onProgress?.(this.playheadSeconds, dur);
+
+    if (this.isPlayingState) {
+      this.tick();
+    }
   }
 
   setTempo(factor: number): void {
@@ -221,6 +243,35 @@ export class MidiPlayer {
     return this.startScoreTime + elapsedAudio * this.tempoFactor;
   }
 
+  private restorePedalsUpTo(endIndex: number): void {
+    let cc64 = 0;
+    let cc66 = 0;
+    let cc67 = 0;
+    if (this.score) {
+      const events = this.score.events;
+      const limit = Math.min(endIndex, events.length);
+      for (let i = 0; i < limit; i++) {
+        const ev = events[i];
+        if (ev.type !== 'cc') {
+          continue;
+        }
+        if (ev.controller === 64) {
+          cc64 = ev.value;
+        } else if (ev.controller === 66) {
+          cc66 = ev.value;
+        } else if (ev.controller === 67) {
+          cc67 = ev.value;
+        }
+      }
+    }
+    this.host.pedal(PEDAL_SUSTAIN, cc7ToU16(cc64), 0);
+    this.host.pedal(PEDAL_SOSTENUTO, cc66 >= 64 ? 65535 : 0, 0);
+    this.host.pedal(PEDAL_UNA_CORDA, cc7ToU16(cc67), 0);
+    this.callbacks.onPedalChange?.(PEDAL_SUSTAIN, cc64);
+    this.callbacks.onPedalChange?.(PEDAL_SOSTENUTO, cc66);
+    this.callbacks.onPedalChange?.(PEDAL_UNA_CORDA, cc67);
+  }
+
   private tick(): void {
     if (!this.isPlayingState || !this.score) {
       return;
@@ -228,32 +279,39 @@ export class MidiPlayer {
     const currentScoreTime = this.calculateCurrentScoreTime();
     this.playheadSeconds = currentScoreTime;
 
+    const ctx = this.host.getAudioContext();
+    const sampleRate = ctx ? ctx.sampleRate : WEB_AUDIO_SAMPLE_RATE;
+    const lookaheadHorizon = currentScoreTime + LOOKAHEAD_SECONDS * this.tempoFactor;
+
     const events = this.score.events;
     while (
       this.nextEventIndex < events.length &&
-      events[this.nextEventIndex].timeSeconds <= currentScoreTime
+      events[this.nextEventIndex].timeSeconds <= lookaheadHorizon
     ) {
       const ev = events[this.nextEventIndex++];
+      const deltaAudioSec = (ev.timeSeconds - currentScoreTime) / this.tempoFactor;
+      const sampleOffset = Math.max(0, Math.round(deltaAudioSec * sampleRate));
+
       if (ev.type === 'noteOn') {
         const velU16 = u7ToU16(ev.velocity);
-        this.host.noteOn(ev.midiKey, velU16, 0);
+        this.host.noteOn(ev.midiKey, velU16, sampleOffset);
         this.activeNotes.add(ev.midiKey);
         this.callbacks.onNotePress?.(ev.midiKey, ev.velocity);
       } else if (ev.type === 'noteOff') {
         const velU16 = u7ToU16(ev.velocity);
-        this.host.noteOff(ev.midiKey, velU16, 0);
+        this.host.noteOff(ev.midiKey, velU16, sampleOffset);
         this.activeNotes.delete(ev.midiKey);
         this.callbacks.onNoteRelease?.(ev.midiKey);
       } else if (ev.type === 'cc') {
         if (ev.controller === 64) {
-          this.host.pedal(PEDAL_SUSTAIN, u7ToU16(ev.value), 0);
+          this.host.pedal(PEDAL_SUSTAIN, cc7ToU16(ev.value), sampleOffset);
           this.callbacks.onPedalChange?.(PEDAL_SUSTAIN, ev.value);
         } else if (ev.controller === 66) {
           const val = ev.value >= 64 ? 65535 : 0;
-          this.host.pedal(PEDAL_SOSTENUTO, val, 0);
+          this.host.pedal(PEDAL_SOSTENUTO, val, sampleOffset);
           this.callbacks.onPedalChange?.(PEDAL_SOSTENUTO, ev.value);
         } else if (ev.controller === 67) {
-          this.host.pedal(PEDAL_UNA_CORDA, u7ToU16(ev.value), 0);
+          this.host.pedal(PEDAL_UNA_CORDA, cc7ToU16(ev.value), sampleOffset);
           this.callbacks.onPedalChange?.(PEDAL_UNA_CORDA, ev.value);
         }
       }
