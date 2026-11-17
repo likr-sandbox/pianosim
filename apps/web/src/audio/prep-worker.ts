@@ -125,6 +125,7 @@ self.onmessage = (event: MessageEvent<PrepInboundMessage>) => {
           msg.unisonDetune,
           msg.stretchTuning,
           msg.stringLengthScale,
+          msg.a4FreqHz,
         ) >>> 0;
       const buf = copyPreparedSlice(len);
       if (buf) {
@@ -134,6 +135,7 @@ self.onmessage = (event: MessageEvent<PrepInboundMessage>) => {
           unisonDetune: msg.unisonDetune,
           stretchTuning: msg.stretchTuning,
           stringLengthScale: msg.stringLengthScale,
+          a4FreqHz: msg.a4FreqHz,
           seq: msg.seq,
           blob: buf,
         };

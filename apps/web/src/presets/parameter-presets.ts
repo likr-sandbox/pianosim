@@ -21,6 +21,7 @@ export interface ParameterPreset {
     readonly unisonDetune: number;
     readonly stretchTuning: number;
     readonly stringLengthScale: number;
+    readonly a4FreqHz: number;
   };
   readonly space: {
     readonly perspective: ListenerPerspective; // ListenerPerspective (0: Player, 1: Close, 2: Hall, 3: Binaural)
@@ -38,6 +39,7 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
       unisonDetune: 1.00,
       stretchTuning: 1.00,
       stringLengthScale: 1.00,
+      a4FreqHz: 440.0,
     },
     space: {
       perspective: PERSPECTIVE_PLAYER, // 0
@@ -53,6 +55,7 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
       unisonDetune: 0.60,
       stretchTuning: 0.70,
       stringLengthScale: 0.75,
+      a4FreqHz: 440.0,
     },
     space: {
       perspective: PERSPECTIVE_CLOSE,  // 1
@@ -62,12 +65,13 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
   {
     id: 'bright-pop',
     name: 'Bright Pop',
-    description: 'Cutting modern studio sound with hardened lacquer hammers, extended stretch brilliance, and wide unison chorusing.',
+    description: 'Cutting modern studio sound with hardened lacquer hammers, 442 Hz brilliance, and wide unison chorusing.',
     voicing: {
       hammerHardness: 0.80,
       unisonDetune: 1.40,
       stretchTuning: 1.30,
       stringLengthScale: 1.15,
+      a4FreqHz: 442.0,
     },
     space: {
       perspective: PERSPECTIVE_CLOSE,  // 1
@@ -77,12 +81,13 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
   {
     id: 'vintage-saloon',
     name: 'Vintage Saloon',
-    description: 'Historic fortepiano & saloon character with dry snappy impact, wide detuning, and twangy short strings.',
+    description: 'Historic 435 Hz fortepiano & saloon character with dry snappy impact, wide detuning, and twangy short strings.',
     voicing: {
       hammerHardness: 0.70,
       unisonDetune: 2.50,
       stretchTuning: 0.20,
       stringLengthScale: 0.65,
+      a4FreqHz: 435.0,
     },
     space: {
       perspective: PERSPECTIVE_PLAYER, // 0

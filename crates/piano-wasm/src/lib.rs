@@ -100,12 +100,12 @@ mod tests {
         let ctx = piano_init(48_000.0);
         assert!(!ctx.is_null());
 
-        // Valid voicing update
-        assert_eq!(piano_set_voicing(ctx, 0.8, 1.5, 1.2, 0.95), 0);
+        // Valid voicing update (including A4 = 442.0 Hz)
+        assert_eq!(piano_set_voicing(ctx, 0.8, 1.5, 1.2, 0.95, 442.0), 0);
 
         // Non-finite and extreme values clamped safely without panicking
         assert_eq!(
-            piano_set_voicing(ctx, f32::NAN, f32::INFINITY, -10.0, 50.0),
+            piano_set_voicing(ctx, f32::NAN, f32::INFINITY, -10.0, 50.0, f32::NAN),
             0
         );
 
@@ -120,7 +120,7 @@ mod tests {
 
         // Null safety
         assert_eq!(
-            piano_set_voicing(core::ptr::null_mut(), 0.5, 1.0, 1.0, 1.0),
+            piano_set_voicing(core::ptr::null_mut(), 0.5, 1.0, 1.0, 1.0, 440.0),
             -1
         );
         assert_eq!(piano_set_space(core::ptr::null_mut(), 0, 0), -1);
@@ -145,14 +145,14 @@ mod tests {
         unsafe { slice::from_raw_parts_mut(st_sp, sp_len) }.copy_from_slice(sp_src);
         assert_eq!(piano_apply_space_blob(ctx, 2, 1, sp_len), 0);
 
-        let vc_len = piano_prep_voicing(prep, 0.72, 1.8, 1.3, 0.94);
+        let vc_len = piano_prep_voicing(prep, 0.72, 1.8, 1.3, 0.94, 442.0);
         assert!(vc_len > 10_000);
         let vc_src = unsafe { slice::from_raw_parts(piano_prep_out_ptr(prep), vc_len) };
         let st_vc = piano_staging_ptr(ctx, vc_len);
         assert!(!st_vc.is_null());
         unsafe { slice::from_raw_parts_mut(st_vc, vc_len) }.copy_from_slice(vc_src);
         assert_eq!(
-            piano_apply_voicing_blob(ctx, 0.72, 1.8, 1.3, 0.94, vc_len),
+            piano_apply_voicing_blob(ctx, 0.72, 1.8, 1.3, 0.94, 442.0, vc_len),
             0
         );
         assert_eq!(piano_set_hammer_hardness(ctx, 0.4), 0);
@@ -162,7 +162,10 @@ mod tests {
         assert!(out_l.iter().all(|x| x.is_finite()) && out_l.iter().any(|&x| x.abs() > 1e-4));
 
         assert_eq!(piano_apply_space_blob(ctx, 2, 1, 0), -3);
-        assert_eq!(piano_apply_voicing_blob(ctx, 0.72, 1.8, 1.3, 0.94, 0), -3);
+        assert_eq!(
+            piano_apply_voicing_blob(ctx, 0.72, 1.8, 1.3, 0.94, 442.0, 0),
+            -3
+        );
         piano_prep_destroy(prep);
         piano_destroy(ctx);
     }

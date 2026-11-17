@@ -75,15 +75,9 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
   private prepPort: MessagePort | null = null;
   private lastSpaceSeq = -1;
   private lastVoicingSeq = -1;
-  private pendingSpace: { persp: number; lid: number; src: Float32Array; off: number } | null =
-    null;
+  private pendingSpace: { persp: number; lid: number; src: Float32Array; off: number } | null = null;
   private pendingVoicing: {
-    hammer: number;
-    detune: number;
-    stretch: number;
-    scale: number;
-    src: Float32Array;
-    off: number;
+    hammer: number; detune: number; stretch: number; scale: number; a4: number; src: Float32Array; off: number;
   } | null = null;
   private pending: WorkletInboundMessage[] = [];
 
@@ -167,6 +161,7 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
         detune: msg.unisonDetune,
         stretch: msg.stretchTuning,
         scale: msg.stringLengthScale,
+        a4: msg.a4FreqHz,
         src: new Float32Array(msg.blob),
         off: 0,
       };
@@ -208,14 +203,7 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       mem.set(b.src.subarray(b.off, b.off + n), ptr >>> 2);
       b.off += n;
       if (b.off >= b.src.length) {
-        exports.piano_apply_voicing_blob(
-          ctx,
-          b.hammer,
-          b.detune,
-          b.stretch,
-          b.scale,
-          b.src.length,
-        );
+        exports.piano_apply_voicing_blob(ctx, b.hammer, b.detune, b.stretch, b.scale, b.a4, b.src.length);
         this.pendingVoicing = null;
       }
     }
@@ -344,6 +332,7 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
           clamp(msg.unisonDetune, 0.0, 4.0, 1.0),
           clamp(msg.stretchTuning, 0.0, 2.0, 1.0),
           clamp(msg.stringLengthScale, 0.5, 2.0, 1.0),
+          clamp(msg.a4FreqHz, 415.0, 466.0, 440.0),
         );
         break;
       case 'setSpace':
@@ -466,12 +455,12 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
     if (!prep) return;
     try {
       for (const [h, d] of [[0.501, 1.01], [0.5, 1.0]]) {
-        const vcLen = p.piano_prep_voicing(prep, h, d, 1.0, 1.0) >>> 0;
+        const vcLen = p.piano_prep_voicing(prep, h, d, 1.0, 1.0, 440.0) >>> 0;
         const src = p.piano_prep_out_ptr(prep) >>> 0;
         const mem = this.syncMemoryView(128);
         const dst = exports.piano_staging_offset_ptr(ctx, 0, vcLen) >>> 0;
         if (dst) mem.set(mem.subarray(src >>> 2, (src >>> 2) + vcLen), dst >>> 2);
-        exports.piano_apply_voicing_blob(ctx, h, d, 1.0, 1.0, vcLen);
+        exports.piano_apply_voicing_blob(ctx, h, d, 1.0, 1.0, 440.0, vcLen);
       }
       const spLen = p.piano_prep_space(prep, 0, 2) >>> 0;
       const spSrc = p.piano_prep_out_ptr(prep) >>> 0;

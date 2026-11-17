@@ -132,8 +132,8 @@ export class AppShell {
             <button id="btn-unlock" data-testid="unlock-audio" type="button" class="btn btn-primary">
               Unlock Audio
             </button>
-            <button id="btn-a4-trigger" data-testid="trigger-a4" type="button" class="btn btn-accent">
-              A4 = 440 Hz
+            <button id="btn-a4-trigger" data-testid="trigger-a4" type="button" class="btn btn-accent val-mono">
+              A4 = 440.0 Hz
             </button>
             <button id="btn-panic" data-testid="panic-btn" type="button" class="btn btn-ghost">
               All Notes Off
@@ -202,6 +202,10 @@ export class AppShell {
     this.errorBannerEl = this.root.querySelector('#error-banner')!;
   }
 
+  private updateA4ButtonLabel(a4FreqHz: number): void {
+    this.a4Btn.textContent = `A4 = ${a4FreqHz.toFixed(1)} Hz`;
+  }
+
   private bindComponents(): void {
     // Telemetry HUD PerfMeter
     const hudContainer = this.root.querySelector<HTMLElement>('#hud-mount')!;
@@ -227,11 +231,13 @@ export class AppShell {
     this.voicingPanel = new VoicingPanel(voicingContainer, (st: VoicingState) => {
       this.ensureUnlocked();
       this.presetBar?.setCustom();
+      this.updateA4ButtonLabel(st.a4FreqHz);
       this.host.setVoicing(
         st.hammerHardness,
         st.unisonDetune,
         st.stretchTuning,
         st.stringLengthScale,
+        st.a4FreqHz,
       );
     });
 
@@ -249,12 +255,14 @@ export class AppShell {
       onSelectPreset: (preset) => {
         this.ensureUnlocked();
         this.voicingPanel.setState(preset.voicing);
+        this.updateA4ButtonLabel(preset.voicing.a4FreqHz);
         this.spacePanel.setSpace(preset.space.perspective, preset.space.lidState);
         this.host.setVoicing(
           preset.voicing.hammerHardness,
           preset.voicing.unisonDetune,
           preset.voicing.stretchTuning,
           preset.voicing.stringLengthScale,
+          preset.voicing.a4FreqHz,
         );
         this.host.setSpace(preset.space.perspective, preset.space.lidState);
       },

@@ -364,6 +364,81 @@
   accent-color: var(--accent);
 }
 
+.control-row-a4 {
+  grid-column: 1 / -1;
+  padding-bottom: 10px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--panel-border);
+  gap: 8px;
+}
+
+.a4-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.a4-input-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.a4-number-input {
+  width: 78px;
+  background: var(--panel-card);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  text-align: right;
+  outline: none;
+}
+
+.a4-number-input:focus {
+  border-color: var(--accent);
+}
+
+.a4-unit {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.a4-chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.btn-a4-chip {
+  appearance: none;
+  background: var(--panel-card);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-a4-chip:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.btn-a4-chip.active,
+.btn-a4-chip[aria-pressed='true'] {
+  background: rgba(220, 163, 77, 0.2);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
 .space-controls {
   display: flex;
   flex-direction: column;

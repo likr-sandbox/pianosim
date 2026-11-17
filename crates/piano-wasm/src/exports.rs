@@ -135,7 +135,7 @@ pub extern "C" fn piano_telemetry_ptr(ctx: *const WasmContext) -> *const f32 {
     ctx.telemetry_ptr()
 }
 
-/// Sets voicing parameters with 20 ms exponential smoothing.
+/// Sets voicing parameters (including `A4` concert pitch in Hz) with 20 ms exponential smoothing.
 ///
 /// Returns 0 on success, or -1 if ctx is null.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -146,13 +146,20 @@ pub extern "C" fn piano_set_voicing(
     unison_detune: f32,
     stretch: f32,
     length_scale: f32,
+    a4_freq_hz: f32,
 ) -> i32 {
     if ctx.is_null() {
         return -1;
     }
     // SAFETY: `ctx` is a valid non-null pointer from `piano_init`.
     let ctx = unsafe { &mut *ctx };
-    ctx.set_voicing(hammer_hardness, unison_detune, stretch, length_scale);
+    ctx.set_voicing(
+        hammer_hardness,
+        unison_detune,
+        stretch,
+        length_scale,
+        a4_freq_hz,
+    );
     0
 }
 
@@ -339,6 +346,7 @@ pub extern "C" fn piano_apply_voicing_blob(
     unison_detune: f32,
     stretch: f32,
     length_scale: f32,
+    a4_freq_hz: f32,
     len_f32: usize,
 ) -> i32 {
     if ctx.is_null() {
@@ -351,6 +359,7 @@ pub extern "C" fn piano_apply_voicing_blob(
         unison_detune,
         stretch,
         length_scale,
+        a4_freq_hz,
         len_f32,
     ) {
         0
@@ -407,12 +416,19 @@ pub extern "C" fn piano_prep_voicing(
     unison_detune: f32,
     stretch: f32,
     length_scale: f32,
+    a4_freq_hz: f32,
 ) -> usize {
     if prep.is_null() {
         return 0;
     }
     // SAFETY: `prep` is a valid non-null pointer from `piano_prep_init`.
-    unsafe { &mut *prep }.prepare_voicing(hammer_hardness, unison_detune, stretch, length_scale)
+    unsafe { &mut *prep }.prepare_voicing(
+        hammer_hardness,
+        unison_detune,
+        stretch,
+        length_scale,
+        a4_freq_hz,
+    )
 }
 
 /// Returns pointer to the most recently prepared blob in [`PrepContext`] linear memory.
