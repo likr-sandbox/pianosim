@@ -52,7 +52,7 @@ export function createBeethovenMoonlight(): ParsedSmf {
     },
     // M6: G# dominant 7th tension
     {
-      bass: [20, 32], // G#0, G#1
+      bass: [32, 44], // G#1, G#2
       trips: [56, 59, 62], // G#3, B3, D4
       melody: [
         { beat: 0.0, key: 64, dur: 2.0, vel: 84 }, // E4
