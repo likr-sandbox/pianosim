@@ -3,7 +3,7 @@
 
 use piano_spec::{u16_to_unit_f32, PedalKind, CHOIR_LAYOUTS, DAMPED_KEYS, NUM_KEYS};
 
-use crate::math::exp_f64;
+use crate::math::{exp_f64, sin_cos_f64};
 
 /// Full open damper clearance (`+5.0 mm`) when key held, sustain=1.0, or undamped key.
 pub const CLEARANCE_OPEN_M: f32 = 5.0e-3;
@@ -23,6 +23,10 @@ const HALF_PEDAL_HIGH: f32 = 0.65;
 const HALF_PEDAL_MID_CLEARANCE_M: f32 = 3.2e-5;
 const HALF_PEDAL_HI_CLEARANCE_M: f32 = 6.4e-5;
 const SETTLE_EPS_M: f32 = 1.0e-7;
+const PEEL_PULSE_DURATION_S: f64 = 2.0e-3;
+const PEEL_MIN_PEAK_N: f32 = 5.0e-4;
+const PEEL_MAX_PEAK_N: f32 = 2.0e-3;
+const PEEL_ARM_CLEARANCE_M: f32 = -1.0e-5;
 
 /// Continuous 3-pedal controller and per-key damper clearance smoother.
 #[derive(Clone, Debug)]
@@ -39,6 +43,13 @@ pub struct PedalBank {
     alpha_lift: f32,
     alpha_down_slow: f32,
     alpha_down_fast: f32,
+    peel_len: u16,
+    peel_played: [bool; DAMPED_KEYS],
+    peel_armed: [bool; DAMPED_KEYS],
+    peel_min_clear_m: [f32; DAMPED_KEYS],
+    peel_pos: [u16; DAMPED_KEYS],
+    peel_peak_n: [f32; DAMPED_KEYS],
+    last_peel_n: [f32; DAMPED_KEYS],
 }
 
 impl PedalBank {
@@ -50,6 +61,7 @@ impl PedalBank {
         let alpha_down_slow = (1.0 - exp_f64(-1.0 / (DROP_TAU_SLOW_S * sr))) as f32;
         let alpha_down_fast = (1.0 - exp_f64(-1.0 / (DROP_TAU_FAST_S * sr))) as f32;
         let default_alpha_down = 0.5 * (alpha_down_slow + alpha_down_fast);
+        let peel_len = (((PEEL_PULSE_DURATION_S * sr) + 0.5).clamp(9.0, 1025.0) as u16) | 1;
 
         Self {
             sustain: 0.0,
@@ -64,6 +76,13 @@ impl PedalBank {
             alpha_lift,
             alpha_down_slow,
             alpha_down_fast,
+            peel_len,
+            peel_played: [false; DAMPED_KEYS],
+            peel_armed: [false; DAMPED_KEYS],
+            peel_min_clear_m: [0.0; DAMPED_KEYS],
+            peel_pos: [peel_len; DAMPED_KEYS],
+            peel_peak_n: [0.0; DAMPED_KEYS],
+            last_peel_n: [0.0; DAMPED_KEYS],
         }
     }
 
@@ -79,11 +98,16 @@ impl PedalBank {
         self.release_preload_m.fill(CLEARANCE_PRELOAD_M);
         let default_alpha_down = 0.5 * (self.alpha_down_slow + self.alpha_down_fast);
         self.alpha_down.fill(default_alpha_down);
+        self.peel_played.fill(false);
+        self.peel_armed.fill(false);
+        self.peel_min_clear_m.fill(0.0);
+        self.peel_pos.fill(self.peel_len);
+        self.peel_peak_n.fill(0.0);
+        self.last_peel_n.fill(0.0);
     }
 
-    /// Lifts the key's damper to full open clearance (`+5.0 mm`) on key strike.
     #[inline]
-    pub fn note_on(&mut self, key_idx: usize) {
+    fn note_on_internal(&mut self, key_idx: usize, audible: bool) {
         if key_idx >= NUM_KEYS {
             return;
         }
@@ -91,7 +115,26 @@ impl PedalBank {
         if key_idx < DAMPED_KEYS {
             self.clearance_m[key_idx] = CLEARANCE_OPEN_M;
             self.settling[key_idx] = false;
+            if audible {
+                self.peel_played[key_idx] = true;
+            }
+            self.peel_armed[key_idx] = false;
+            self.peel_min_clear_m[key_idx] = 0.0;
+            self.peel_pos[key_idx] = self.peel_len;
+            self.last_peel_n[key_idx] = 0.0;
         }
+    }
+
+    /// Lifts the key's damper to full open clearance (`+5.0 mm`) on key strike.
+    #[inline]
+    pub fn note_on(&mut self, key_idx: usize) {
+        self.note_on_internal(key_idx, true);
+    }
+
+    /// Lifts the key's damper on a sub-escapement silent key press without arming peel-off.
+    #[inline]
+    pub(crate) fn note_on_silent(&mut self, key_idx: usize) {
+        self.note_on_internal(key_idx, false);
     }
 
     /// Releases the key, setting target preload and drop speed from `release_vel_u16`.
@@ -184,24 +227,43 @@ impl PedalBank {
         }
     }
 
-    /// Advances the 1-pole damper rail smoother across an 8-sample tile (`n = t_len.min(8)`),
-    /// storing per-sample clearances into `out_clears[..n]` and returning the tile minimum.
+    /// Instantaneous damper peel-off adhesion force (`N`, `>= 0`) for `key_idx`
+    /// produced by the most recent clearance step.
+    #[must_use]
     #[inline]
-    pub fn step_key_clearance_tile(
+    pub fn damper_peel_force_n(&self, key_idx: usize) -> f32 {
+        self.last_peel_n.get(key_idx).copied().unwrap_or(0.0)
+    }
+
+    /// Advances the 1-pole damper rail smoother across an 8-sample tile (`n = t_len.min(8)`),
+    /// storing per-sample clearances into `out_clears[..n]` and per-sample peel-off adhesion
+    /// forces (`N`) into `out_peel_n[..n]`. Returns `(min_clear_m, any_peel_nonzero)`.
+    #[inline]
+    pub fn step_key_clearance_tile_with_peel(
         &mut self,
         key_idx: usize,
         t_len: usize,
         out_clears: &mut [f32; 8],
-    ) -> f32 {
+        out_peel_n: &mut [f32; 8],
+    ) -> (f32, bool) {
         let n = t_len.min(8);
         if key_idx >= DAMPED_KEYS {
             out_clears[..n].fill(CLEARANCE_OPEN_M);
-            return CLEARANCE_OPEN_M;
+            out_peel_n[..n].fill(0.0);
+            return (CLEARANCE_OPEN_M, false);
         }
-        if !self.settling[key_idx] || n == 0 {
+        if n == 0 {
+            return (self.clearance_m[key_idx], false);
+        }
+        let peel_active = self.peel_pos[key_idx] < self.peel_len;
+        if !self.settling[key_idx] && !peel_active {
             let cur = self.clearance_m[key_idx];
             out_clears[..n].fill(cur);
-            return cur;
+            out_peel_n[..n].fill(0.0);
+            if self.last_peel_n[key_idx] != 0.0 {
+                self.last_peel_n[key_idx] = 0.0;
+            }
+            return (cur, false);
         }
 
         let target = if self.key_down[key_idx] || self.sostenuto_latched[key_idx] {
@@ -217,8 +279,11 @@ impl PedalBank {
         };
 
         let mut min_clear = f32::INFINITY;
-        let mut settled = false;
-        for slot in &mut out_clears[..n] {
+        let mut settled = !self.settling[key_idx];
+        let mut any_peel = false;
+        let mut last_peel = 0.0_f32;
+        for i in 0..n {
+            let prev = cur;
             if settled || (target - cur).abs() < SETTLE_EPS_M {
                 cur = target;
                 settled = true;
@@ -229,14 +294,76 @@ impl PedalBank {
                     settled = true;
                 }
             }
-            *slot = cur;
+            out_clears[i] = cur;
             min_clear = min_clear.min(cur);
+
+            if self.peel_played[key_idx] && cur <= PEEL_ARM_CLEARANCE_M {
+                self.peel_armed[key_idx] = true;
+                self.peel_min_clear_m[key_idx] = self.peel_min_clear_m[key_idx].min(cur);
+            } else if self.peel_armed[key_idx] && prev < 0.0 && cur >= 0.0 {
+                let x = (key_idx as f32) / ((DAMPED_KEYS - 1) as f32);
+                let depth =
+                    (-self.peel_min_clear_m[key_idx] / (-CLEARANCE_PRELOAD_M)).clamp(0.25, 1.0);
+                let peak = PEEL_MIN_PEAK_N
+                    + (PEEL_MAX_PEAK_N - PEEL_MIN_PEAK_N)
+                        * (0.30 + 0.70 * (1.0 - x))
+                        * (0.55 + 0.45 * depth);
+                self.peel_peak_n[key_idx] = peak.clamp(PEEL_MIN_PEAK_N, PEEL_MAX_PEAK_N);
+                self.peel_pos[key_idx] = 0;
+                self.peel_armed[key_idx] = false;
+                self.peel_min_clear_m[key_idx] = 0.0;
+            }
+
+            let f_peel = if self.peel_pos[key_idx] < self.peel_len {
+                let u = (f64::from(self.peel_pos[key_idx]) + 0.5) / f64::from(self.peel_len);
+                let (_, cos_tau) = sin_cos_f64(core::f64::consts::TAU * u);
+                let c = 0.5 * (1.0 - cos_tau);
+                let f = self.peel_peak_n[key_idx] * ((c * c) as f32);
+                self.peel_pos[key_idx] += 1;
+                any_peel |= f != 0.0;
+                f
+            } else {
+                0.0
+            };
+            out_peel_n[i] = f_peel;
+            last_peel = f_peel;
         }
         self.clearance_m[key_idx] = cur;
+        self.last_peel_n[key_idx] = last_peel;
         if settled {
             self.settling[key_idx] = false;
         }
-        min_clear
+        (min_clear, any_peel)
+    }
+
+    /// Advances the 1-pole damper rail smoother across an 8-sample tile (`n = t_len.min(8)`),
+    /// storing per-sample clearances into `out_clears[..n]` and returning the tile minimum.
+    #[inline]
+    pub fn step_key_clearance_tile(
+        &mut self,
+        key_idx: usize,
+        t_len: usize,
+        out_clears: &mut [f32; 8],
+    ) -> f32 {
+        let n = t_len.min(8);
+        if key_idx >= DAMPED_KEYS {
+            out_clears[..n].fill(CLEARANCE_OPEN_M);
+            return CLEARANCE_OPEN_M;
+        }
+        if n == 0 {
+            return self.clearance_m[key_idx];
+        }
+        if !self.settling[key_idx] && self.peel_pos[key_idx] >= self.peel_len {
+            let cur = self.clearance_m[key_idx];
+            out_clears[..n].fill(cur);
+            if self.last_peel_n[key_idx] != 0.0 {
+                self.last_peel_n[key_idx] = 0.0;
+            }
+            return cur;
+        }
+        let mut tmp_peel = [0.0_f32; 8];
+        self.step_key_clearance_tile_with_peel(key_idx, t_len, out_clears, &mut tmp_peel)
+            .0
     }
 
     /// Advances the 1-pole damper rail smoother for `key_idx` by one host sample.

@@ -166,3 +166,86 @@ fn una_corda_felt_mod_softens_stiffness_and_raises_hysteresis() {
     assert!((prev_k[1] - 0.25).abs() < 1e-6 && (prev_eps[1] - 0.12).abs() < 1e-6);
     assert!((prev_k[2] - 0.28).abs() < 1e-6 && (prev_eps[2] - 0.12).abs() < 1e-6);
 }
+
+#[test]
+fn damper_peel_off_fires_smooth_0p5_to_2mn_only_for_played_damped_keys() {
+    let mut p = PedalBank::new(48_000.0);
+
+    // 1. Bare Sustain pump on untouched virgin keys must emit zero peel-off pulse.
+    p.set_pedal(PedalKind::Sustain, u16::MAX);
+    let mut clears = [0.0_f32; 8];
+    let mut peels = [0.0_f32; 8];
+    for k in 0..DAMPED_KEYS {
+        for _ in 0..600 {
+            let (_, any_p) = p.step_key_clearance_tile_with_peel(k, 8, &mut clears, &mut peels);
+            assert!(!any_p, "virgin key {k} emitted spurious peel pulse");
+            assert_eq!(p.damper_peel_force_n(k), 0.0);
+        }
+    }
+
+    // 2. Play keys (bass k=0, tenor k=39, high damped k=69), release & seat dampers, then lift Sustain.
+    p.set_pedal(PedalKind::Sustain, 0);
+    for k in 0..DAMPED_KEYS {
+        for _ in 0..600 {
+            let _ = p.step_key_clearance_tile(k, 8, &mut clears);
+        }
+    }
+    for &k in &[0_usize, 39, 69] {
+        p.note_on(k);
+        p.note_off(k, 40_000);
+        for _ in 0..800 {
+            let (_, any_p) = p.step_key_clearance_tile_with_peel(k, 8, &mut clears, &mut peels);
+            assert!(!any_p, "downward damper drop should not peel on key {k}");
+        }
+        assert!(p.damper_clearance_m(k) < -1.0e-4);
+    }
+
+    p.set_pedal(PedalKind::Sustain, u16::MAX);
+    let mut peaks = [0.0_f32; 3];
+    for (idx, &k) in [0_usize, 39, 69].iter().enumerate() {
+        let mut trace = Vec::new();
+        for _ in 0..400 {
+            let (_, _) = p.step_key_clearance_tile_with_peel(k, 8, &mut clears, &mut peels);
+            trace.extend_from_slice(&peels);
+        }
+        let peak = trace.iter().copied().fold(0.0_f32, f32::max);
+        assert!(
+            (5.0e-4..=2.0e-3).contains(&peak),
+            "key {k} peel peak {peak} N out of [0.5 mN, 2.0 mN]"
+        );
+        assert_eq!(trace[0], 0.0);
+        assert_eq!(*trace.last().unwrap(), 0.0);
+        let max_jump = trace
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_jump < peak * 0.1,
+            "peel pulse not smooth: jump={max_jump}"
+        );
+        peaks[idx] = peak;
+    }
+    assert!(
+        peaks[0] > peaks[1] && peaks[1] > peaks[2],
+        "peaks={peaks:?}"
+    );
+
+    // Untouched neighbor k=38 still produces zero peel-off during the same Sustain lift.
+    for _ in 0..400 {
+        let (_, any_p) = p.step_key_clearance_tile_with_peel(38, 8, &mut clears, &mut peels);
+        assert!(!any_p);
+    }
+
+    // 3. Reset clears played/armed state.
+    p.note_on(24);
+    p.note_off(24, 40_000);
+    for _ in 0..800 {
+        let _ = p.step_key_clearance_tile(24, 8, &mut clears);
+    }
+    p.reset();
+    p.set_pedal(PedalKind::Sustain, u16::MAX);
+    for _ in 0..400 {
+        let (_, any_p) = p.step_key_clearance_tile_with_peel(24, 8, &mut clears, &mut peels);
+        assert!(!any_p);
+    }
+}

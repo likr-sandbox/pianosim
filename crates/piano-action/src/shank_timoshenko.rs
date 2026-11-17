@@ -16,7 +16,7 @@ pub const BACKCHECK_CATCH_Y_M: f32 = -6.0e-5;
 /// Maximum hammer-active safety window (`12 ms`).
 pub const HAMMER_TIMEOUT_S: f64 = 0.012;
 
-const SILENT_KEY_MAX_U16: u16 = 64;
+pub(crate) const SILENT_KEY_MAX_U16: u16 = 64;
 const SILENT_KEY_V_MIN_MPS: f32 = 0.004;
 const SILENT_KEY_V_MAX_MPS: f32 = 0.015;
 const PP_ANCHOR_U16: u16 = 516; // piano_spec::u7_to_u16(1)

@@ -147,3 +147,32 @@ fn sostenuto_una_corda_and_bounds_safety() {
     assert_eq!(bank.step_hammer_sample(999, 0.0, 0.0, 0.0), 0.0);
     assert_eq!(bank.step_damper_sample(999, 999, 0.1, 0.1, 0.1, -3e-4), 0.0);
 }
+
+#[test]
+fn action_bank_silent_note_does_not_arm_peel_and_note_off_drives_zone8() {
+    let voicing = VoicingSpec::default();
+    let mut bank = ActionBank::new(48_000.0, &voicing);
+
+    // Sub-escapement silent press + release + Sustain must not arm peel-off.
+    bank.note_on(39, 16);
+    bank.note_off(39, 32_768);
+    let mut clears = [0.0_f32; 8];
+    let mut peels = [0.0_f32; 8];
+    for _ in 0..800 {
+        let _ = bank.step_key_clearance_tile(39, 8, &mut clears);
+    }
+    bank.set_pedal(PedalKind::Sustain, u16::MAX);
+    for _ in 0..400 {
+        let (_, any_p) = bank.step_key_clearance_tile_with_peel(39, 8, &mut clears, &mut peels);
+        assert!(!any_p);
+    }
+
+    // NoteOff triggers Zone 8 keybed release shock via ActionBank.
+    bank.reset();
+    bank.note_off(48, 48_000);
+    let peak_kb = (0..1_200).fold(0.0_f32, |m, _| m.max(bank.step_keybed_force_sample()));
+    assert!(
+        peak_kb > 0.05,
+        "expected NoteOff Zone 8 release shock, got {peak_kb}"
+    );
+}

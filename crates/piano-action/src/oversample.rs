@@ -114,13 +114,13 @@ impl HammerOversampleState {
         self.tail_samples_left = 0;
     }
 
-    /// Launches a new strike at `v_h0` (`m/s`), resetting ADAA phase tracking.
+    /// Launches a new strike at `v_h0` (`m/s`), resetting ADAA phase tracking
+    /// while preserving 16-tap polyphase FIR history across rapid re-strikes.
     #[inline]
     pub fn launch(&mut self, v_h0: f32) {
         self.shank.launch(v_h0);
         self.adaa_state.reset();
         self.delta_prev_m = HAMMER_LET_OFF_Y0_M;
-        self.prev_sub_forces = [0.0; OVERSAMPLE_FACTOR];
         self.tail_samples_left = 0;
     }
 
@@ -282,5 +282,25 @@ mod tests {
         let t1 = fir.process_8(&mut prev, &zeros);
         assert!(t0 > 0.0);
         assert_eq!(t1, 0.0);
+    }
+
+    #[test]
+    fn rapid_restrike_launch_preserves_fir_history_while_reset_clears_it() {
+        let fir = DecimationFir16::new();
+        let mut st = HammerOversampleState::default();
+        st.prev_sub_forces = [2.5; OVERSAMPLE_FACTOR];
+        st.launch(1.8);
+        assert_eq!(st.prev_sub_forces, [2.5; OVERSAMPLE_FACTOR]);
+
+        // Next host step with zero new sub-forces drains the preserved FIR tail smoothly.
+        let drained = fir.process_8(&mut st.prev_sub_forces, &[0.0; OVERSAMPLE_FACTOR]);
+        assert!(
+            drained > 0.0,
+            "expected continuous FIR tail drain, got {drained}"
+        );
+
+        st.prev_sub_forces = [2.5; OVERSAMPLE_FACTOR];
+        st.reset();
+        assert_eq!(st.prev_sub_forces, [0.0; OVERSAMPLE_FACTOR]);
     }
 }

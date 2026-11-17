@@ -16,6 +16,10 @@ const KEYBED_TRAVEL_REF_M: f64 = 2.0e-3;
 const KEY_HAMMER_LEVER_RATIO: f64 = 0.22;
 const KEYBED_BASE_PEAK_N: f64 = 8.0;
 const KEYBED_VEL_EXPONENT: f64 = 1.8;
+const KEYBED_RELEASE_MIN_DELAY_S: f64 = 4.0e-3;
+const KEYBED_RELEASE_MAX_DELAY_S: f64 = 14.0e-3;
+const KEYBED_RELEASE_TRAVEL_REF_M: f64 = 1.6e-3;
+const KEYBED_RELEASE_BASE_PEAK_N: f64 = 2.4;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct KeybedSlot {
@@ -25,6 +29,41 @@ struct KeybedSlot {
     peak_force_n: f32,
 }
 
+#[inline]
+fn step_slot_bank(mask: &mut u128, slots: &mut [KeybedSlot; NUM_KEYS]) -> f32 {
+    let mut pending = *mask;
+    if pending == 0 {
+        return 0.0;
+    }
+    let mut total_force_n = 0.0_f32;
+    while pending != 0 {
+        let k = pending.trailing_zeros() as usize;
+        pending &= pending - 1;
+        let bit = 1_u128 << (k & 127);
+        let Some(slot) = slots.get_mut(k) else {
+            *mask &= !bit;
+            continue;
+        };
+        if slot.delay_rem > 0 {
+            slot.delay_rem -= 1;
+            continue;
+        }
+        if slot.pulse_pos < slot.pulse_len {
+            let u = (f64::from(slot.pulse_pos) + 0.5) / f64::from(slot.pulse_len);
+            let (_, cos_tau) = sin_cos_f64(core::f64::consts::TAU * u);
+            let c = 0.5 * (1.0 - cos_tau);
+            total_force_n += slot.peak_force_n * ((c * c) as f32);
+            slot.pulse_pos += 1;
+            if slot.pulse_pos >= slot.pulse_len {
+                *mask &= !bit;
+            }
+        } else {
+            *mask &= !bit;
+        }
+    }
+    total_force_n
+}
+
 /// 88-key mechanical keybed impact pulse bank with O(1) idle bitmask dispatch.
 #[derive(Clone, Debug)]
 pub(crate) struct KeybedBank {
@@ -32,6 +71,8 @@ pub(crate) struct KeybedBank {
     pulse_len: u32,
     active_mask: u128,
     keys: [KeybedSlot; NUM_KEYS],
+    release_mask: u128,
+    release_keys: [KeybedSlot; NUM_KEYS],
 }
 
 impl KeybedBank {
@@ -45,6 +86,8 @@ impl KeybedBank {
             pulse_len,
             active_mask: 0,
             keys: [KeybedSlot::default(); NUM_KEYS],
+            release_mask: 0,
+            release_keys: [KeybedSlot::default(); NUM_KEYS],
         }
     }
 
@@ -52,6 +95,8 @@ impl KeybedBank {
     pub(crate) fn reset(&mut self) {
         self.active_mask = 0;
         self.keys = [KeybedSlot::default(); NUM_KEYS];
+        self.release_mask = 0;
+        self.release_keys = [KeybedSlot::default(); NUM_KEYS];
     }
 
     /// Schedules a keybed bottoming pulse for audible `NoteOn` strikes (`>= u7_to_u16(1)`).
@@ -79,45 +124,45 @@ impl KeybedBank {
         }
     }
 
-    /// Advances active keybed pulses by one host sample and returns total Zone 8 force (`N`).
+    /// Schedules a key-return upper-rail shock pulse for `NoteOff` (`>= u7_to_u16(1)`)
+    /// using dedicated release slots so pending down-stroke bottoming delays are preserved.
+    pub(crate) fn note_off(&mut self, key_idx: usize, release_vel_u16: u16) {
+        if key_idx >= NUM_KEYS || release_vel_u16 < u7_to_u16(1) {
+            return;
+        }
+        let v_key =
+            (f64::from(velocity_from_u16(release_vel_u16)) * KEY_HAMMER_LEVER_RATIO).max(1e-4);
+        let t_delay = (KEYBED_RELEASE_TRAVEL_REF_M / v_key)
+            .clamp(KEYBED_RELEASE_MIN_DELAY_S, KEYBED_RELEASE_MAX_DELAY_S);
+        let delay_rem = ((t_delay * self.sample_rate) + 0.999_999) as u32;
+
+        let vel_norm = f64::from(u16_to_unit_f32(release_vel_u16)).clamp(0.0, 1.0);
+        let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
+        let register_weight = 0.55 + 0.70 * x;
+        let peak_force_n = (KEYBED_RELEASE_BASE_PEAK_N
+            * pow_nonneg_f64(vel_norm, KEYBED_VEL_EXPONENT)
+            * register_weight) as f32;
+
+        if let Some(slot) = self.release_keys.get_mut(key_idx) {
+            slot.delay_rem = delay_rem;
+            slot.pulse_pos = 0;
+            slot.pulse_len = self.pulse_len;
+            slot.peak_force_n = peak_force_n;
+            self.release_mask |= 1_u128 << (key_idx & 127);
+        }
+    }
+
+    /// Advances active down-stroke and release keybed pulses by one host sample,
+    /// returning total Zone 8 force (`N`).
     #[inline]
     pub(crate) fn step_sample(&mut self) -> f32 {
-        let mut pending = self.active_mask;
-        if pending == 0 {
-            return 0.0;
-        }
-        let mut total_force_n = 0.0_f32;
-        while pending != 0 {
-            let k = pending.trailing_zeros() as usize;
-            pending &= pending - 1;
-            let bit = 1_u128 << (k & 127);
-            let Some(slot) = self.keys.get_mut(k) else {
-                self.active_mask &= !bit;
-                continue;
-            };
-            if slot.delay_rem > 0 {
-                slot.delay_rem -= 1;
-                continue;
-            }
-            if slot.pulse_pos < slot.pulse_len {
-                let u = (f64::from(slot.pulse_pos) + 0.5) / f64::from(slot.pulse_len);
-                let (_, cos_tau) = sin_cos_f64(core::f64::consts::TAU * u);
-                let c = 0.5 * (1.0 - cos_tau);
-                total_force_n += slot.peak_force_n * ((c * c) as f32);
-                slot.pulse_pos += 1;
-                if slot.pulse_pos >= slot.pulse_len {
-                    self.active_mask &= !bit;
-                }
-            } else {
-                self.active_mask &= !bit;
-            }
-        }
-        total_force_n
+        step_slot_bank(&mut self.active_mask, &mut self.keys)
+            + step_slot_bank(&mut self.release_mask, &mut self.release_keys)
     }
 
     #[cfg(test)]
     pub(crate) fn is_active(&self) -> bool {
-        self.active_mask != 0
+        self.active_mask != 0 || self.release_mask != 0
     }
 }
 
@@ -237,5 +282,62 @@ mod tests {
             (0..n_frames).fold(0.0_f32, |m, _| m.max(b.step_sample()))
         };
         assert!(peak_of(75) > peak_of(5));
+    }
+
+    #[test]
+    fn keybed_note_off_preserves_pending_downstroke_and_is_monotonic() {
+        let sr = 48_000.0_f32;
+        let mut bank = KeybedBank::new(sr);
+        bank.note_off(48, 0);
+        bank.note_off(48, u7_to_u16(1) - 1);
+        bank.note_off(NUM_KEYS, u7_to_u16(80));
+        assert!(!bank.is_active());
+
+        // Staccato release (1 ms after NoteOn) must NOT overwrite pending NoteOn bottoming delay.
+        bank.note_on(48, u7_to_u16(100));
+        for _ in 0..48 {
+            assert_eq!(bank.step_sample(), 0.0);
+        }
+        bank.note_off(48, u7_to_u16(100));
+        let trace_both: Vec<f32> = (0..1_536).map(|_| bank.step_sample()).collect();
+        assert!(!bank.is_active());
+
+        let mut bank_on_only = KeybedBank::new(sr);
+        bank_on_only.note_on(48, u7_to_u16(100));
+        for _ in 0..48 {
+            let _ = bank_on_only.step_sample();
+        }
+        let trace_on_only: Vec<f32> = (0..1_536).map(|_| bank_on_only.step_sample()).collect();
+
+        let sum_both: f64 = trace_both.iter().map(|&x| f64::from(x)).sum();
+        let sum_on: f64 = trace_on_only.iter().map(|&x| f64::from(x)).sum();
+        assert!(
+            sum_both > sum_on * 1.10,
+            "staccato release shock lost or overwrote downstroke: both={sum_both}, on={sum_on}"
+        );
+        for (i, (&b, &o)) in trace_both.iter().zip(trace_on_only.iter()).enumerate() {
+            assert!(
+                b + 1e-6 >= o,
+                "release overwrote downstroke at sample {i}: {b} < {o}"
+            );
+        }
+
+        // Release shock alone is monotonic in release velocity and cleared on reset.
+        let mut prev_peak = 0.0_f32;
+        for &vel in &[u7_to_u16(1), u7_to_u16(64), u16::MAX] {
+            let mut b = KeybedBank::new(sr);
+            b.note_off(48, vel);
+            let pk = (0..1_536).fold(0.0_f32, |m, _| m.max(b.step_sample()));
+            assert!(
+                pk > prev_peak,
+                "vel={vel}: release peak {pk} <= {prev_peak}"
+            );
+            prev_peak = pk;
+        }
+        bank.note_off(48, u16::MAX);
+        assert!(bank.is_active());
+        bank.reset();
+        assert!(!bank.is_active());
+        assert_eq!(bank.step_sample(), 0.0);
     }
 }

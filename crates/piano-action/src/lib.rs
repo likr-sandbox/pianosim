@@ -36,7 +36,7 @@ use keybed::KeybedBank;
 use oversample::{DecimationFir16, HammerOversampleState};
 use p_grid::PGridLuts;
 use pedals::PedalBank;
-use shank_timoshenko::{velocity_from_u16, ShankParams};
+use shank_timoshenko::{velocity_from_u16, ShankParams, SILENT_KEY_MAX_U16};
 
 #[derive(Clone, Debug)]
 struct KeyActionSlot {
@@ -142,7 +142,11 @@ impl ActionBank {
             self.note_off(key_idx, 0);
             return;
         }
-        self.pedals.note_on(key_idx);
+        if velocity_u16 > SILENT_KEY_MAX_U16 {
+            self.pedals.note_on(key_idx);
+        } else {
+            self.pedals.note_on_silent(key_idx);
+        }
         self.keybed.note_on(key_idx, velocity_u16);
         let slot = &mut self.keys[key_idx];
         let target_h = self.hammer_voicing.hammer_hardness;
@@ -160,13 +164,14 @@ impl ActionBank {
         slot.hammer.launch(velocity_from_u16(velocity_u16));
     }
 
-    /// Releases `key_idx`, initiating damper drop at a rate scaled by `release_vel_u16`.
+    /// Releases `key_idx`, initiating damper drop and key-return Zone 8 shock scaled by `release_vel_u16`.
     #[inline]
     pub fn note_off(&mut self, key_idx: usize, release_vel_u16: u16) {
         if key_idx >= NUM_KEYS {
             return;
         }
         self.pedals.note_off(key_idx, release_vel_u16);
+        self.keybed.note_off(key_idx, release_vel_u16);
     }
 
     /// Updates continuous pedal position (`Sustain`, `UnaCorda`, `Sostenuto`).
@@ -228,6 +233,28 @@ impl ActionBank {
     #[inline]
     pub fn strike_weights(&self, key_idx: usize) -> [f32; 3] {
         self.pedals.strike_weights(key_idx)
+    }
+
+    /// Instantaneous damper peel-off adhesion force (`N`, `>= 0`) for `key_idx`.
+    #[must_use]
+    #[inline]
+    pub fn damper_peel_force_n(&self, key_idx: usize) -> f32 {
+        self.pedals.damper_peel_force_n(key_idx)
+    }
+
+    /// Advances the 1-pole damper rail smoother across an 8-sample tile (`n = t_len.min(8)`),
+    /// storing per-sample clearances into `out_clears[..n]` and peel-off adhesion forces (`N`)
+    /// into `out_peel_n[..n]`. Returns `(min_clear_m, any_peel_nonzero)`.
+    #[inline]
+    pub fn step_key_clearance_tile_with_peel(
+        &mut self,
+        key_idx: usize,
+        t_len: usize,
+        out_clears: &mut [f32; 8],
+        out_peel_n: &mut [f32; 8],
+    ) -> (f32, bool) {
+        self.pedals
+            .step_key_clearance_tile_with_peel(key_idx, t_len, out_clears, out_peel_n)
     }
 
     /// Advances the 1-pole damper rail smoother across an 8-sample tile (`n = t_len.min(8)`),
