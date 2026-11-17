@@ -20,7 +20,6 @@ const SILENT_KEY_MAX_U16: u16 = 64;
 const SILENT_KEY_V_MIN_MPS: f32 = 0.004;
 const SILENT_KEY_V_MAX_MPS: f32 = 0.015;
 const PP_ANCHOR_U16: u16 = 516; // piano_spec::u7_to_u16(1)
-const PP_ANCHOR_V_MPS: f32 = main_velocity_curve((PP_ANCHOR_U16 as f32) / 65_535.0);
 
 const MASS_A0_KG: f64 = 0.0112;
 const MASS_C8_KG: f64 = 0.0035;
@@ -246,17 +245,17 @@ impl ShankState {
 }
 
 #[inline]
-const fn main_velocity_curve(u: f32) -> f32 {
-    let u2 = u * u;
-    let u5 = u2 * u2 * u;
-    0.10 + 0.75 * u + 3.75 * u5
+fn main_velocity_curve(u: f32) -> f32 {
+    let uf = f64::from(u.clamp(0.0, 1.0));
+    (0.075 + 0.86 * uf + 3.665 * pow_nonneg_f64(uf, 2.15)) as f32
 }
 
 /// Maps 16-bit MIDI 2.0 velocity (`1..=65535`) strictly monotonically to hammer
 /// strike speed:
 /// - `1..=64`: sub-escapement silent-key range (`0.004..=0.015 m/s < v_esc`)
-/// - `516` (`u7_to_u16(1)`): `~0.106 m/s` (`pp` audible strike)
-/// - `51_602`: `~1.83 m/s` (`mf`), `65_535`: `4.60 m/s` (`fff`).
+/// - `516` (`u7_to_u16(1)`): `~0.082 m/s` (`pp` audible strike, `> v_esc = 0.0198 m/s`)
+/// - `33_025` (`u7_to_u16(64)`): `~1.35 m/s` (`mf`), `51_602` (`u7_to_u16(100)`): `~2.94 m/s`
+/// - `65_535` (`u7_to_u16(127)`): `4.60 m/s` (`fff`).
 #[must_use]
 #[inline]
 pub fn velocity_from_u16(velocity_u16: u16) -> f32 {
@@ -270,7 +269,8 @@ pub fn velocity_from_u16(velocity_u16: u16) -> f32 {
     if velocity_u16 < PP_ANCHOR_U16 {
         let t = f32::from(velocity_u16 - SILENT_KEY_MAX_U16)
             / f32::from(PP_ANCHOR_U16 - SILENT_KEY_MAX_U16);
-        return SILENT_KEY_V_MAX_MPS + (PP_ANCHOR_V_MPS - SILENT_KEY_V_MAX_MPS) * t;
+        let pp_v = main_velocity_curve((PP_ANCHOR_U16 as f32) / 65_535.0);
+        return SILENT_KEY_V_MAX_MPS + (pp_v - SILENT_KEY_V_MAX_MPS) * t;
     }
     main_velocity_curve(u16_to_unit_f32(velocity_u16))
 }

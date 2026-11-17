@@ -21,11 +21,14 @@ fn velocity_mapping_is_strictly_monotonic_and_hits_targets() {
     assert!((velocity_from_u16(SILENT_KEY_MAX_U16) - SILENT_KEY_V_MAX_MPS).abs() < 1e-6);
 
     let v_pp = velocity_from_u16(u7_to_u16(1));
-    let v_mf = velocity_from_u16(51_602);
+    let v_mid = velocity_from_u16(u7_to_u16(64));
+    let v_f = velocity_from_u16(u7_to_u16(100));
     let v_fff = velocity_from_u16(u16::MAX);
-    assert!((0.09..=0.11).contains(&v_pp), "pp={v_pp}");
-    assert!((1.70..=1.95).contains(&v_mf), "mf={v_mf}");
-    assert!((4.55..=4.65).contains(&v_fff), "fff={v_fff}");
+    assert!(v_pp > v_esc, "pp={v_pp} <= v_esc={v_esc}");
+    assert!((0.075..=0.090).contains(&v_pp), "pp={v_pp}");
+    assert!((1.30..=1.40).contains(&v_mid), "midi64={v_mid}");
+    assert!((2.85..=3.05).contains(&v_f), "midi100={v_f}");
+    assert!((4.59..=4.61).contains(&v_fff), "fff={v_fff}");
 }
 
 #[test]
