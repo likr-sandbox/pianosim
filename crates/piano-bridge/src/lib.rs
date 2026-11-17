@@ -21,7 +21,7 @@ mod duplex_tests;
 #[path = "bridge_tests.rs"]
 mod tests;
 
-use piano_spec::TOTAL_STRINGS;
+use piano_spec::{VoicingSpec, TOTAL_STRINGS};
 
 pub use admittance_ssm::{
     default_string_port_resistances, AdmittanceSsm, ReducedBridgePole, DEFAULT_Y_INF,
@@ -78,11 +78,17 @@ impl BridgeBank {
     /// Initializes the Stage 3 bridge bank with physical concert-grand defaults at `sample_rate`.
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
+        Self::new_with_voicing(sample_rate, &VoicingSpec::default())
+    }
+
+    /// Initializes the Stage 3 bridge bank for `voicing` at `sample_rate`.
+    #[must_use]
+    pub fn new_with_voicing(sample_rate: f32, voicing: &VoicingSpec) -> Self {
         let safe_sr = sanitize_sample_rate(sample_rate);
         Self::build(
             safe_sr,
             AdmittanceSsm::new(safe_sr),
-            DuplexBank::new(safe_sr),
+            DuplexBank::new_with_voicing(safe_sr, voicing),
         )
     }
 
@@ -121,16 +127,53 @@ impl BridgeBank {
 
     /// Reconfigures treble duplex scale coupling gain (`0.0` = disabled) and refreshes `8x8` WDF matrices.
     pub fn set_duplex_gain(&mut self, duplex_gain: f32) {
-        let a4 = self.duplex.a4_freq_hz();
+        let voicing = self.duplex.voicing().clone();
         self.duplex = DuplexBank::new_with_params(self.sample_rate, duplex_gain, false);
-        self.duplex.retune_a4(a4);
+        self.duplex.retune_voicing(&voicing);
         self.ssm
             .set_port_resistances(&self.r0, &self.zone_weights, self.duplex.port_resistances());
     }
 
     /// Retunes Stage 3 treble duplex wire-segment resonances in place for `a4_freq_hz` (`[415, 466]` Hz).
     pub fn set_a4_freq_hz(&mut self, a4_freq_hz: f32) {
+        let prev_r = *self.duplex.port_resistances();
         self.duplex.retune_a4(a4_freq_hz);
+        if *self.duplex.port_resistances() != prev_r {
+            self.ssm.set_port_resistances(
+                &self.r0,
+                &self.zone_weights,
+                self.duplex.port_resistances(),
+            );
+        }
+    }
+
+    /// Retunes Stage 3 treble duplex wire-segment resonances in place for `voicing`
+    /// and keeps `AdmittanceSsm` port resistances synchronized if `r_dup` changes.
+    pub fn set_voicing(&mut self, voicing: &VoicingSpec) {
+        let prev_r = *self.duplex.port_resistances();
+        self.duplex.retune_voicing(voicing);
+        if *self.duplex.port_resistances() != prev_r {
+            self.ssm.set_port_resistances(
+                &self.r0,
+                &self.zone_weights,
+                self.duplex.port_resistances(),
+            );
+        }
+    }
+
+    /// Flushes `< 1e-20` denormals/subnormals across Stage 3 SSM, Hertz contact, and duplex states,
+    /// allowing idle bypass to re-engage cleanly after decay.
+    pub fn flush_subnormals(&mut self) {
+        self.ssm.flush_subnormals();
+        self.hertz.flush_subnormals();
+        self.duplex.flush_subnormals();
+    }
+
+    /// Returns `true` when all Stage 3 states (SSM, Hertz contact, and duplex) are quiescent.
+    #[must_use]
+    #[inline]
+    pub fn is_quiescent(&self) -> bool {
+        self.ssm.is_quiescent() && self.hertz.is_quiescent() && self.duplex.is_quiescent()
     }
 
     /// Resets dynamic bridge, Hertz contact, and duplex states to rest equilibrium.

@@ -1,6 +1,6 @@
 use core::f64::consts::TAU;
 
-use piano_spec::{CHOIR_LAYOUTS, TOTAL_STRINGS};
+use piano_spec::{build_scale_design, key_tuned_f0_hz, VoicingSpec, CHOIR_LAYOUTS, TOTAL_STRINGS};
 
 use crate::duplex::NUM_DUPLEX_MODES;
 use crate::tests::wdf_absorbed_power_w;
@@ -13,21 +13,78 @@ fn duplex_retune_a4_scales_mode_frequencies_and_clamps_bounds() {
     assert_eq!(bank.a4_freq_hz(), 440.0);
     let base_f0 = bank.mode_freq_hz(0);
     assert!(base_f0 > 1_300.0);
+    let specs_440 = build_scale_design(&VoicingSpec::default());
+    let tuned_27_440 = key_tuned_f0_hz(27, &specs_440, &VoicingSpec::default());
 
     bank.retune_a4(415.0);
     assert_eq!(bank.a4_freq_hz(), 415.0);
     let f_415 = bank.mode_freq_hz(0);
-    assert!((f_415 / base_f0 - 415.0 / 440.0).abs() < 1e-5);
+    let v_415 = VoicingSpec::from_globals_with_a4(0.5, 1.0, 1.0, 1.0, 415.0);
+    let specs_415 = build_scale_design(&v_415);
+    let tuned_27_415 = key_tuned_f0_hz(27, &specs_415, &v_415);
+    assert!((f64::from(f_415 / base_f0) - tuned_27_415 / tuned_27_440).abs() < 1e-5);
+    assert!((f_415 / base_f0 - 415.0 / 440.0).abs() < 5e-4);
 
     bank.retune_a4(442.0);
     assert_eq!(bank.a4_freq_hz(), 442.0);
     let f_442 = bank.mode_freq_hz(0);
-    assert!((f_442 / base_f0 - 442.0 / 440.0).abs() < 1e-5);
+    let v_442 = VoicingSpec::from_globals_with_a4(0.5, 1.0, 1.0, 1.0, 442.0);
+    let specs_442 = build_scale_design(&v_442);
+    let tuned_27_442 = key_tuned_f0_hz(27, &specs_442, &v_442);
+    assert!((f64::from(f_442 / base_f0) - tuned_27_442 / tuned_27_440).abs() < 1e-5);
+    assert!((f_442 / base_f0 - 442.0 / 440.0).abs() < 5e-4);
 
     bank.retune_a4(300.0);
     assert_eq!(bank.a4_freq_hz(), 415.0);
     bank.retune_a4(f32::NAN);
     assert_eq!(bank.a4_freq_hz(), 440.0);
+}
+
+#[test]
+fn duplex_retune_voicing_tracks_stretch_and_note_pitch_within_bounds() {
+    let mut bank = DuplexBank::new(48_000.0);
+    let nominal_c8_mode = bank.mode_freq_hz(57); // Zone 7 mode anchored to C8 (key 87) * 2
+    let mut stretched = VoicingSpec::from_globals(0.5, 1.0, 2.0, 1.0);
+    stretched.note_offsets[87].pitch_cents = 25.0;
+    bank.retune_voicing(&stretched);
+
+    let stretched_c8_mode = bank.mode_freq_hz(57);
+    let ratio_cents = 1200.0 * f64::from(stretched_c8_mode / nominal_c8_mode).log2();
+    assert!(
+        ratio_cents > 45.0 && ratio_cents < 70.0,
+        "expected stretch+25c shift on C8 duplex mode, got {ratio_cents:.2} cents"
+    );
+    for m in 0..NUM_DUPLEX_MODES {
+        let f = bank.mode_freq_hz(m);
+        assert!(
+            (1_350.0..=12_500.0).contains(&f),
+            "stretched duplex mode {m} out of range: {f} Hz"
+        );
+    }
+}
+
+#[test]
+fn duplex_subnormal_flush_resets_active_and_reengages_idle_bypass() {
+    let mut bank = DuplexBank::new(48_000.0);
+    assert!(bank.is_quiescent());
+
+    // Drive a tiny impulse so active becomes true, then let it decay/flush.
+    let v_pulse = [0.0, 0.0, 1.0e-18_f32, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let _ = bank.step_with_zone_velocities(&v_pulse);
+    assert!(!bank.is_quiescent());
+
+    // After flushing < 1e-20 states, active must return to false and stereo out to (0, 0).
+    bank.flush_subnormals();
+    assert!(bank.is_quiescent());
+    assert_eq!(bank.energy_joules(), 0.0);
+    assert_eq!(bank.stereo_out(), (0.0, 0.0));
+
+    // Normal audible state >= 1e-20 must NOT be cleared prematurely.
+    let v_audible = [0.0, 0.0, 0.05_f32, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let _ = bank.step_with_zone_velocities(&v_audible);
+    bank.flush_subnormals();
+    assert!(!bank.is_quiescent());
+    assert!(bank.energy_joules() > 0.0);
 }
 
 #[test]

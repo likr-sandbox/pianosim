@@ -354,3 +354,33 @@ fn non_finite_inputs_are_sanitized_without_panic() {
     assert!(b.iter().all(|v| v.is_finite()));
     assert!(z.iter().all(|v| v.is_finite()));
 }
+
+#[test]
+fn stage3_subnormal_flush_restores_quiescence_and_idle_bypass() {
+    let mut bridge = BridgeBank::new(48_000.0);
+    assert!(bridge.is_quiescent());
+
+    // Excite with a small impulse and verify non-quiescence, then step with zero input
+    // until SSM/Hertz/Duplex decay below 1e-20 and flush_subnormals restores quiescence.
+    let mut a = [0.0_f32; TOTAL_STRINGS];
+    a[140] = 1.0e-14;
+    let mut b = [0.0_f32; TOTAL_STRINGS];
+    let mut z = [0.0_f32; NUM_BRIDGE_ZONES];
+    let _ = bridge.step_bridge_sample(&a, &[0.0; NUM_BRIDGE_ZONES], &mut b, &mut z);
+    assert!(!bridge.is_quiescent());
+
+    let zeros = [0.0_f32; TOTAL_STRINGS];
+    for _ in 0..48_000 {
+        let _ = bridge.step_bridge_sample(&zeros, &[0.0; NUM_BRIDGE_ZONES], &mut b, &mut z);
+        bridge.flush_subnormals();
+        if bridge.is_quiescent() {
+            break;
+        }
+    }
+    assert!(
+        bridge.is_quiescent(),
+        "BridgeBank failed to return to quiescent idle bypass after decay"
+    );
+    assert_eq!(bridge.ssm_energy_joules(), 0.0);
+    assert_eq!(bridge.duplex_energy_joules(), 0.0);
+}

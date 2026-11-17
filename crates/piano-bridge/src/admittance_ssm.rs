@@ -274,6 +274,18 @@ impl AdmittanceSsm {
         self.q.iter().all(|&v| v == 0.0) && self.q_dot.iter().all(|&v| v == 0.0)
     }
 
+    /// Flushes `< 1e-20` denormals/subnormals and non-finite modal states `(q, q_dot)` to `0.0`.
+    pub fn flush_subnormals(&mut self) {
+        for m in 0..NUM_REDUCED_MODES {
+            if !self.q[m].is_finite() || self.q[m].abs() < 1.0e-20 {
+                self.q[m] = 0.0;
+            }
+            if !self.q_dot[m].is_finite() || self.q_dot[m].abs() < 1.0e-20 {
+                self.q_dot[m] = 0.0;
+            }
+        }
+    }
+
     /// Commits one exact trapezoidal discrete integration step using `f_zone_ssm` (`[N]`).
     #[inline]
     pub fn commit_step(

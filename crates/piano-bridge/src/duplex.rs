@@ -3,7 +3,10 @@
 //! Passively and bidirectionally coupled ONLY to treble/tenor bridge **Zones 2..7**
 //! via exact WDF port scattering so bass Zones 0..1 remain uncoupled and `E_duplex >= 0` holds.
 
+use core::f64::consts::LN_2;
+
 use piano_simd::F32x4;
+use piano_spec::{build_scale_design, railsback_stretch_cents_table, VoicingSpec, NUM_KEYS};
 
 use crate::math::{coupled_pole_f32, exp_f64};
 use crate::zone_proj::{zone_stereo_pan, NUM_BRIDGE_ZONES, TREBLE_DUPLEX_ZONE_START};
@@ -18,17 +21,89 @@ pub const NUM_DUPLEX_VECS: usize = 16;
 pub const DUPLEX_VEC_ZONES: [usize; NUM_DUPLEX_VECS] =
     [2, 2, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6, 7, 7, 7];
 
-const ZONE_FREQ_BANDS_HZ: [(f64, f64); 6] = [
-    (1_400.0, 2_800.0),  // Zone 2 (8 modes)
-    (1_900.0, 3_900.0),  // Zone 3 (8 modes)
-    (2_500.0, 5_800.0),  // Zone 4 (12 modes)
-    (3_600.0, 7_800.0),  // Zone 5 (12 modes)
-    (5_100.0, 10_000.0), // Zone 6 (12 modes)
-    (6_800.0, 12_000.0), // Zone 7 (12 modes)
+/// Physical `(anchor_key_idx, harmonic_mult, fine_aliquot_detune)` for all 64 duplex wire modes.
+///
+/// Each mode models a rear non-speaking wire segment of speaking-length ratio
+/// `L(k) / L_dup(m) = harmonic_mult * (1.0 + fine_aliquot_detune)` anchored to a key
+/// in that physical bridge zone (`26..32` Z2, `33..44` Z3, `45..56` Z4, `57..68` Z5,
+/// `69..80` Z6, `81..87` Z7), computed strictly offline without runtime harmonic branching.
+const DUPLEX_MODE_LAYOUT: [(u8, u8, f64); NUM_DUPLEX_MODES] = [
+    // Zone 2 (8 modes, keys 26..=32)
+    (27, 12, 0.000),
+    (28, 11, 0.002),
+    (29, 12, -0.002),
+    (30, 12, 0.000),
+    (31, 12, 0.002),
+    (32, 12, -0.002),
+    (31, 15, 0.001),
+    (32, 16, 0.000),
+    // Zone 3 (8 modes, keys 33..=44)
+    (33, 10, 0.000),
+    (35, 10, 0.002),
+    (37, 10, -0.002),
+    (39, 9, 0.000),
+    (40, 9, 0.002),
+    (41, 10, -0.001),
+    (43, 10, 0.002),
+    (44, 11, 0.000),
+    // Zone 4 (12 modes, keys 45..=56)
+    (45, 7, 0.000),
+    (46, 7, 0.002),
+    (47, 7, -0.002),
+    (48, 6, 0.000),
+    (49, 6, 0.002),
+    (50, 6, -0.002),
+    (51, 6, 0.000),
+    (52, 6, 0.002),
+    (53, 7, -0.001),
+    (54, 7, 0.002),
+    (55, 7, 0.000),
+    (56, 8, -0.002),
+    // Zone 5 (12 modes, keys 57..=68)
+    (57, 5, 0.000),
+    (58, 5, 0.002),
+    (59, 5, -0.002),
+    (60, 5, 0.000),
+    (61, 5, 0.002),
+    (62, 5, -0.002),
+    (63, 4, 0.000),
+    (63, 6, 0.001),
+    (64, 5, 0.000),
+    (65, 5, 0.002),
+    (66, 5, -0.002),
+    (67, 5, 0.000),
+    // Zone 6 (12 modes, keys 69..=80)
+    (69, 4, 0.000),
+    (70, 4, 0.002),
+    (71, 4, -0.002),
+    (72, 4, 0.000),
+    (73, 4, 0.002),
+    (74, 4, -0.002),
+    (75, 4, 0.000),
+    (76, 4, 0.002),
+    (77, 4, -0.002),
+    (78, 4, 0.000),
+    (79, 3, 0.002),
+    (80, 3, -0.002),
+    // Zone 7 (12 modes, keys 81..=87)
+    (81, 3, 0.000),
+    (82, 3, 0.002),
+    (83, 3, -0.002),
+    (84, 3, 0.000),
+    (85, 3, 0.001),
+    (87, 2, 0.000),
+    (86, 2, 0.002),
+    (85, 2, -0.002),
+    (84, 2, 0.001),
+    (83, 2, -0.001),
+    (82, 2, 0.002),
+    (81, 2, -0.002),
 ];
 
 const DUPLEX_TARGET_R_PER_ZONE: f64 = 0.018;
-const DUPLEX_AUDIO_GAIN: f32 = 0.30;
+/// Stage 4 duplex coupling readout gain (`+20 dB` over initial `0.30` calibration).
+const DUPLEX_AUDIO_GAIN: f32 = 3.0;
+const SUBNORMAL_FLUSH_THRESHOLD: f32 = 1.0e-20;
 
 /// 64-mode SIMD coupled-form ZOH duplex scale resonator bank (`Zones 2..7`).
 #[derive(Clone, Debug)]
@@ -45,16 +120,43 @@ pub struct DuplexBank {
     ts: f64,
     sample_rate_f64: f64,
     lossless: bool,
-    a4_freq_hz: f32,
+    voicing: VoicingSpec,
+    tuning_initialized: bool,
     last_stereo: (f32, f32),
     active: bool,
 }
 
+#[inline]
+fn tuning_matches(a: &VoicingSpec, b: &VoicingSpec) -> bool {
+    if a.a4_freq_hz != b.a4_freq_hz
+        || a.stretch_amount != b.stretch_amount
+        || a.string_length_scale != b.string_length_scale
+    {
+        return false;
+    }
+    for k in 0..NUM_KEYS {
+        if a.note_offsets[k].pitch_cents != b.note_offsets[k].pitch_cents
+            || a.note_offsets[k].inharmonicity_scale != b.note_offsets[k].inharmonicity_scale
+        {
+            return false;
+        }
+    }
+    true
+}
+
 impl DuplexBank {
-    /// Constructs default passive `DuplexBank` (`duplex_gain = 1.0`, damped, `A4 = 440.0 Hz`).
+    /// Constructs default passive `DuplexBank` (`duplex_gain = 1.0`, damped, default voicing).
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
-        Self::new_with_params(sample_rate, 1.0, false)
+        Self::new_with_voicing(sample_rate, &VoicingSpec::default())
+    }
+
+    /// Constructs passive `DuplexBank` (`duplex_gain = 1.0`, damped) tuned for `voicing`.
+    #[must_use]
+    pub fn new_with_voicing(sample_rate: f32, voicing: &VoicingSpec) -> Self {
+        let mut bank = Self::new_with_params(sample_rate, 1.0, false);
+        bank.retune_voicing(voicing);
+        bank
     }
 
     /// Constructs `DuplexBank` with explicit coupling gain and lossless flag (`zeta = 0`).
@@ -106,6 +208,7 @@ impl DuplexBank {
             c_audio[vec_idx] = F32x4::from_array(c_arr);
         }
 
+        let default_voicing = VoicingSpec::default();
         let mut bank = Self {
             u: [F32x4::zero(); NUM_DUPLEX_VECS],
             v: [F32x4::zero(); NUM_DUPLEX_VECS],
@@ -119,63 +222,48 @@ impl DuplexBank {
             ts,
             sample_rate_f64: safe_sr,
             lossless,
-            a4_freq_hz: 0.0,
+            voicing: default_voicing.clone(),
+            tuning_initialized: false,
             last_stereo: (0.0, 0.0),
             active: false,
         };
-        bank.retune_a4(440.0);
+        bank.retune_voicing(&default_voicing);
         bank
     }
 
-    /// Retunes all 64 non-speaking duplex wire-segment resonances in place for `a4_freq_hz`
-    /// (`[415.0, 466.0]` Hz) with zero heap allocations. No-op when `a4_freq_hz` is unchanged.
-    pub fn retune_a4(&mut self, a4_freq_hz: f32) {
-        let clamped = if a4_freq_hz.is_finite() {
-            a4_freq_hz.clamp(
-                piano_spec::voicing::A4_FREQ_MIN,
-                piano_spec::voicing::A4_FREQ_MAX,
-            )
-        } else {
-            piano_spec::voicing::A4_FREQ_DEFAULT
-        };
-        if (clamped - self.a4_freq_hz).abs() == 0.0 {
+    /// Retunes all 64 non-speaking duplex wire-segment resonances in place for `voicing`
+    /// (`a4_freq_hz`, Railsback `stretch_amount`, `string_length_scale`, and per-note `pitch_cents`)
+    /// with zero heap allocations. No-op when tuning fields are unchanged.
+    pub fn retune_voicing(&mut self, voicing: &VoicingSpec) {
+        let v = voicing.sanitized();
+        if self.tuning_initialized && tuning_matches(&v, &self.voicing) {
             return;
         }
-        self.a4_freq_hz = clamped;
-        let pitch_scale = f64::from(clamped) / piano_spec::A4_FREQ_HZ;
+        self.voicing = v.clone();
+        self.tuning_initialized = true;
 
-        let mut counts_per_zone = [0usize; NUM_BRIDGE_ZONES];
-        for &z in &DUPLEX_VEC_ZONES {
-            counts_per_zone[z] += 4;
-        }
-        let mut seen_in_zone = [0usize; NUM_BRIDGE_ZONES];
+        let specs = build_scale_design(&v);
+        let stretch_table = railsback_stretch_cents_table(&specs);
+        let stretch_scale = v.effective_stretch_amount() as f64;
+        let cents_to_ln = LN_2 / 1200.0;
+        let max_nyq_safe = (0.47 * self.sample_rate_f64).min(12_500.0);
 
-        for (vec_idx, &z) in DUPLEX_VEC_ZONES.iter().enumerate() {
-            let (f_min, f_max) = ZONE_FREQ_BANDS_HZ[z - TREBLE_DUPLEX_ZONE_START];
-            let total_in_z = counts_per_zone[z];
-            let ratio_ln = if f_max > f_min {
-                let mut x = f_max / f_min;
-                let mut ln_approx = 0.0_f64;
-                while x > 2.0 {
-                    x *= 0.5;
-                    ln_approx += core::f64::consts::LN_2;
-                }
-                let u = (x - 1.0) / (x + 1.0);
-                let u2 = u * u;
-                ln_approx + 2.0 * u * (1.0 + u2 / 3.0 + u2 * u2 / 5.0 + u2 * u2 * u2 / 7.0)
-            } else {
-                0.0
-            };
-
+        for vec_idx in 0..NUM_DUPLEX_VECS {
             let (mut d_arr, mut s_arr) = ([1.0_f32; 4], [0.0_f32; 4]);
             for lane in 0..4 {
-                let m_in_z = seen_in_zone[z];
-                seen_in_zone[z] += 1;
-                let frac = (m_in_z as f64) / ((total_in_z - 1).max(1) as f64);
-                let jitter = 1.0 + 0.015 * (((m_in_z * 7 + z * 3) % 5) as f64 - 2.0) * 0.5;
-                let f_hz = (f_min * pitch_scale * exp_f64(frac * ratio_ln) * jitter)
-                    .min(0.47 * self.sample_rate_f64);
-                self.freqs_hz[vec_idx * 4 + lane] = f_hz as f32;
+                let mode_idx = vec_idx * 4 + lane;
+                let (key_u8, mult_u8, detune) = DUPLEX_MODE_LAYOUT[mode_idx];
+                let k = usize::from(key_u8).min(NUM_KEYS - 1);
+                let cents =
+                    stretch_table[k] * stretch_scale + f64::from(v.effective_pitch_cents(k));
+                let f0_tuned = if cents == 0.0 {
+                    specs[k].f0_et_hz
+                } else {
+                    specs[k].f0_et_hz * exp_f64(cents * cents_to_ln)
+                };
+                let ratio = f64::from(mult_u8) * (1.0 + detune);
+                let f_hz = (f0_tuned * ratio).clamp(1_350.0_f64.min(max_nyq_safe), max_nyq_safe);
+                self.freqs_hz[mode_idx] = f_hz as f32;
 
                 let t60 = if self.lossless {
                     f64::INFINITY
@@ -192,11 +280,57 @@ impl DuplexBank {
         }
     }
 
+    /// Retunes all 64 non-speaking duplex wire-segment resonances in place for `a4_freq_hz`
+    /// (`[415.0, 466.0]` Hz) with zero heap allocations. No-op when `a4_freq_hz` is unchanged.
+    pub fn retune_a4(&mut self, a4_freq_hz: f32) {
+        let mut next = self.voicing.clone();
+        next.a4_freq_hz = a4_freq_hz;
+        self.retune_voicing(&next);
+    }
+
     /// Returns the currently configured concert pitch `A4` reference in Hz.
     #[must_use]
     #[inline]
     pub const fn a4_freq_hz(&self) -> f32 {
-        self.a4_freq_hz
+        self.voicing.a4_freq_hz
+    }
+
+    /// Returns the active [`VoicingSpec`] used to tune the duplex bank.
+    #[must_use]
+    #[inline]
+    pub const fn voicing(&self) -> &VoicingSpec {
+        &self.voicing
+    }
+
+    /// Flushes `< 1e-20` denormals/subnormals and non-finite resonator states to `0.0`,
+    /// clearing `active` so Stage 3 idle bypass re-engages cleanly once decayed.
+    pub fn flush_subnormals(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut any_nz = false;
+        for vec_idx in 0..NUM_DUPLEX_VECS {
+            let mut ua = self.u[vec_idx].to_array();
+            let mut va = self.v[vec_idx].to_array();
+            for lane in 0..4 {
+                if !ua[lane].is_finite() || ua[lane].abs() < SUBNORMAL_FLUSH_THRESHOLD {
+                    ua[lane] = 0.0;
+                } else {
+                    any_nz = true;
+                }
+                if !va[lane].is_finite() || va[lane].abs() < SUBNORMAL_FLUSH_THRESHOLD {
+                    va[lane] = 0.0;
+                } else {
+                    any_nz = true;
+                }
+            }
+            self.u[vec_idx] = F32x4::from_array(ua);
+            self.v[vec_idx] = F32x4::from_array(va);
+        }
+        if !any_nz {
+            self.active = false;
+            self.last_stereo = (0.0, 0.0);
+        }
     }
 
     /// Resets all 64 duplex resonator states and cached stereo output to zero.

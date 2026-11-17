@@ -95,6 +95,32 @@ impl HertzBridgeContact {
             && self.v_prev[1].to_array() == [0.0; 4]
     }
 
+    /// Flushes `< 1e-20` denormals/subnormals and non-finite contact states to `0.0`.
+    pub fn flush_subnormals(&mut self) {
+        let mut all_zero = true;
+        for half in 0..2 {
+            let mut xa = self.x[half].to_array();
+            let mut va = self.v_prev[half].to_array();
+            for lane in 0..4 {
+                if !xa[lane].is_finite() || xa[lane].abs() < 1.0e-20 {
+                    xa[lane] = 0.0;
+                } else {
+                    all_zero = false;
+                }
+                if !va[lane].is_finite() || va[lane].abs() < 1.0e-20 {
+                    va[lane] = 0.0;
+                } else {
+                    all_zero = false;
+                }
+            }
+            self.x[half] = F32x4::from_array(xa);
+            self.v_prev[half] = F32x4::from_array(va);
+        }
+        if !self.r_sav.is_finite() || (all_zero && self.energy_joules().abs() < 1.0e-20) {
+            self.r_sav = sqrt_f64(C_HERTZ_SAV);
+        }
+    }
+
     /// Evaluates the midpoint-predicted normalized SAV gradient vector `g = dV/dx / r_sav`
     /// using `F32x4` lane operations across all 8 zones.
     #[must_use]
