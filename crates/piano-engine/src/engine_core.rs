@@ -88,8 +88,7 @@ impl EngineCore {
     pub fn new(sample_rate: f32, voicing: &VoicingSpec) -> Self {
         let action = ActionBank::new(sample_rate, voicing);
         let bank = StringBank::new_bridge_coupled(sample_rate, voicing);
-        let mut bridge = BridgeBank::new(bank.sample_rate());
-        bridge.set_a4_freq_hz(voicing.effective_a4_freq_hz());
+        let mut bridge = BridgeBank::new_with_voicing(bank.sample_rate(), voicing);
         bridge.set_port_resistances(bank.bridge_port_resistances());
         let rad0 = RadiatorBank::new_concert_grand(f64::from(sample_rate));
         let rad1 = rad0.clone();
@@ -162,6 +161,7 @@ impl EngineCore {
         });
         self.bank
             .flush_bridge_subnormals_with_dampers(&hammers, &closed_damp);
+        self.bridge.flush_subnormals();
     }
 
     fn render_segment(
