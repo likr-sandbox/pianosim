@@ -20,7 +20,7 @@ export class PedalBar {
     this.bindEvents();
   }
 
-  updateState(sustain: number, sostenuto: boolean, unaCorda: boolean): void {
+  updateState(sustain: number, sostenuto: boolean, unaCorda: number | boolean): void {
     if (this.sustainSlider) {
       this.sustainSlider.value = sustain.toFixed(2);
     }
@@ -37,8 +37,14 @@ export class PedalBar {
       this.sostenutoBtn.classList.toggle('active', sostenuto);
     }
     if (this.unaCordaBtn) {
-      this.unaCordaBtn.setAttribute('aria-pressed', unaCorda ? 'true' : 'false');
-      this.unaCordaBtn.classList.toggle('active', unaCorda);
+      const unaVal = typeof unaCorda === 'number' ? unaCorda : unaCorda ? 1.0 : 0.0;
+      const isUnaDown = unaVal > 0.02;
+      this.unaCordaBtn.setAttribute('aria-pressed', isUnaDown ? 'true' : 'false');
+      this.unaCordaBtn.classList.toggle('active', isUnaDown);
+      this.unaCordaBtn.dataset.value = unaVal.toFixed(3);
+      this.unaCordaBtn.textContent = isUnaDown
+        ? `Una Corda: ${(unaVal * 100).toFixed(0)}%`
+        : 'Una Corda (Soft)';
     }
   }
 

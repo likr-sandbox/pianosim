@@ -1,6 +1,7 @@
 /** Normalizes Damper/Sostenuto/UnaCorda pedal state across UI sliders, buttons, spacebar, and MIDI CC. */
 
 import {
+  cc7ToU16,
   PEDAL_SOSTENUTO,
   PEDAL_SUSTAIN,
   PEDAL_UNA_CORDA,
@@ -9,7 +10,7 @@ import {
 
 export interface PedalControllerCallbacks {
   onPedalChange(pedalKind: PedalKind, valueU16: number): void;
-  onStateUpdate?(state: { sustain: number; sostenuto: boolean; unaCorda: boolean }): void;
+  onStateUpdate?(state: { sustain: number; sostenuto: boolean; unaCorda: number }): void;
 }
 
 export class PedalController {
@@ -17,7 +18,7 @@ export class PedalController {
 
   private sustainVal = 0.0; // 0.0 to 1.0
   private sostenutoEngaged = false;
-  private unaCordaEngaged = false;
+  private unaCordaVal = 0.0; // 0.0 to 1.0
 
   constructor(callbacks: PedalControllerCallbacks) {
     this.callbacks = callbacks;
@@ -31,12 +32,16 @@ export class PedalController {
     return this.sostenutoEngaged;
   }
 
+  getUnaCorda(): number {
+    return this.unaCordaVal;
+  }
+
   isUnaCorda(): boolean {
-    return this.unaCordaEngaged;
+    return this.unaCordaVal > 0.0;
   }
 
   setSustain(normalized: number): void {
-    const clamped = Math.max(0.0, Math.min(1.0, normalized));
+    const clamped = Number.isFinite(normalized) ? Math.max(0.0, Math.min(1.0, normalized)) : 0.0;
     this.sustainVal = clamped;
     const u16 = Math.trunc(clamped * 65535);
     this.callbacks.onPedalChange(PEDAL_SUSTAIN, u16);
@@ -61,40 +66,56 @@ export class PedalController {
     return this.sostenutoEngaged;
   }
 
-  setUnaCorda(engaged: boolean): void {
-    this.unaCordaEngaged = engaged;
-    const u16 = engaged ? 65535 : 0;
-    this.callbacks.onPedalChange(PEDAL_UNA_CORDA, u16);
+  setUnaCorda(value: number | boolean, emitHost = true): void {
+    const raw = typeof value === 'boolean' ? (value ? 1.0 : 0.0) : value;
+    const clamped = Number.isFinite(raw) ? Math.max(0.0, Math.min(1.0, raw)) : 0.0;
+    this.unaCordaVal = clamped;
+    if (emitHost) {
+      this.callbacks.onPedalChange(PEDAL_UNA_CORDA, Math.trunc(clamped * 65535));
+    }
     this.emitState();
   }
 
   toggleUnaCorda(): boolean {
-    this.setUnaCorda(!this.unaCordaEngaged);
-    return this.unaCordaEngaged;
+    const next = this.unaCordaVal > 0.0 ? 0.0 : 1.0;
+    this.setUnaCorda(next);
+    return next > 0.0;
   }
 
-  handleMidiCc(controller: number, value7: number): void {
-    const val = Math.max(0, Math.min(127, value7));
+  handleMidiCc(controller: number, value7: number, emitHost = true): void {
+    const val = Number.isFinite(value7) ? Math.max(0, Math.min(127, Math.trunc(value7))) : 0;
     if (controller === 64) {
-      this.setSustain(val / 127);
+      this.sustainVal = val / 127;
+      if (emitHost) {
+        this.callbacks.onPedalChange(PEDAL_SUSTAIN, cc7ToU16(val));
+      }
+      this.emitState();
     } else if (controller === 66) {
-      this.setSostenuto(val >= 64);
+      this.sostenutoEngaged = val >= 64;
+      if (emitHost) {
+        this.callbacks.onPedalChange(PEDAL_SOSTENUTO, this.sostenutoEngaged ? 65535 : 0);
+      }
+      this.emitState();
     } else if (controller === 67) {
-      this.setUnaCorda(val >= 64);
+      this.unaCordaVal = val / 127;
+      if (emitHost) {
+        this.callbacks.onPedalChange(PEDAL_UNA_CORDA, cc7ToU16(val));
+      }
+      this.emitState();
     }
   }
 
   reset(): void {
     this.setSustain(0.0);
     this.setSostenuto(false);
-    this.setUnaCorda(false);
+    this.setUnaCorda(0.0);
   }
 
   private emitState(): void {
     this.callbacks.onStateUpdate?.({
       sustain: this.sustainVal,
       sostenuto: this.sostenutoEngaged,
-      unaCorda: this.unaCordaEngaged,
+      unaCorda: this.unaCordaVal,
     });
   }
 }
