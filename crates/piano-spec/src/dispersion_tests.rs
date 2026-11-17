@@ -92,6 +92,52 @@ fn unison_detune_and_polarization_respect_scale_and_determinism() {
     let ph = polarization_offset_cents(A4_KEY_IDX, 1, Polarization::Horizontal, &nominal);
     assert_eq!(pv, 0.0);
     assert!((0.15..=0.30).contains(&(ph - pv)));
+
+    // C4 (key_idx=39) and A4 (key_idx=48) retain full nominal choir spread.
+    let c4_0 = unison_detune_cents(39, 0, 3, &nominal);
+    let c4_2 = unison_detune_cents(39, 2, 3, &nominal);
+    assert!(c4_0 < -0.45 && c4_2 > 0.45);
+}
+
+#[test]
+fn high_treble_unison_detune_tapers_above_c5_to_keep_c8_beating_gentle() {
+    let nominal = VoicingSpec::default();
+    let specs = build_scale_design(&nominal);
+
+    // C8 (key_idx = 87) outer detune tapers to 0.18..0.32 cents, yielding < 0.9 Hz adjacent beating.
+    let c8_0 = unison_detune_cents(87, 0, 3, &nominal);
+    let c8_1 = unison_detune_cents(87, 1, 3, &nominal);
+    let c8_2 = unison_detune_cents(87, 2, 3, &nominal);
+    assert!(
+        (0.18..=0.32).contains(&c8_0.abs()),
+        "C8 string 0 detune out of 0.18..0.32 cents: {c8_0}"
+    );
+    assert!(
+        (0.18..=0.32).contains(&c8_2.abs()),
+        "C8 string 2 detune out of 0.18..0.32 cents: {c8_2}"
+    );
+    let f0_c8 = key_tuned_f0_hz(87, &specs, &nominal);
+    let f1_c8 = partial_frequency_hz(f0_c8, specs[87].inharmonicity_b, 1);
+    let beat_01 = f1_c8 * (exp2_f64((c8_1 - c8_0).abs() / 1200.0) - 1.0);
+    let beat_12 = f1_c8 * (exp2_f64((c8_2 - c8_1).abs() / 1200.0) - 1.0);
+    assert!(
+        beat_01 < 0.9 && beat_12 < 0.9,
+        "C8 adjacent beating too fast: {beat_01:.3} Hz, {beat_12:.3} Hz"
+    );
+
+    // All treble keys above C5 keep adjacent string beating below 0.9 Hz.
+    for k in 51..NUM_KEYS {
+        let o0 = unison_detune_cents(k, 0, 3, &nominal);
+        let o1 = unison_detune_cents(k, 1, 3, &nominal);
+        let o2 = unison_detune_cents(k, 2, 3, &nominal);
+        let fk = key_tuned_f0_hz(k, &specs, &nominal);
+        let b01 = fk * (exp2_f64((o1 - o0).abs() / 1200.0) - 1.0);
+        let b12 = fk * (exp2_f64((o2 - o1).abs() / 1200.0) - 1.0);
+        assert!(
+            b01 < 0.9 && b12 < 0.9,
+            "key {k} adjacent beating >= 0.9 Hz: {b01:.3}, {b12:.3}"
+        );
+    }
 }
 
 #[test]

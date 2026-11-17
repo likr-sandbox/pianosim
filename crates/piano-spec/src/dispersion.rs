@@ -174,11 +174,15 @@ fn hash_to_signed_unit(seed: u64) -> f64 {
     2.0 * hash_to_unit(seed) - 1.0
 }
 
+/// Key index of `C5` (MIDI 72), above which unison detuning tapers smoothly with frequency.
+const C5_KEY_IDX: usize = 51;
+
 /// Deterministic choir micro-detuning offset (in cents) for `string_in_choir`.
 ///
 /// - Monochords (`strings_per_key <= 1`): strictly `0.0`.
 /// - Bichords (`2`): symmetric spread around `0.0` with organic jitter.
-/// - Trichords (`3`): characteristic `[-d, 0, +d]` triad (`d ~ 0.55..1.10 cents`)
+/// - Trichords (`3`): characteristic `[-d, 0, +d]` triad (`d ~ 0.55..1.10 cents` up to `C5`,
+///   smoothly tapering above `C5` down to `0.25x` at `C8` so high-treble beating stays `< 0.9 Hz`)
 ///   plus fine organic SplitMix64 jitter, scaled by `voicing.unison_detune_scale`.
 ///
 /// Returns exact `0.0` whenever `voicing.effective_unison_detune_scale() == 0.0`.
@@ -204,7 +208,14 @@ pub fn unison_detune_cents(
             .wrapping_add(1)
             .wrapping_mul(0xd6e8_feb8_6659_fd93));
 
-    // Nominal spread d in [0.55, 1.10) cents for rich slow choir beating.
+    // Nominal spread d in [0.55, 1.10) cents up to C5, smoothly tapering by 2^(-2/3 * octaves)
+    // above C5 down to 0.25x at C8 (~0.25 cents) to prevent harsh 3..13 Hz high-treble beating.
+    let treble_taper = if key_idx > C5_KEY_IDX {
+        let octaves_above_c5 = ((key_idx - C5_KEY_IDX) as f64) / 12.0;
+        exp2_f64(-2.0 * octaves_above_c5 / 3.0)
+    } else {
+        1.0
+    };
     let d = 0.55 + 0.55 * hash_to_unit(key_seed);
     let base_offset = match (strings_per_key, string_in_choir) {
         (2, 0) => -0.55 * d,
@@ -215,7 +226,7 @@ pub fn unison_detune_cents(
         _ => 0.0,
     };
     let jitter = 0.14 * hash_to_signed_unit(str_seed);
-    (base_offset + jitter) * scale
+    (base_offset + jitter) * treble_taper * scale
 }
 
 /// Deterministic frequency offset (in cents) arising from bridge boundary
