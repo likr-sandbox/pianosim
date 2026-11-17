@@ -164,9 +164,16 @@ impl BridgeBank {
 
     /// Reconfigures treble duplex scale coupling gain (`0.0` = disabled) and refreshes `8x8` WDF matrices.
     pub fn set_duplex_gain(&mut self, duplex_gain: f32) {
+        let a4 = self.duplex.a4_freq_hz();
         self.duplex = DuplexBank::new_with_params(self.sample_rate, duplex_gain, false);
+        self.duplex.retune_a4(a4);
         self.ssm
             .set_port_resistances(&self.r0, &self.zone_weights, self.duplex.port_resistances());
+    }
+
+    /// Retunes Stage 3 treble duplex wire-segment resonances in place for `a4_freq_hz` (`[415, 466]` Hz).
+    pub fn set_a4_freq_hz(&mut self, a4_freq_hz: f32) {
+        self.duplex.retune_a4(a4_freq_hz);
     }
 
     /// Resets dynamic bridge, Hertz contact, and duplex states to rest equilibrium.

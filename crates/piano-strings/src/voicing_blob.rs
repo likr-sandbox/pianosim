@@ -14,7 +14,7 @@ use crate::voicing_update::rescale_active_string_uv;
 use crate::StringBank;
 
 const VOICING_BLOB_MAGIC: u32 = 0x564F_4943; // "VOIC"
-const VOICING_HEADER_LEN: usize = 10;
+const VOICING_HEADER_LEN: usize = 11;
 
 #[inline]
 fn push_f64_bits(out: &mut Vec<f32>, val: f64) {
@@ -215,6 +215,7 @@ impl VoicingPrepContext {
             v.unison_detune_scale,
             v.stretch_amount,
             v.string_length_scale,
+            v.a4_freq_hz,
             f32::from_bits(total_vecs as u32),
             f32::from_bits(tl_vecs as u32),
             f32::from_bits(b.bridge_ports.coef.len() as u32),
@@ -308,10 +309,11 @@ impl StringBank {
             || (blob[3] - v.unison_detune_scale).abs() > 1.0e-4
             || (blob[4] - v.stretch_amount).abs() > 1.0e-4
             || (blob[5] - v.string_length_scale).abs() > 1.0e-4
-            || blob[6].to_bits() != total_vecs as u32
-            || blob[7].to_bits() != tl_vecs as u32
-            || blob[8].to_bits() != self.bridge_ports.coef.len() as u32
-            || blob[9].to_bits() != self.long_bank.b_long_prec.len() as u32
+            || (blob[6] - v.a4_freq_hz).abs() > 1.0e-3
+            || blob[7].to_bits() != total_vecs as u32
+            || blob[8].to_bits() != tl_vecs as u32
+            || blob[9].to_bits() != self.bridge_ports.coef.len() as u32
+            || blob[10].to_bits() != self.long_bank.b_long_prec.len() as u32
         {
             return false;
         }
@@ -429,29 +431,33 @@ mod tests {
         ref_bank.apply_excitation_sample(k_a4, [1.0, 1.0, 1.0], 8.0);
         fast_bank.apply_excitation_sample(k_a4, [1.0, 1.0, 1.0], 8.0);
 
-        let v = VoicingSpec::from_globals(0.75, 1.85, 1.35, 0.92);
-        ref_bank.update_voicing_in_place(&v);
-        let blob = prep.prepare_voicing(&v);
-        assert_eq!(blob.len(), voicing_blob_len(sr));
-        assert!(fast_bank.install_precomputed_voicing(&v, blob));
+        for a4_hz in [415.0_f32, 442.0] {
+            let v = VoicingSpec::from_globals_with_a4(0.75, 1.85, 1.35, 0.92, a4_hz);
+            ref_bank.update_voicing_in_place(&v);
+            let blob = prep.prepare_voicing(&v);
+            assert_eq!(blob.len(), voicing_blob_len(sr));
+            assert!(fast_bank.install_precomputed_voicing(&v, blob));
 
-        assert_eq!(
-            ref_bank.bridge_port_resistances(),
-            fast_bank.bridge_port_resistances()
-        );
-        assert_eq!(
-            ref_bank.soa.d_coeff.as_slice(),
-            fast_bank.soa.d_coeff.as_slice()
-        );
-        assert_eq!(
-            ref_bank.soa.s_coeff.as_slice(),
-            fast_bank.soa.s_coeff.as_slice()
-        );
-        assert_eq!(ref_bank.ports.gamma_s, fast_bank.ports.gamma_s);
-        assert_eq!(
-            ref_bank.string_linear_energy_joules(144),
-            fast_bank.string_linear_energy_joules(144)
-        );
-        assert!(!fast_bank.install_precomputed_voicing(&v, &[0.0; 12]));
+            assert_eq!(
+                ref_bank.bridge_port_resistances(),
+                fast_bank.bridge_port_resistances()
+            );
+            assert_eq!(
+                ref_bank.soa.d_coeff.as_slice(),
+                fast_bank.soa.d_coeff.as_slice()
+            );
+            assert_eq!(
+                ref_bank.soa.s_coeff.as_slice(),
+                fast_bank.soa.s_coeff.as_slice()
+            );
+            assert_eq!(ref_bank.ports.gamma_s, fast_bank.ports.gamma_s);
+            assert_eq!(
+                ref_bank.string_linear_energy_joules(144),
+                fast_bank.string_linear_energy_joules(144)
+            );
+            let mismatched = VoicingSpec::from_globals_with_a4(0.75, 1.85, 1.35, 0.92, 440.0);
+            assert!(!fast_bank.install_precomputed_voicing(&mismatched, blob));
+            assert!(!fast_bank.install_precomputed_voicing(&v, &[0.0; 12]));
+        }
     }
 }

@@ -5,6 +5,7 @@ pub mod engine;
 pub(crate) mod engine_core;
 pub mod event_queue;
 pub mod param_smooth;
+pub mod space_guard;
 pub mod telemetry;
 
 pub use engine::PianoEngine;
@@ -396,5 +397,53 @@ mod tests {
         let telem = engine.telemetry().to_array();
         assert!(telem[0] >= 1.0 && telem[1] > 0.0 && telem[2] > 0.0 && telem[3] > 0.0);
         assert_eq!(&telem[4..], &[0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn a4_concert_pitch_retuning_415hz_and_442hz_accuracy() {
+        let on = [SampleEvent {
+            sample_offset: 0,
+            kind: EventKind::NoteOn {
+                midi_key: 69,
+                velocity_u16: u7_to_u16(100),
+            },
+        }];
+
+        // 1. Direct construction at Baroque 415.0 Hz
+        let v_415 = VoicingSpec::from_globals_with_a4(0.5, 1.0, 1.0, 1.0, 415.0);
+        let specs_415 = build_scale_design(&v_415);
+        let expected_415 = partial_frequency_hz(415.0, specs_415[48].inharmonicity_b, 1);
+        let mut engine = PianoEngine::new_with_voicing(48_000.0, &v_415);
+        let (l_415, r_415) = render_chunks(&mut engine, 24_000, 128, &on);
+        let mono_415: Vec<f32> = l_415
+            .iter()
+            .zip(r_415.iter())
+            .map(|(&l, &r)| 0.5 * (l + r))
+            .collect();
+        let peak_415 = estimate_peak_freq_hz(&mono_415[1024..17408], 48_000.0, 395.0, 435.0);
+        assert!(
+            (peak_415 - expected_415).abs() < 0.6,
+            "expected A4=415 near {expected_415:.2} Hz, got {peak_415}"
+        );
+
+        // 2. Off-thread VoicingPrepContext swap from default 440.0 Hz to 442.0 Hz
+        let mut live_engine = PianoEngine::new(48_000.0);
+        let mut prep = VoicingPrepContext::new(48_000.0);
+        let v_442 = VoicingSpec::from_globals_with_a4(0.5, 1.0, 1.0, 1.0, 442.0);
+        let blob = prep.prepare_voicing(&v_442);
+        assert!(live_engine.apply_precomputed_voicing(v_442.clone(), blob));
+        let specs_442 = build_scale_design(&v_442);
+        let expected_442 = partial_frequency_hz(442.0, specs_442[48].inharmonicity_b, 1);
+        let (l_442, r_442) = render_chunks(&mut live_engine, 24_000, 128, &on);
+        let mono_442: Vec<f32> = l_442
+            .iter()
+            .zip(r_442.iter())
+            .map(|(&l, &r)| 0.5 * (l + r))
+            .collect();
+        let peak_442 = estimate_peak_freq_hz(&mono_442[1024..17408], 48_000.0, 425.0, 460.0);
+        assert!(
+            (peak_442 - expected_442).abs() < 0.6,
+            "expected A4=442 near {expected_442:.2} Hz, got {peak_442}"
+        );
     }
 }

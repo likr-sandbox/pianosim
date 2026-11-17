@@ -89,6 +89,7 @@ impl EngineCore {
         let action = ActionBank::new(sample_rate, voicing);
         let bank = StringBank::new_bridge_coupled(sample_rate, voicing);
         let mut bridge = BridgeBank::new(bank.sample_rate());
+        bridge.set_a4_freq_hz(voicing.effective_a4_freq_hz());
         bridge.set_port_resistances(bank.bridge_port_resistances());
         let rad0 = RadiatorBank::new_concert_grand(f64::from(sample_rate));
         let rad1 = rad0.clone();

@@ -35,6 +35,13 @@ pub const STRING_LENGTH_SCALE_MIN: f32 = 0.5;
 /// Maximum clamped speaking-length multiplier.
 pub const STRING_LENGTH_SCALE_MAX: f32 = 2.0;
 
+/// Default concert pitch reference frequency for `A4` in Hz.
+pub const A4_FREQ_DEFAULT: f32 = 440.0;
+/// Minimum clamped concert pitch reference frequency for `A4` in Hz (`~-1` semitone).
+pub const A4_FREQ_MIN: f32 = 415.0;
+/// Maximum clamped concert pitch reference frequency for `A4` in Hz (`~+1` semitone).
+pub const A4_FREQ_MAX: f32 = 466.0;
+
 /// Minimum clamped per-note pitch offset in cents.
 pub const NOTE_PITCH_CENTS_MIN: f32 = -100.0;
 /// Maximum clamped per-note pitch offset in cents.
@@ -99,6 +106,8 @@ pub struct VoicingSpec {
     pub stretch_amount: f32,
     /// Speaking string length scale in `[0.5, 2.0]` (default `1.0`).
     pub string_length_scale: f32,
+    /// Concert pitch reference frequency for `A4` in `[415.0, 466.0]` Hz (default `440.0`).
+    pub a4_freq_hz: f32,
     /// Per-key additive voicing offsets (default all zero).
     pub note_offsets: [NoteVoicingOffset; NUM_KEYS],
 }
@@ -112,11 +121,12 @@ impl VoicingSpec {
             unison_detune_scale: UNISON_DETUNE_SCALE_DEFAULT,
             stretch_amount: STRETCH_AMOUNT_DEFAULT,
             string_length_scale: STRING_LENGTH_SCALE_DEFAULT,
+            a4_freq_hz: A4_FREQ_DEFAULT,
             note_offsets: [NoteVoicingOffset::ZERO; NUM_KEYS],
         }
     }
 
-    /// Returns a [`VoicingSpec`] populated from global parameters with clamped values.
+    /// Returns a [`VoicingSpec`] populated from global parameters (`A4 = 440.0 Hz`) with clamped values.
     #[must_use]
     pub fn from_globals(
         hammer_hardness: f32,
@@ -124,15 +134,34 @@ impl VoicingSpec {
         stretch_amount: f32,
         string_length_scale: f32,
     ) -> Self {
+        Self::from_globals_with_a4(
+            hammer_hardness,
+            unison_detune_scale,
+            stretch_amount,
+            string_length_scale,
+            A4_FREQ_DEFAULT,
+        )
+    }
+
+    /// Returns a [`VoicingSpec`] populated from global parameters including custom `A4` concert pitch.
+    #[must_use]
+    pub fn from_globals_with_a4(
+        hammer_hardness: f32,
+        unison_detune_scale: f32,
+        stretch_amount: f32,
+        string_length_scale: f32,
+        a4_freq_hz: f32,
+    ) -> Self {
         let mut s = Self::new();
         s.hammer_hardness = hammer_hardness;
         s.unison_detune_scale = unison_detune_scale;
         s.stretch_amount = stretch_amount;
         s.string_length_scale = string_length_scale;
+        s.a4_freq_hz = a4_freq_hz;
         s.sanitized()
     }
 
-    /// Returns a copy with all four global parameters clamped and finite.
+    /// Returns a copy with all global parameters clamped and finite.
     #[must_use]
     pub fn sanitized(&self) -> Self {
         Self {
@@ -140,6 +169,7 @@ impl VoicingSpec {
             unison_detune_scale: self.effective_unison_detune_scale(),
             stretch_amount: self.effective_stretch_amount(),
             string_length_scale: self.effective_string_length_scale(),
+            a4_freq_hz: self.effective_a4_freq_hz(),
             note_offsets: self.note_offsets,
         }
     }
@@ -211,6 +241,12 @@ impl VoicingSpec {
         )
     }
 
+    /// Returns the clamped concert pitch reference frequency for `A4` in `[415.0, 466.0]` Hz.
+    #[must_use]
+    pub fn effective_a4_freq_hz(&self) -> f32 {
+        sanitize_clamp(self.a4_freq_hz, A4_FREQ_DEFAULT, A4_FREQ_MIN, A4_FREQ_MAX)
+    }
+
     /// Returns the clamped per-note pitch offset in cents (`[-100.0, 100.0]`).
     #[must_use]
     pub fn effective_pitch_cents(&self, key_idx: usize) -> f32 {
@@ -271,6 +307,8 @@ mod tests {
         assert_eq!(spec.unison_detune_scale, 1.0);
         assert_eq!(spec.stretch_amount, 1.0);
         assert_eq!(spec.string_length_scale, 1.0);
+        assert_eq!(spec.a4_freq_hz, 440.0);
+        assert_eq!(spec.effective_a4_freq_hz(), 440.0);
         assert_eq!(spec.note_offsets.len(), 88);
 
         for k in 0..NUM_KEYS {
@@ -289,6 +327,7 @@ mod tests {
             unison_detune_scale: -1.5,
             stretch_amount: 5.0,
             string_length_scale: f32::NAN,
+            a4_freq_hz: 390.0,
             note_offsets: [NoteVoicingOffset::ZERO; NUM_KEYS],
         };
         spec.note_offsets[48] = NoteVoicingOffset {
@@ -309,6 +348,15 @@ mod tests {
         assert_eq!(
             spec.effective_string_length_scale(),
             STRING_LENGTH_SCALE_DEFAULT
+        );
+        assert_eq!(spec.effective_a4_freq_hz(), A4_FREQ_MIN);
+        spec.a4_freq_hz = 500.0;
+        assert_eq!(spec.effective_a4_freq_hz(), A4_FREQ_MAX);
+        spec.a4_freq_hz = f32::NAN;
+        assert_eq!(spec.effective_a4_freq_hz(), A4_FREQ_DEFAULT);
+        assert_eq!(
+            VoicingSpec::from_globals_with_a4(0.5, 1.0, 1.0, 1.0, 442.0).a4_freq_hz,
+            442.0
         );
 
         assert_eq!(spec.effective_pitch_cents(48), 12.5);

@@ -78,7 +78,7 @@ impl PianoEngine {
         self.telemetry = EngineTelemetry::default();
     }
 
-    /// Sets target voicing parameters with 20 ms exponential smoothing.
+    /// Sets target voicing parameters (`A4` unchanged) with 20 ms exponential smoothing.
     pub fn set_voicing(
         &mut self,
         hammer_hardness: f32,
@@ -88,6 +88,29 @@ impl PianoEngine {
     ) {
         self.voicing_smoother
             .set_target(hammer_hardness, unison_detune, stretch, length_scale);
+    }
+
+    /// Sets target voicing parameters including `A4` concert pitch (`[415, 466]` Hz) with 20 ms smoothing.
+    pub fn set_voicing_with_a4(
+        &mut self,
+        hammer_hardness: f32,
+        unison_detune: f32,
+        stretch: f32,
+        length_scale: f32,
+        a4_freq_hz: f32,
+    ) {
+        self.voicing_smoother.set_target_with_a4(
+            hammer_hardness,
+            unison_detune,
+            stretch,
+            length_scale,
+            a4_freq_hz,
+        );
+    }
+
+    /// Sets target `A4` concert pitch (`[415, 466]` Hz) with 20 ms exponential smoothing.
+    pub fn set_a4_freq_hz(&mut self, a4_freq_hz: f32) {
+        self.voicing_smoother.set_a4_target(a4_freq_hz);
     }
 
     /// Updates only hammer hardness smoothly (`< 50 us`), leaving string tuning untouched.
@@ -106,14 +129,16 @@ impl PianoEngine {
         if !self.core.bank.install_precomputed_voicing(&v, blob) {
             return false;
         }
+        self.core.bridge.set_a4_freq_hz(v.a4_freq_hz);
         self.core
             .bridge
             .set_port_resistances(self.core.bank.bridge_port_resistances());
         self.core.action.update_voicing_in_place(&v);
-        self.voicing_smoother.set_tuning_applied(
+        self.voicing_smoother.set_tuning_applied_with_a4(
             v.unison_detune_scale,
             v.stretch_amount,
             v.string_length_scale,
+            v.a4_freq_hz,
         );
         true
     }
@@ -340,6 +365,7 @@ impl PianoEngine {
             if (dirty & DIRTY_TUNING) != 0 {
                 self.core.action.update_voicing_in_place(&spec);
                 self.core.bank.update_voicing_in_place(&spec);
+                self.core.bridge.set_a4_freq_hz(spec.effective_a4_freq_hz());
                 self.core
                     .bridge
                     .set_port_resistances(self.core.bank.bridge_port_resistances());
