@@ -5,7 +5,7 @@
 //! ~512 KB for ~26,184 modes (`~6,546` `F32x4` vectors). Stereo pan is applied
 //! once per string after summing `v_next * c_bridge`.
 
-use core::f64::consts::{FRAC_2_PI, LN_10, LOG2_E, PI, TAU};
+use core::f64::consts::{LN_10, PI, TAU};
 use piano_simd::AlignedBuf;
 use piano_spec::{
     count_longitudinal_partials, count_transverse_partials, effective_string_f0_hz,
@@ -14,152 +14,17 @@ use piano_spec::{
 };
 
 use crate::choir_map::{ChoirMap, StringMapEntry};
+#[allow(unused_imports)]
+pub(crate) use crate::damping_law::{
+    t60_transverse_partial, t60_vert_fundamental, t60_wire_fundamental,
+};
+#[allow(unused_imports)]
+pub(crate) use crate::math::{exp_f64, one_minus_exp_neg_f64, sin_cos_f64, sqrt_f64};
 
 const LN_1000: f64 = 6.907_755_278_982_137;
-const PIO2_HI: f64 = 1.570_796_326_734_125_6;
-const PIO2_LO: f64 = 6.077_100_506_506_192e-11;
-const LN2_HI: f64 = 0.693_147_180_485_539_1;
-const LN2_LO: f64 = 7.440_614_790_965_583e-11;
 pub(crate) const NYQUIST_CUTOFF_RATIO: f64 = 0.49;
 pub(crate) const C_VERT: f32 = 1.0;
 pub(crate) const C_HORIZ: f32 = 0.18;
-
-const SIN_COEFFS: [f64; 8] = [
-    1.0,
-    -1.0 / 6.0,
-    1.0 / 120.0,
-    -1.0 / 5_040.0,
-    1.0 / 362_880.0,
-    -1.0 / 39_916_800.0,
-    1.0 / 6_227_020_800.0,
-    -1.0 / 1_307_674_368_000.0,
-];
-const COS_COEFFS: [f64; 8] = [
-    1.0,
-    -0.5,
-    1.0 / 24.0,
-    -1.0 / 720.0,
-    1.0 / 40_320.0,
-    -1.0 / 3_628_800.0,
-    1.0 / 479_001_600.0,
-    -1.0 / 87_178_291_200.0,
-];
-const EXP_COEFFS: [f64; 14] = [
-    1.0,
-    1.0,
-    0.5,
-    1.0 / 6.0,
-    1.0 / 24.0,
-    1.0 / 120.0,
-    1.0 / 720.0,
-    1.0 / 5_040.0,
-    1.0 / 40_320.0,
-    1.0 / 362_880.0,
-    1.0 / 3_628_800.0,
-    1.0 / 39_916_800.0,
-    1.0 / 479_001_600.0,
-    1.0 / 6_227_020_800.0,
-];
-const ONE_MINUS_EXP_NEG_DIV_ALPHA: [f64; 6] =
-    [1.0, -0.5, 1.0 / 6.0, -1.0 / 24.0, 1.0 / 120.0, -1.0 / 720.0];
-
-#[inline]
-fn eval_horner(x: f64, coeffs: &[f64]) -> f64 {
-    let mut acc = 0.0_f64;
-    let mut i = coeffs.len();
-    while i > 0 {
-        i -= 1;
-        acc = acc * x + coeffs[i];
-    }
-    acc
-}
-
-#[inline]
-fn round_f64(x: f64) -> i64 {
-    if x >= 0.0 {
-        (x + 0.5) as i64
-    } else {
-        (x - 0.5) as i64
-    }
-}
-
-/// Pure-Rust `no_std` `f64` `(sin(angle), cos(angle))` using `eval_horner`.
-pub(crate) fn sin_cos_f64(angle: f64) -> (f64, f64) {
-    if !angle.is_finite() {
-        return (f64::NAN, f64::NAN);
-    }
-    let q = round_f64(angle * FRAC_2_PI);
-    let qf = q as f64;
-    let r = (angle - qf * PIO2_HI) - qf * PIO2_LO;
-    let r2 = r * r;
-    let s = r * eval_horner(r2, &SIN_COEFFS);
-    let c = eval_horner(r2, &COS_COEFFS);
-    match q.rem_euclid(4) {
-        0 => (s, c),
-        1 => (c, -s),
-        2 => (-s, -c),
-        _ => (-c, s),
-    }
-}
-
-/// Pure-Rust `no_std` `f64` `exp(y)` using `eval_horner`.
-pub(crate) fn exp_f64(y: f64) -> f64 {
-    if y.is_nan() {
-        return f64::NAN;
-    }
-    if y == 0.0 {
-        return 1.0;
-    }
-    if y > 709.78 {
-        return f64::INFINITY;
-    }
-    if y < -745.13 {
-        return 0.0;
-    }
-    let k = round_f64(y * LOG2_E);
-    let kf = k as f64;
-    let r = (y - kf * LN2_HI) - kf * LN2_LO;
-    let poly = eval_horner(r, &EXP_COEFFS);
-    if k < -1022 {
-        let sub_scale = f64::from_bits(((k + 1077) as u64) << 52);
-        let tiny_scale = f64::from_bits((1023_u64 - 55) << 52);
-        (poly * sub_scale) * tiny_scale
-    } else {
-        poly * f64::from_bits(((k + 1023) as u64) << 52)
-    }
-}
-
-#[inline]
-fn one_minus_exp_neg_f64(alpha: f64) -> f64 {
-    if alpha <= 0.0 {
-        0.0
-    } else if alpha < 1.0e-3 {
-        alpha * eval_horner(alpha, &ONE_MINUS_EXP_NEG_DIV_ALPHA)
-    } else {
-        1.0 - exp_f64(-alpha)
-    }
-}
-
-/// Pure-Rust `no_std` `f64` `sqrt(x)` via IEEE-754 seed and 6 Newton-Raphson steps.
-#[inline]
-pub(crate) fn sqrt_f64(x: f64) -> f64 {
-    if x.is_nan() || x < 0.0 {
-        return f64::NAN;
-    }
-    if x == 0.0 || x.is_infinite() {
-        return x;
-    }
-    let (scaled, post_scale) = if x < f64::MIN_POSITIVE {
-        (x * 18_014_398_509_481_984.0, 1.0_f64 / 134_217_728.0)
-    } else {
-        (x, 1.0_f64)
-    };
-    let mut y = f64::from_bits((scaled.to_bits() >> 1) + 0x1ff8_0000_0000_0000);
-    for _ in 0..6 {
-        y = 0.5 * (y + scaled / y);
-    }
-    y * post_scale
-}
 
 /// 64-byte aligned Structure-of-Arrays resonator state and pole coefficients.
 #[derive(Clone, Debug)]
@@ -265,17 +130,6 @@ struct PolParams {
     exc_scale: f64,
     lossless: bool,
     bridge_coupled: bool,
-}
-
-#[inline]
-pub(crate) fn t60_vert_fundamental(key_idx: usize) -> f64 {
-    let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
-    30.0 * exp_f64(-0.45 * x - 4.35 * x * x + 1.50 * x * x * x)
-}
-
-#[inline]
-fn t60_wire_fundamental(key_idx: usize) -> f64 {
-    t60_vert_fundamental(key_idx).max(1.85)
 }
 
 #[inline]
@@ -431,14 +285,8 @@ fn populate_transverse_pol(soa: &mut ModalSoa, p: &PolParams) {
         let f_j = partial_frequency_hz(p.f0_hz, p.b_inharm, j);
         let t60_h = if p.lossless {
             f64::INFINITY
-        } else if p.bridge_coupled {
-            let f_norm = f_j / 20_000.0;
-            let loss_scale = 1.0 + 0.04 * ((j - 1) as f64) + 1.5 * f_norm * f_norm;
-            (p.t60_v_base / loss_scale).max(0.45) * p.hold_mult
         } else {
-            let f_norm = f_j / 20_000.0;
-            let loss_scale = 1.0 + 0.05 * ((j - 1) as f64) + 1.5 * f_norm * f_norm;
-            (p.t60_v_base / loss_scale).max(0.25) * p.hold_mult
+            t60_transverse_partial(p.t60_v_base, f_j, j, p.hold_mult, p.bridge_coupled)
         };
 
         if let Some(poles) = coupled_pole_f32(f_j, p.sample_rate, t60_h) {
