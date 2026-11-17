@@ -212,9 +212,15 @@ export interface PianoDiagnostics {
   readonly error: string | null;
 }
 
-/** Maps a 7-bit MIDI value (`0..=127`) onto 16-bit unsigned (`0..=65535`). */
+/** Maps a 7-bit MIDI value (`0..=127`) linearly onto 16-bit unsigned (`0..=65535`). */
 export function u7ToU16(v: number): number {
-  const clamped = Math.max(0, Math.min(127, Math.trunc(v)));
+  const clamped = Number.isFinite(v) ? Math.max(0, Math.min(127, Math.trunc(v))) : 0;
   if (clamped === 0) return 0;
-  return Math.trunc(14000 + ((clamped - 1) * (65535 - 14000)) / 126);
+  return Math.trunc((clamped * 65535) / 127);
+}
+
+/** Maps a 7-bit MIDI continuous controller value (`0..=127`) linearly onto `0..=65535`. */
+export function cc7ToU16(v: number): number {
+  const clamped = Number.isFinite(v) ? Math.max(0, Math.min(127, Math.trunc(v))) : 0;
+  return Math.trunc((clamped * 65535) / 127);
 }
