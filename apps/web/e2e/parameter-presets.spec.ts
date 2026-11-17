@@ -110,11 +110,11 @@ test.describe('E2E Parameter Presets Suite', () => {
   }) => {
     // 1. Measure Intimate Upright
     await page.getByTestId('preset-intimate-upright').click();
-    await page.waitForTimeout(200); // Allow prep worker and crossfade to settle
+    await page.waitForTimeout(550); // Allow serialized voicing + space blobs and crossfade to settle
 
     const a4Key = page.locator('[data-midi="69"]');
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(180);
     const intimateStats = await sampleDestinationAudio(page);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
 
@@ -127,10 +127,10 @@ test.describe('E2E Parameter Presets Suite', () => {
 
     // 2. Measure Bright Pop
     await page.getByTestId('preset-bright-pop').click();
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(550);
 
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(180);
     const brightStats = await sampleDestinationAudio(page);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
 
@@ -164,5 +164,59 @@ test.describe('E2E Parameter Presets Suite', () => {
     await page.getByTestId('preset-bright-pop').click();
     await expect(page.getByTestId('preset-custom-badge')).toBeHidden();
     await expect(page.getByTestId('preset-bright-pop')).toHaveClass(/active/);
+  });
+
+  test('I-1: rapid concurrent preset switching applies voicing detune/stretch without staging corruption', async ({
+    page,
+  }) => {
+    const c7Key = page.locator('[data-midi="96"]');
+
+    // 1. Baseline C7 under Concert Grand (stretch=1.0, lengthScale=1.0)
+    await page.getByTestId('preset-concert-grand').click();
+    await page.waitForTimeout(550);
+    await c7Key.dispatchEvent('pointerdown', { buttons: 1 });
+    await page.waitForTimeout(250);
+    const concertStats = await sampleDestinationAudio(page, { minFreq: 1800, maxFreq: 2600 });
+    await c7Key.dispatchEvent('pointerup', { buttons: 0 });
+    expect(concertStats.nonFiniteCount).toBe(0);
+    expect(concertStats.rms).toBeGreaterThan(0.0005);
+
+    await page.getByTestId('panic-btn').click();
+    await page.waitForTimeout(200);
+
+    // 2. Rapidly switch presets concurrently ending on Vintage Saloon (stretch=0.2, lengthScale=0.65, detune=2.5)
+    // so spaceBlob and voicingBlob contend for WasmContext::staging.
+    await page.getByTestId('preset-bright-pop').click();
+    await page.getByTestId('preset-intimate-upright').click();
+    await page.getByTestId('preset-vintage-saloon').click();
+    await page.waitForTimeout(650);
+
+    await c7Key.dispatchEvent('pointerdown', { buttons: 1 });
+    await page.waitForTimeout(250);
+    const saloonStats = await sampleDestinationAudio(page, { minFreq: 1800, maxFreq: 2600 });
+    await c7Key.dispatchEvent('pointerup', { buttons: 0 });
+    expect(saloonStats.nonFiniteCount).toBe(0);
+    expect(saloonStats.peak).toBeLessThanOrEqual(1.0);
+    expect(saloonStats.rms).toBeGreaterThan(0.0005);
+    // Vintage Saloon's voicingBlob (short scale 0.65 / stretch 0.20) shifts C7 > 30 Hz above Concert Grand
+    expect(saloonStats.peakFreqHz - concertStats.peakFreqHz).toBeGreaterThan(30);
+
+    await page.getByTestId('panic-btn').click();
+    await page.waitForTimeout(200);
+
+    // 3. Rapidly switch back concurrently ending on Bright Pop (stretch=1.3, lengthScale=1.15)
+    await page.getByTestId('preset-intimate-upright').click();
+    await page.getByTestId('preset-concert-grand').click();
+    await page.getByTestId('preset-bright-pop').click();
+    await page.waitForTimeout(650);
+
+    await c7Key.dispatchEvent('pointerdown', { buttons: 1 });
+    await page.waitForTimeout(250);
+    const brightStats = await sampleDestinationAudio(page, { minFreq: 1800, maxFreq: 2600 });
+    await c7Key.dispatchEvent('pointerup', { buttons: 0 });
+    expect(brightStats.nonFiniteCount).toBe(0);
+    expect(brightStats.peak).toBeLessThanOrEqual(1.0);
+    expect(brightStats.rms).toBeGreaterThan(0.0005);
+    expect(saloonStats.peakFreqHz - brightStats.peakFreqHz).toBeGreaterThan(30);
   });
 });
