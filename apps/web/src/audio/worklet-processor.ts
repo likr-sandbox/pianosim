@@ -4,6 +4,7 @@ import type {
   WorkletInboundMessage,
   WorkletOutboundMessage,
 } from './abi';
+import { BlobStreamer, warmPrepInstallers } from './blob-streamer';
 
 declare abstract class AudioWorkletProcessor {
   readonly port: MessagePort;
@@ -26,7 +27,6 @@ const PROCESSOR_NAME = 'piano-wasm-processor';
 const MAX_FRAMES = 512;
 const TELEMETRY_STRIDE_BLOCKS = 32;
 const MAX_PENDING_MESSAGES = 256;
-const BLOB_STREAM_CHUNK = 8_192;
 const ACTIVE12_WARMUP_KEYS = [21, 28, 36, 43, 48, 55, 60, 64, 67, 76, 88, 100];
 
 const REQUIRED_EXPORTS: ReadonlyArray<keyof PianoWasmExports> = [
@@ -73,18 +73,9 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
   private initializing = false;
   private destroyed = false;
   private prepPort: MessagePort | null = null;
-  private lastSpaceSeq = -1;
-  private lastVoicingSeq = -1;
-  private pendingSpace: { persp: number; lid: number; src: Float32Array; off: number } | null =
-    null;
-  private pendingVoicing: {
-    hammer: number;
-    detune: number;
-    stretch: number;
-    scale: number;
-    src: Float32Array;
-    off: number;
-  } | null = null;
+  private readonly blobStreamer = new BlobStreamer();
+  private readonly syncMemForBlob = (): Float32Array =>
+    this.syncMemoryView(this.cachedChunk || 128);
   private pending: WorkletInboundMessage[] = [];
 
   private blockCount = 0;
@@ -142,83 +133,9 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
     }
     this.prepPort = port;
     port.onmessage = (event: MessageEvent<PrepToWorkletMessage>) => {
-      this.onPrepBlob(event.data);
+      if (this.destroyed || !this.exports || this.ctx === 0) return;
+      this.blobStreamer.onPrepBlob(event.data);
     };
-  }
-
-  private onPrepBlob(msg: PrepToWorkletMessage): void {
-    if (this.destroyed || !this.exports || this.ctx === 0) return;
-    if (msg.type === 'spaceBlob') {
-      if (msg.seq < this.lastSpaceSeq) return;
-      this.lastSpaceSeq = msg.seq;
-      this.pendingSpace = {
-        persp: msg.perspective >>> 0,
-        lid: msg.lidState >>> 0,
-        src: new Float32Array(msg.blob),
-        off: 0,
-      };
-      return;
-    }
-    if (msg.type === 'voicingBlob') {
-      if (msg.seq < this.lastVoicingSeq) return;
-      this.lastVoicingSeq = msg.seq;
-      this.pendingVoicing = {
-        hammer: msg.hammerHardness,
-        detune: msg.unisonDetune,
-        stretch: msg.stretchTuning,
-        scale: msg.stringLengthScale,
-        src: new Float32Array(msg.blob),
-        off: 0,
-      };
-    }
-  }
-
-  private stepStreamingBlobs(exports: PianoWasmExports, ctx: number): void {
-    if (this.pendingSpace) {
-      if (exports.piano_is_space_crossfading(ctx) !== 0) return;
-      const b = this.pendingSpace;
-      const n = Math.min(BLOB_STREAM_CHUNK, b.src.length - b.off);
-      const ptr = exports.piano_staging_ptr(ctx, n) >>> 0;
-      if (ptr === 0) {
-        this.pendingSpace = null;
-        return;
-      }
-      const mem = this.syncMemoryView(this.cachedChunk || 128);
-      mem.set(b.src.subarray(b.off, b.off + n), ptr >>> 2);
-      if (exports.piano_stage_space_chunk(ctx, b.persp, b.lid, b.off, n, b.src.length) !== 0) {
-        this.pendingSpace = null;
-        return;
-      }
-      b.off += n;
-      if (b.off >= b.src.length) {
-        exports.piano_commit_space(ctx, b.persp, b.lid);
-        this.pendingSpace = null;
-      }
-      return;
-    }
-    if (this.pendingVoicing) {
-      const b = this.pendingVoicing;
-      const n = Math.min(BLOB_STREAM_CHUNK, b.src.length - b.off);
-      const ptr = exports.piano_staging_offset_ptr(ctx, b.off, n) >>> 0;
-      if (ptr === 0) {
-        this.pendingVoicing = null;
-        return;
-      }
-      const mem = this.syncMemoryView(this.cachedChunk || 128);
-      mem.set(b.src.subarray(b.off, b.off + n), ptr >>> 2);
-      b.off += n;
-      if (b.off >= b.src.length) {
-        exports.piano_apply_voicing_blob(
-          ctx,
-          b.hammer,
-          b.detune,
-          b.stretch,
-          b.scale,
-          b.src.length,
-        );
-        this.pendingVoicing = null;
-      }
-    }
   }
 
   private async initWasm(
@@ -281,7 +198,7 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       for (let i = 0; i < 160; i++) exports.piano_render(ctx, 128);
       exports.piano_all_notes_off(ctx);
       for (let i = 0; i < 8; i++) exports.piano_render(ctx, 128);
-      this.warmPrepInstallers(instance.exports, exports, ctx);
+      warmPrepInstallers(instance.exports, exports, ctx, sampleRate, this.syncMemForBlob);
 
       for (const queued of this.pending) {
         if (this.destroyed) break;
@@ -358,6 +275,7 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
         this.outLView = null;
         this.outRView = null;
         this.cachedChunk = 0;
+        this.blobStreamer.reset();
         if (this.prepPort) {
           this.prepPort.close();
           this.prepPort = null;
@@ -388,7 +306,7 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
     const ctx = this.ctx;
     const totalFrames = outL.length;
     const t0 = nowMs();
-    this.stepStreamingBlobs(exports, ctx);
+    this.blobStreamer.stepStreamingBlobs(exports, ctx, this.syncMemForBlob);
     let offset = 0;
     let mem = this.memF32;
     while (offset < totalFrames) {
@@ -457,35 +375,6 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       this.windowClipped = false;
     }
     return true;
-  }
-
-  private warmPrepInstallers(raw: WebAssembly.Exports, exports: PianoWasmExports, ctx: number): void {
-    const p = raw as Record<string, ((...a: number[]) => number) | undefined>;
-    if (!p.piano_prep_init || !p.piano_prep_voicing || !p.piano_prep_space || !p.piano_prep_out_ptr) return;
-    const prep = p.piano_prep_init(sampleRate) >>> 0;
-    if (!prep) return;
-    try {
-      for (const [h, d] of [[0.501, 1.01], [0.5, 1.0]]) {
-        const vcLen = p.piano_prep_voicing(prep, h, d, 1.0, 1.0) >>> 0;
-        const src = p.piano_prep_out_ptr(prep) >>> 0;
-        const mem = this.syncMemoryView(128);
-        const dst = exports.piano_staging_offset_ptr(ctx, 0, vcLen) >>> 0;
-        if (dst) mem.set(mem.subarray(src >>> 2, (src >>> 2) + vcLen), dst >>> 2);
-        exports.piano_apply_voicing_blob(ctx, h, d, 1.0, 1.0, vcLen);
-      }
-      const spLen = p.piano_prep_space(prep, 0, 2) >>> 0;
-      const spSrc = p.piano_prep_out_ptr(prep) >>> 0;
-      const m2 = this.syncMemoryView(128);
-      for (let off = 0; off < spLen; off += BLOB_STREAM_CHUNK) {
-        const n = Math.min(BLOB_STREAM_CHUNK, spLen - off);
-        const dst = exports.piano_staging_ptr(ctx, n) >>> 0;
-        if (dst) m2.set(m2.subarray((spSrc >>> 2) + off, (spSrc >>> 2) + off + n), dst >>> 2);
-        exports.piano_stage_space_chunk(ctx, 0, 2, off, n, spLen);
-      }
-      exports.piano_commit_space(ctx, 0, 2);
-      exports.piano_is_space_crossfading(ctx);
-      for (let i = 0; i < 4; i++) exports.piano_render(ctx, 128);
-    } finally { p.piano_prep_destroy?.(prep); }
   }
 }
 
