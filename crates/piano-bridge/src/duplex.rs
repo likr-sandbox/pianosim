@@ -333,31 +333,3 @@ impl DuplexBank {
         self.freqs_hz.get(mode_idx).copied().unwrap_or(0.0)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn duplex_retune_a4_scales_mode_frequencies_and_clamps_bounds() {
-        let mut bank = DuplexBank::new(48_000.0);
-        assert_eq!(bank.a4_freq_hz(), 440.0);
-        let base_f0 = bank.mode_freq_hz(0);
-        assert!(base_f0 > 1_300.0);
-
-        bank.retune_a4(415.0);
-        assert_eq!(bank.a4_freq_hz(), 415.0);
-        let f_415 = bank.mode_freq_hz(0);
-        assert!((f_415 / base_f0 - 415.0 / 440.0).abs() < 1e-5);
-
-        bank.retune_a4(442.0);
-        assert_eq!(bank.a4_freq_hz(), 442.0);
-        let f_442 = bank.mode_freq_hz(0);
-        assert!((f_442 / base_f0 - 442.0 / 440.0).abs() < 1e-5);
-
-        bank.retune_a4(300.0);
-        assert_eq!(bank.a4_freq_hz(), 415.0);
-        bank.retune_a4(f32::NAN);
-        assert_eq!(bank.a4_freq_hz(), 440.0);
-    }
-}

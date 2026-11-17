@@ -6,81 +6,16 @@
 
 use core::f64::consts::TAU;
 
-use piano_spec::{build_scale_design, VoicingSpec, CHOIR_LAYOUTS, TOTAL_STRINGS};
+use piano_spec::TOTAL_STRINGS;
 
+use crate::bridge_presets::build_default_poles;
+pub use crate::bridge_presets::{
+    default_string_port_resistances, ReducedBridgePole, DEFAULT_Y_INF, MODE_ZONE_GAINS,
+    NUM_REDUCED_MODES,
+};
+pub use crate::math::invert_8x8;
+use crate::math::{identity_8x8, matmul_8x8, sanitize_sample_rate};
 use crate::zone_proj::{ZoneWeight, NUM_BRIDGE_ZONES};
-
-/// Number of reduced bidirectional soundboard/bridge modes (`~54..1,130 Hz`).
-pub const NUM_REDUCED_MODES: usize = 10;
-
-/// Publicly exported reduced bridge pole descriptor for M6 `piano-body-gen` pole cancellation.
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct ReducedBridgePole {
-    /// Modal natural frequency in Hz.
-    pub freq_hz: f32,
-    /// Viscous damping ratio `zeta` (`0.0` in lossless test mode).
-    pub zeta: f32,
-    /// Modal quality factor `Q = 1 / (2 * zeta)`.
-    pub q_factor: f32,
-    /// Effective modal mass in kilograms.
-    pub modal_mass_kg: f32,
-    /// Dimensionless spatial mode gains at each of the 8 bridge zones.
-    pub zone_gains: [f32; NUM_BRIDGE_ZONES],
-}
-
-/// Default high-frequency passive local resistive mobility `y_inf` `[m / (N*s)]`
-/// across bridge zones `0..8`, preventing any `1.13 kHz` brick wall on treble/longitudinal signals.
-pub const DEFAULT_Y_INF: [f32; NUM_BRIDGE_ZONES] = [
-    0.000_14, 0.000_16, 0.000_28, 0.000_28, 0.000_28, 0.000_24, 0.000_22, 0.000_16,
-];
-
-const MODE_FREQS_HZ: [f32; NUM_REDUCED_MODES] = [
-    54.0, 89.0, 142.0, 212.0, 285.0, 405.0, 530.0, 730.0, 930.0, 1130.0,
-];
-const MODE_ZETAS: [f32; NUM_REDUCED_MODES] = [
-    0.055, 0.042, 0.030, 0.020, 0.020, 0.019, 0.024, 0.021, 0.020, 0.019,
-];
-const MODE_MASSES_KG: [f32; NUM_REDUCED_MODES] =
-    [3.60, 2.50, 1.25, 0.68, 0.48, 0.56, 0.90, 2.20, 2.90, 3.40];
-
-const MODE_ZONE_GAINS: [[f32; NUM_BRIDGE_ZONES]; NUM_REDUCED_MODES] = [
-    [0.12, 0.18, 0.30, 0.36, 0.34, 0.26, 0.18, 0.10],
-    [0.16, 0.18, 0.18, 0.06, -0.16, -0.28, -0.26, -0.16],
-    [0.05, 0.06, -0.26, -0.32, -0.28, -0.12, 0.18, 0.22],
-    [0.04, -0.05, -0.34, -0.36, -0.20, 0.26, 0.20, -0.16],
-    [-0.04, 0.05, 0.28, 0.40, 0.26, -0.20, -0.26, 0.18],
-    [0.03, -0.04, 0.18, 0.36, -0.24, -0.32, 0.14, 0.24],
-    [-0.04, 0.06, -0.12, 0.30, 0.30, -0.20, -0.16, 0.14],
-    [-0.03, 0.05, -0.10, 0.14, -0.14, -0.14, 0.16, -0.12],
-    [0.03, -0.04, 0.08, -0.12, 0.14, -0.12, -0.16, 0.16],
-    [-0.02, 0.04, -0.08, 0.10, -0.14, 0.16, -0.14, 0.16],
-];
-
-/// Builds default physical per-string WDF port resistances `[kg/s]` for standalone initialization
-/// before `StringBank::bridge_port_resistances()` is supplied.
-#[must_use]
-pub fn default_string_port_resistances(sample_rate: f32) -> [f32; TOTAL_STRINGS] {
-    let safe_sr = f64::from(if sample_rate.is_finite() {
-        sample_rate.clamp(8_000.0, 384_000.0)
-    } else {
-        48_000.0
-    });
-    let specs = build_scale_design(&VoicingSpec::default());
-    let mut r0 = [1.0_f32; TOTAL_STRINGS];
-    for (k, layout) in CHOIR_LAYOUTS.iter().enumerate() {
-        let p = specs[k];
-        let m_str = p.linear_density_kg_m * p.speaking_length_m;
-        let z0 = 2.0 * p.f0_et_hz * m_str;
-        let scale = (11_000.0 / safe_sr).clamp(0.05, 0.6);
-        let r_val = (z0 * scale).max(0.05) as f32;
-        let start = usize::from(layout.first_string_idx);
-        let count = usize::from(layout.strings_per_key);
-        for slot in &mut r0[start..start + count] {
-            *slot = r_val;
-        }
-    }
-    r0
-}
 
 /// Passive 10-mode reduced soundboard/bridge state-space admittance with exact
 /// trapezoidal integration and precomputed `8x8` WDF junction solve matrices.
@@ -120,11 +55,7 @@ impl AdmittanceSsm {
     }
 
     fn build(sample_rate: f32, lossless: bool) -> Self {
-        let safe_sr = f64::from(if sample_rate.is_finite() {
-            sample_rate.clamp(8_000.0, 384_000.0)
-        } else {
-            48_000.0
-        });
+        let safe_sr = f64::from(sanitize_sample_rate(sample_rate));
         let ts = 1.0 / safe_sr;
         let h = 0.5 * ts;
 
@@ -138,48 +69,24 @@ impl AdmittanceSsm {
             *dst = f64::from(src);
         }
 
-        let placeholder = ReducedBridgePole {
-            freq_hz: 0.0,
-            zeta: 0.0,
-            q_factor: 0.0,
-            modal_mass_kg: 1.0,
-            zone_gains: [0.0; NUM_BRIDGE_ZONES],
-        };
-        let mut poles = [placeholder; NUM_REDUCED_MODES];
+        let poles = build_default_poles(lossless);
         let mut m_m = [0.0_f64; NUM_REDUCED_MODES];
         let mut c_m = [0.0_f64; NUM_REDUCED_MODES];
         let mut k_m = [0.0_f64; NUM_REDUCED_MODES];
         let mut y_m = [0.0_f64; NUM_REDUCED_MODES];
         let mut phi = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_REDUCED_MODES];
 
-        for m in 0..NUM_REDUCED_MODES {
-            let freq_hz = MODE_FREQS_HZ[m];
-            let zeta = if lossless { 0.0 } else { MODE_ZETAS[m] };
-            let q_factor = if zeta > 0.0 {
-                0.5 / zeta
-            } else {
-                f32::INFINITY
-            };
-            let modal_mass_kg = MODE_MASSES_KG[m];
-            let zone_gains = MODE_ZONE_GAINS[m];
-            poles[m] = ReducedBridgePole {
-                freq_hz,
-                zeta,
-                q_factor,
-                modal_mass_kg,
-                zone_gains,
-            };
-
-            let mass = f64::from(modal_mass_kg);
-            let omega = TAU * f64::from(freq_hz);
+        for (m, pole) in poles.iter().enumerate() {
+            let mass = f64::from(pole.modal_mass_kg);
+            let omega = TAU * f64::from(pole.freq_hz);
             let stiff = mass * omega * omega;
-            let damp = 2.0 * f64::from(zeta) * mass * omega;
+            let damp = 2.0 * f64::from(pole.zeta) * mass * omega;
             let z_mode = mass / h + damp + h * stiff;
             m_m[m] = mass;
             c_m[m] = damp;
             k_m[m] = stiff;
             y_m[m] = 1.0 / z_mode;
-            for (dst, &src) in phi[m].iter_mut().zip(zone_gains.iter()) {
+            for (dst, &src) in phi[m].iter_mut().zip(pole.zone_gains.iter()) {
                 *dst = f64::from(src);
             }
         }
@@ -413,80 +320,4 @@ impl AdmittanceSsm {
     pub const fn dissipated_energy_joules(&self) -> f64 {
         self.diss_energy_j
     }
-}
-
-#[inline]
-const fn identity_8x8() -> [[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES] {
-    let mut id = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
-    let mut i = 0;
-    while i < NUM_BRIDGE_ZONES {
-        id[i][i] = 1.0;
-        i += 1;
-    }
-    id
-}
-
-#[inline]
-fn matmul_8x8(
-    a: &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
-    b: &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
-) -> [[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES] {
-    let mut out = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
-    for i in 0..NUM_BRIDGE_ZONES {
-        for j in 0..NUM_BRIDGE_ZONES {
-            let mut sum = 0.0_f64;
-            for k in 0..NUM_BRIDGE_ZONES {
-                sum += a[i][k] * b[k][j];
-            }
-            out[i][j] = sum;
-        }
-    }
-    out
-}
-
-/// Pure-Rust `no_std` Gauss-Jordan matrix inversion with partial pivoting (`8x8`, zero panic).
-#[must_use]
-pub fn invert_8x8(
-    mat: &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
-) -> [[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES] {
-    let mut a = *mat;
-    let mut inv = identity_8x8();
-
-    for col in 0..NUM_BRIDGE_ZONES {
-        let mut pivot_row = col;
-        let mut max_abs = a[col][col].abs();
-        for (row, a_row) in a.iter().enumerate().skip(col + 1) {
-            let cand = a_row[col].abs();
-            if cand > max_abs {
-                max_abs = cand;
-                pivot_row = row;
-            }
-        }
-        if pivot_row != col {
-            a.swap(col, pivot_row);
-            inv.swap(col, pivot_row);
-        }
-        let diag = a[col][col];
-        if !diag.is_finite() || diag.abs() < 1.0e-18 {
-            continue;
-        }
-        let inv_diag = 1.0 / diag;
-        for j in 0..NUM_BRIDGE_ZONES {
-            a[col][j] *= inv_diag;
-            inv[col][j] *= inv_diag;
-        }
-        for row in 0..NUM_BRIDGE_ZONES {
-            if row == col {
-                continue;
-            }
-            let factor = a[row][col];
-            if factor != 0.0 {
-                for j in 0..NUM_BRIDGE_ZONES {
-                    a[row][j] -= factor * a[col][j];
-                    inv[row][j] -= factor * inv[col][j];
-                }
-            }
-        }
-    }
-    inv
 }

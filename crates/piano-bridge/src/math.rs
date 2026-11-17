@@ -3,6 +3,8 @@
 
 use core::f64::consts::{FRAC_2_PI, LN_10, LOG2_E, TAU};
 
+use crate::zone_proj::NUM_BRIDGE_ZONES;
+
 const LN_1000: f64 = 3.0 * LN_10;
 const PIO2_HI: f64 = 1.570_796_326_734_125_6;
 const PIO2_LO: f64 = 6.077_100_506_506_192e-11;
@@ -171,4 +173,129 @@ pub(crate) fn coupled_pole_f32(
         (1.0 + r_hold * cos_mag) as f32
     };
     Some((d_f32, s_f32))
+}
+
+#[inline]
+pub(crate) fn sanitize_sample_rate(sample_rate: f32) -> f32 {
+    if sample_rate.is_finite() {
+        sample_rate.clamp(8_000.0, 384_000.0)
+    } else {
+        48_000.0
+    }
+}
+
+#[inline]
+pub(crate) fn mat8_vec(
+    m: &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+    v: &[f64; NUM_BRIDGE_ZONES],
+) -> [f64; NUM_BRIDGE_ZONES] {
+    let mut out = [0.0_f64; NUM_BRIDGE_ZONES];
+    for (dst, row) in out.iter_mut().zip(m.iter()) {
+        let p01 = row[0] * v[0] + row[1] * v[1];
+        let p23 = row[2] * v[2] + row[3] * v[3];
+        let p45 = row[4] * v[4] + row[5] * v[5];
+        let p67 = row[6] * v[6] + row[7] * v[7];
+        *dst = (p01 + p23) + (p45 + p67);
+    }
+    out
+}
+
+#[inline]
+pub(crate) fn mat8_vec2(
+    m: &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+    v1: &[f64; NUM_BRIDGE_ZONES],
+    v2: &[f64; NUM_BRIDGE_ZONES],
+) -> ([f64; NUM_BRIDGE_ZONES], [f64; NUM_BRIDGE_ZONES]) {
+    let mut o1 = [0.0_f64; NUM_BRIDGE_ZONES];
+    let mut o2 = [0.0_f64; NUM_BRIDGE_ZONES];
+    for i in 0..NUM_BRIDGE_ZONES {
+        let row = &m[i];
+        let a01 = row[0] * v1[0] + row[1] * v1[1];
+        let a23 = row[2] * v1[2] + row[3] * v1[3];
+        let a45 = row[4] * v1[4] + row[5] * v1[5];
+        let a67 = row[6] * v1[6] + row[7] * v1[7];
+        o1[i] = (a01 + a23) + (a45 + a67);
+        let b01 = row[0] * v2[0] + row[1] * v2[1];
+        let b23 = row[2] * v2[2] + row[3] * v2[3];
+        let b45 = row[4] * v2[4] + row[5] * v2[5];
+        let b67 = row[6] * v2[6] + row[7] * v2[7];
+        o2[i] = (b01 + b23) + (b45 + b67);
+    }
+    (o1, o2)
+}
+
+#[inline]
+pub(crate) const fn identity_8x8() -> [[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES] {
+    let mut id = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
+    let mut i = 0;
+    while i < NUM_BRIDGE_ZONES {
+        id[i][i] = 1.0;
+        i += 1;
+    }
+    id
+}
+
+#[inline]
+pub(crate) fn matmul_8x8(
+    a: &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+    b: &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+) -> [[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES] {
+    let mut out = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
+    for i in 0..NUM_BRIDGE_ZONES {
+        for j in 0..NUM_BRIDGE_ZONES {
+            let mut sum = 0.0_f64;
+            for k in 0..NUM_BRIDGE_ZONES {
+                sum += a[i][k] * b[k][j];
+            }
+            out[i][j] = sum;
+        }
+    }
+    out
+}
+
+/// Pure-Rust `no_std` Gauss-Jordan matrix inversion with partial pivoting (`8x8`, zero panic).
+#[must_use]
+pub fn invert_8x8(
+    mat: &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+) -> [[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES] {
+    let mut a = *mat;
+    let mut inv = identity_8x8();
+
+    for col in 0..NUM_BRIDGE_ZONES {
+        let mut pivot_row = col;
+        let mut max_abs = a[col][col].abs();
+        for (row, a_row) in a.iter().enumerate().skip(col + 1) {
+            let cand = a_row[col].abs();
+            if cand > max_abs {
+                max_abs = cand;
+                pivot_row = row;
+            }
+        }
+        if pivot_row != col {
+            a.swap(col, pivot_row);
+            inv.swap(col, pivot_row);
+        }
+        let diag = a[col][col];
+        if !diag.is_finite() || diag.abs() < 1.0e-18 {
+            continue;
+        }
+        let inv_diag = 1.0 / diag;
+        for j in 0..NUM_BRIDGE_ZONES {
+            a[col][j] *= inv_diag;
+            inv[col][j] *= inv_diag;
+        }
+        for row in 0..NUM_BRIDGE_ZONES {
+            if row == col {
+                continue;
+            }
+            let factor = a[row][col];
+            if factor != 0.0 {
+                for j in 0..NUM_BRIDGE_ZONES {
+                    a[row][j] -= factor * a[col][j];
+                    inv[row][j] -= factor * inv[col][j];
+                }
+            }
+        }
+    }
+    inv
 }
