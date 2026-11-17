@@ -210,6 +210,22 @@
   accent-color: var(--accent);
 }
 
+.touch-curve-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.touch-curve-group .btn-segmented {
+  min-block-size: 28px;
+  padding: 5px 10px;
+}
+
+.btn-segmented:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .pedal-bar {
   display: flex;
   flex-wrap: wrap;
