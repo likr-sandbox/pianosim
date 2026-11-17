@@ -87,7 +87,7 @@ impl WasmContext {
         });
     }
 
-    /// Updates voicing targets for smooth real-time parameter interpolation.
+    /// Updates voicing targets (including `A4` concert pitch) for smooth real-time interpolation.
     #[inline]
     pub fn set_voicing(
         &mut self,
@@ -95,9 +95,15 @@ impl WasmContext {
         unison_detune: f32,
         stretch: f32,
         length_scale: f32,
+        a4_freq_hz: f32,
     ) {
-        self.engine
-            .set_voicing(hammer_hardness, unison_detune, stretch, length_scale);
+        self.engine.set_voicing_with_a4(
+            hammer_hardness,
+            unison_detune,
+            stretch,
+            length_scale,
+            a4_freq_hz,
+        );
     }
 
     /// Reconfigures spatial listening perspective and lid opening state.
@@ -193,12 +199,19 @@ impl WasmContext {
         unison_detune: f32,
         stretch: f32,
         length_scale: f32,
+        a4_freq_hz: f32,
         len_f32: usize,
     ) -> bool {
         if len_f32 == 0 || len_f32 > self.staging.len() {
             return false;
         }
-        let spec = VoicingSpec::from_globals(hammer_hardness, unison_detune, stretch, length_scale);
+        let spec = VoicingSpec::from_globals_with_a4(
+            hammer_hardness,
+            unison_detune,
+            stretch,
+            length_scale,
+            a4_freq_hz,
+        );
         self.engine
             .apply_precomputed_voicing(spec, &self.staging[..len_f32])
     }
@@ -345,12 +358,12 @@ mod tests {
 
         assert!(!ctx.apply_space_blob(ListenerPerspective::Player, LidState::Open, 0));
         assert!(!ctx.apply_space_blob(ListenerPerspective::Player, LidState::Open, cap + 1));
-        assert!(!ctx.apply_voicing_blob(0.5, 1.0, 1.0, 1.0, 0));
-        assert!(!ctx.apply_voicing_blob(0.5, 1.0, 1.0, 1.0, cap + 1));
+        assert!(!ctx.apply_voicing_blob(0.5, 1.0, 1.0, 1.0, 440.0, 0));
+        assert!(!ctx.apply_voicing_blob(0.5, 1.0, 1.0, 1.0, 440.0, cap + 1));
 
         // Corrupt staging header (simulating a staging overwrite) and verify clean rejection.
         ctx.staging[0] = 0.0;
         let vc_len = voicing_blob_len(48_000.0);
-        assert!(!ctx.apply_voicing_blob(0.5, 1.0, 1.0, 1.0, vc_len));
+        assert!(!ctx.apply_voicing_blob(0.5, 1.0, 1.0, 1.0, 440.0, vc_len));
     }
 }

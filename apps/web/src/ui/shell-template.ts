@@ -11,8 +11,8 @@ export const STUDIO_SHELL_HTML = `
         <button id="btn-unlock" data-testid="unlock-audio" type="button" class="btn btn-primary">
           Unlock Audio
         </button>
-        <button id="btn-a4-trigger" data-testid="trigger-a4" type="button" class="btn btn-accent">
-          A4 = 440 Hz
+        <button id="btn-a4-trigger" data-testid="trigger-a4" type="button" class="btn btn-accent val-mono">
+          A4 = 440.0 Hz
         </button>
         <button id="btn-panic" data-testid="panic-btn" type="button" class="btn btn-ghost">
           All Notes Off

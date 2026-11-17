@@ -1,5 +1,6 @@
 import './styles/base.css';
 import './styles/keyboard.css';
+import './styles/hud.css';
 import './styles/panels.css';
 import './styles/presets.css';
 import { TelemetryClient } from './audio/telemetry-client';

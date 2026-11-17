@@ -1,4 +1,5 @@
 import {
+  A4_FREQ_DEFAULT,
   HAMMER_HARDNESS_DEFAULT,
   LID_OPEN,
   PERSPECTIVE_PLAYER,
@@ -40,6 +41,7 @@ export class WasmAudioHost {
     unison: UNISON_DETUNE_DEFAULT,
     stretch: STRETCH_TUNING_DEFAULT,
     scale: STRING_SCALE_DEFAULT,
+    a4: A4_FREQ_DEFAULT,
   };
   private voicingSeq = 0;
   private voicingInFlight = false;
@@ -129,6 +131,7 @@ export class WasmAudioHost {
     unisonDetune: number,
     stretchTuning: number,
     stringLengthScale: number,
+    a4FreqHz = A4_FREQ_DEFAULT,
   ): void {
     this.enqueueOrRun(() => {
       if (hammerHardness !== this.lastHammer) {
@@ -138,7 +141,8 @@ export class WasmAudioHost {
       const tuningChanged =
         unisonDetune !== this.lastTuning.unison ||
         stretchTuning !== this.lastTuning.stretch ||
-        stringLengthScale !== this.lastTuning.scale;
+        stringLengthScale !== this.lastTuning.scale ||
+        a4FreqHz !== this.lastTuning.a4;
       if (!tuningChanged || !this.prepWorker) {
         return;
       }
@@ -146,6 +150,7 @@ export class WasmAudioHost {
         unison: unisonDetune,
         stretch: stretchTuning,
         scale: stringLengthScale,
+        a4: a4FreqHz,
       };
       const req: Extract<PrepInboundMessage, { type: 'prepVoicing' }> = {
         type: 'prepVoicing',
@@ -153,6 +158,7 @@ export class WasmAudioHost {
         unisonDetune,
         stretchTuning,
         stringLengthScale,
+        a4FreqHz,
         seq: ++this.voicingSeq,
       };
       if (this.voicingInFlight) {

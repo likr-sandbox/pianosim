@@ -25,9 +25,10 @@ pub use preset_codec::{
     PRESET_REDUCED_POLES, PRESET_VERSION,
 };
 pub use scale_design::{
-    build_scale_design, equal_temperament_hz, key_choir, key_to_midi, midi_to_key,
-    string_params_for_key, ChoirLayout, StringPhysicalParams, CHOIR_LAYOUTS, DAMPED_KEYS, MIDI_A0,
-    MIDI_C8, NUM_KEYS, STEEL_DENSITY_KG_M3, STEEL_YOUNGS_MODULUS_PA, TOTAL_STRINGS,
+    build_scale_design, equal_temperament_hz, equal_temperament_hz_with_a4, key_choir, key_to_midi,
+    midi_to_key, string_params_for_key, ChoirLayout, StringPhysicalParams, A4_FREQ_HZ,
+    A4_FREQ_MAX_HZ, A4_FREQ_MIN_HZ, CHOIR_LAYOUTS, DAMPED_KEYS, MIDI_A0, MIDI_C8, NUM_KEYS,
+    STEEL_DENSITY_KG_M3, STEEL_YOUNGS_MODULUS_PA, TOTAL_STRINGS,
 };
 pub use voicing::{NoteVoicingOffset, VoicingSpec};
 

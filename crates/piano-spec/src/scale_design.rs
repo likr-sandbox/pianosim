@@ -22,6 +22,10 @@ pub const A4_KEY_IDX: usize = 48;
 pub const A4_MIDI: u8 = 69;
 /// Concert pitch reference frequency for `A4` in Hz.
 pub const A4_FREQ_HZ: f64 = 440.0;
+/// Minimum supported concert pitch reference frequency for `A4` in Hz (`~-1` semitone).
+pub const A4_FREQ_MIN_HZ: f64 = 415.0;
+/// Maximum supported concert pitch reference frequency for `A4` in Hz (`~+1` semitone).
+pub const A4_FREQ_MAX_HZ: f64 = 466.0;
 
 /// Number of bass monochord keys (`0..8`, 1 string per key).
 pub const MONOCHORD_KEYS: usize = 8;
@@ -127,14 +131,28 @@ pub const fn key_choir(key_idx: usize) -> Option<ChoirLayout> {
 /// Returns `0.0` if `key_idx >= NUM_KEYS`.
 #[must_use]
 pub fn equal_temperament_hz(key_idx: usize) -> f64 {
+    equal_temperament_hz_with_a4(key_idx, A4_FREQ_HZ)
+}
+
+/// Computes the 12-tone equal temperament fundamental frequency in Hz for a configurable
+/// `A4` concert pitch reference (clamped to `[415.0, 466.0]` Hz; non-finite falls back to `440.0`).
+///
+/// Returns `0.0` if `key_idx >= NUM_KEYS`.
+#[must_use]
+pub fn equal_temperament_hz_with_a4(key_idx: usize, a4_freq_hz: f64) -> f64 {
     if key_idx >= NUM_KEYS {
         return 0.0;
     }
+    let safe_a4 = if a4_freq_hz.is_finite() {
+        a4_freq_hz.clamp(A4_FREQ_MIN_HZ, A4_FREQ_MAX_HZ)
+    } else {
+        A4_FREQ_HZ
+    };
     if key_idx == A4_KEY_IDX {
-        return A4_FREQ_HZ;
+        return safe_a4;
     }
     let semitones = (key_idx as i32) - (A4_KEY_IDX as i32);
-    A4_FREQ_HZ * exp2_f64(f64::from(semitones) / 12.0)
+    safe_a4 * exp2_f64(f64::from(semitones) / 12.0)
 }
 
 /// Physical string parameters (`f64` precision) for one piano key choir.
@@ -195,6 +213,8 @@ fn plain_steel_radius_and_tension(l_m: f64, f0_hz: f64, b_target: f64) -> (f64, 
 
 /// Computes the physical string parameters for `key_idx` under `voicing`.
 ///
+/// Wire geometry (`r_core`, `mu`, `ESK^2`, `f_long_hz`) remains fixed to the physical
+/// concert-grand frame while tuning-pin tension `T_0` scales with `(a4_freq_hz / 440.0)^2`.
 /// Out-of-range indices clamp safely to `87` without panicking.
 #[must_use]
 pub fn string_params_for_key(key_idx: usize, voicing: &VoicingSpec) -> StringPhysicalParams {
@@ -203,13 +223,15 @@ pub fn string_params_for_key(key_idx: usize, voicing: &VoicingSpec) -> StringPhy
     } else {
         key_idx
     };
-    let f0_et_hz = equal_temperament_hz(k);
+    let f0_nom_hz = equal_temperament_hz(k);
+    let a4_hz = f64::from(voicing.effective_a4_freq_hz());
+    let f0_et_hz = equal_temperament_hz_with_a4(k, a4_hz);
     let l_base = base_speaking_length_m(k);
     let b_base = target_inharmonicity_b(k);
 
     let plain_break = MONOCHORD_KEYS + BICHORD_KEYS;
-    let (core_radius_m, linear_density_kg_m, tension_base, esk2_base) = if k >= plain_break {
-        let (r_core, mu, t0) = plain_steel_radius_and_tension(l_base, f0_et_hz, b_base);
+    let (core_radius_m, linear_density_kg_m, tension_nom, esk2_base) = if k >= plain_break {
+        let (r_core, mu, t0) = plain_steel_radius_and_tension(l_base, f0_nom_hz, b_base);
         let s_core = PI * r_core * r_core;
         let esk2 = 0.25 * STEEL_YOUNGS_MODULUS_PA * s_core * r_core * r_core;
         (r_core, mu, t0, esk2)
@@ -224,9 +246,15 @@ pub fn string_params_for_key(key_idx: usize, voicing: &VoicingSpec) -> StringPhy
         let s = (k as f64) / (plain_break as f64);
         let r_core = BASS_CORE_RADIUS_A0_M + (r_26 - BASS_CORE_RADIUS_A0_M) * powf_f64(s, 2.4);
         let t0 = BASS_TENSION_A0_N + (t_26 - BASS_TENSION_A0_N) * powf_f64(s, 1.4);
-        let mu = t0 / (4.0 * l_base * l_base * f0_et_hz * f0_et_hz);
+        let mu = t0 / (4.0 * l_base * l_base * f0_nom_hz * f0_nom_hz);
         let esk2 = b_base * t0 * l_base * l_base / (PI * PI);
         (r_core, mu, t0, esk2)
+    };
+
+    let tension_base = if a4_hz == A4_FREQ_HZ {
+        tension_nom
+    } else {
+        4.0 * linear_density_kg_m * l_base * l_base * f0_et_hz * f0_et_hz
     };
 
     let length_scale = f64::from(voicing.effective_string_length_scale());
@@ -365,6 +393,41 @@ mod tests {
             if k > 0 {
                 assert!(p.speaking_length_m < specs[k - 1].speaking_length_m);
                 assert!(p.inharmonicity_b > specs[k - 1].inharmonicity_b);
+            }
+        }
+    }
+
+    #[test]
+    fn concert_pitch_a4_retuning_preserves_wire_geometry_and_mersenne_law() {
+        let base_voicing = VoicingSpec::default();
+        let base_specs = build_scale_design(&base_voicing);
+
+        for &a4_hz in &[415.0_f32, 432.0, 435.0, 440.0, 442.0, 466.0] {
+            let v = VoicingSpec::from_globals_with_a4(0.5, 1.0, 1.0, 1.0, a4_hz);
+            let specs = build_scale_design(&v);
+            let ratio = f64::from(a4_hz) / A4_FREQ_HZ;
+            let ratio_sq = ratio * ratio;
+
+            assert_eq!(specs[A4_KEY_IDX].f0_et_hz, f64::from(a4_hz));
+            assert_eq!(
+                crate::dispersion::key_tuned_f0_hz(A4_KEY_IDX, &specs, &v),
+                f64::from(a4_hz)
+            );
+
+            for k in 0..NUM_KEYS {
+                let p = specs[k];
+                let b0 = base_specs[k];
+                assert_eq!(p.speaking_length_m, b0.speaking_length_m);
+                assert_eq!(p.core_radius_m, b0.core_radius_m);
+                assert_eq!(p.linear_density_kg_m, b0.linear_density_kg_m);
+                assert_eq!(p.bending_stiffness_esk2, b0.bending_stiffness_esk2);
+                assert_eq!(p.f_long_hz, b0.f_long_hz);
+
+                let f0_check =
+                    (0.5 / p.speaking_length_m) * (p.tension_n / p.linear_density_kg_m).sqrt();
+                assert!((f0_check - p.f0_et_hz).abs() < 1e-10 * p.f0_et_hz);
+                assert!((p.tension_n / b0.tension_n - ratio_sq).abs() < 1e-10);
+                assert!((p.inharmonicity_b * ratio_sq / b0.inharmonicity_b - 1.0).abs() < 1e-10);
             }
         }
     }

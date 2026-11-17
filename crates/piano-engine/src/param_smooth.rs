@@ -1,10 +1,10 @@
 //! Parameter smoothing and spatial crossfade transitions for real-time engine control.
 
 use piano_spec::voicing::{
-    HAMMER_HARDNESS_DEFAULT, HAMMER_HARDNESS_MAX, HAMMER_HARDNESS_MIN, STRETCH_AMOUNT_DEFAULT,
-    STRETCH_AMOUNT_MAX, STRETCH_AMOUNT_MIN, STRING_LENGTH_SCALE_DEFAULT, STRING_LENGTH_SCALE_MAX,
-    STRING_LENGTH_SCALE_MIN, UNISON_DETUNE_SCALE_DEFAULT, UNISON_DETUNE_SCALE_MAX,
-    UNISON_DETUNE_SCALE_MIN,
+    A4_FREQ_DEFAULT, A4_FREQ_MAX, A4_FREQ_MIN, HAMMER_HARDNESS_DEFAULT, HAMMER_HARDNESS_MAX,
+    HAMMER_HARDNESS_MIN, STRETCH_AMOUNT_DEFAULT, STRETCH_AMOUNT_MAX, STRETCH_AMOUNT_MIN,
+    STRING_LENGTH_SCALE_DEFAULT, STRING_LENGTH_SCALE_MAX, STRING_LENGTH_SCALE_MIN,
+    UNISON_DETUNE_SCALE_DEFAULT, UNISON_DETUNE_SCALE_MAX, UNISON_DETUNE_SCALE_MIN,
 };
 use piano_spec::VoicingSpec;
 
@@ -15,32 +15,44 @@ pub use crate::space_guard::{
 
 /// Time constant for voicing parameter smoothing (`20 ms`).
 pub const VOICING_SMOOTH_TAU_S: f32 = 0.020;
-/// Convergence epsilon tolerance below which smoothed parameters snap to target (`1e-4`).
+/// Convergence epsilon tolerance below which smoothed unit-scale parameters snap to target (`1e-4`).
 pub const VOICING_SETTLE_TOL: f32 = 1.0e-4;
 
 /// Voicing dirty flag: hammer hardness / action felt parameters changed.
 pub const DIRTY_HAMMER: u8 = 1;
-/// Voicing dirty flag: string tuning / unison / length scale changed.
+/// Voicing dirty flag: string tuning / unison / length scale / concert pitch changed.
 pub const DIRTY_TUNING: u8 = 2;
 
-const DEFAULTS: [f32; 4] = [
+const NUM_VOICING_PARAMS: usize = 5;
+
+const DEFAULTS: [f32; NUM_VOICING_PARAMS] = [
     HAMMER_HARDNESS_DEFAULT,
     UNISON_DETUNE_SCALE_DEFAULT,
     STRETCH_AMOUNT_DEFAULT,
     STRING_LENGTH_SCALE_DEFAULT,
+    A4_FREQ_DEFAULT,
 ];
-const MINS: [f32; 4] = [
+const MINS: [f32; NUM_VOICING_PARAMS] = [
     HAMMER_HARDNESS_MIN,
     UNISON_DETUNE_SCALE_MIN,
     STRETCH_AMOUNT_MIN,
     STRING_LENGTH_SCALE_MIN,
+    A4_FREQ_MIN,
 ];
-const MAXS: [f32; 4] = [
+const MAXS: [f32; NUM_VOICING_PARAMS] = [
     HAMMER_HARDNESS_MAX,
     UNISON_DETUNE_SCALE_MAX,
     STRETCH_AMOUNT_MAX,
     STRING_LENGTH_SCALE_MAX,
+    A4_FREQ_MAX,
 ];
+
+#[inline]
+const fn settle_tol(idx: usize) -> f32 {
+    let span = MAXS[idx] - MINS[idx];
+    let scale = if span > 1.0 { span } else { 1.0 };
+    VOICING_SETTLE_TOL * scale
+}
 
 /// Smoothing interpolation curve for parameter transitions.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -50,13 +62,14 @@ pub enum SmoothCurve {
     Linear,
 }
 
-/// Global 4-parameter voicing smoother with O(1) idle detection.
+/// Global 5-parameter voicing smoother (`hammer`, `unison`, `stretch`, `length`, `a4_freq_hz`)
+/// with O(1) idle detection.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoicingSmoother {
     curve: SmoothCurve,
     active: bool,
-    current: [f32; 4],
-    target: [f32; 4],
+    current: [f32; NUM_VOICING_PARAMS],
+    target: [f32; NUM_VOICING_PARAMS],
 }
 
 impl Default for VoicingSmoother {
@@ -79,11 +92,12 @@ impl VoicingSmoother {
     #[must_use]
     pub fn new_with_voicing(spec: &VoicingSpec) -> Self {
         let mut s = Self::new();
-        s.set_immediate(
+        s.set_immediate_with_a4(
             spec.effective_global_hammer_hardness(),
             spec.effective_unison_detune_scale(),
             spec.effective_stretch_amount(),
             spec.effective_string_length_scale(),
+            spec.effective_a4_freq_hz(),
         );
         s
     }
@@ -99,16 +113,27 @@ impl VoicingSmoother {
     }
 
     pub fn set_target(&mut self, hammer: f32, unison: f32, stretch: f32, length: f32) {
-        let vals = [hammer, unison, stretch, length];
+        self.set_target_with_a4(hammer, unison, stretch, length, self.target[4]);
+    }
+
+    pub fn set_target_with_a4(
+        &mut self,
+        hammer: f32,
+        unison: f32,
+        stretch: f32,
+        length: f32,
+        a4_freq_hz: f32,
+    ) {
+        let vals = [hammer, unison, stretch, length, a4_freq_hz];
         let mut any_diff = false;
-        for i in 0..4 {
+        for i in 0..NUM_VOICING_PARAMS {
             let t = if !vals[i].is_finite() {
                 DEFAULTS[i]
             } else {
                 vals[i].clamp(MINS[i], MAXS[i])
             };
             self.target[i] = t;
-            if (self.current[i] - t).abs() > VOICING_SETTLE_TOL {
+            if (self.current[i] - t).abs() > settle_tol(i) {
                 any_diff = true;
             } else {
                 self.current[i] = t;
@@ -117,8 +142,29 @@ impl VoicingSmoother {
         self.active = any_diff;
     }
 
+    pub fn set_a4_target(&mut self, a4_freq_hz: f32) {
+        self.set_target_with_a4(
+            self.target[0],
+            self.target[1],
+            self.target[2],
+            self.target[3],
+            a4_freq_hz,
+        );
+    }
+
     pub fn set_immediate(&mut self, hammer: f32, unison: f32, stretch: f32, length: f32) {
-        self.set_target(hammer, unison, stretch, length);
+        self.set_immediate_with_a4(hammer, unison, stretch, length, self.target[4]);
+    }
+
+    pub fn set_immediate_with_a4(
+        &mut self,
+        hammer: f32,
+        unison: f32,
+        stretch: f32,
+        length: f32,
+        a4_freq_hz: f32,
+    ) {
+        self.set_target_with_a4(hammer, unison, stretch, length, a4_freq_hz);
         self.current = self.target;
         self.active = false;
     }
@@ -141,13 +187,13 @@ impl VoicingSmoother {
         match self.curve {
             SmoothCurve::Exponential => {
                 let alpha = (-dt / VOICING_SMOOTH_TAU_S).exp();
-                for i in 0..4 {
+                for i in 0..NUM_VOICING_PARAMS {
                     self.current[i] = self.target[i] + (self.current[i] - self.target[i]) * alpha;
                 }
             }
             SmoothCurve::Linear => {
                 let step_rate = dt / VOICING_SMOOTH_TAU_S;
-                for i in 0..4 {
+                for i in 0..NUM_VOICING_PARAMS {
                     let diff = self.target[i] - self.current[i];
                     let max_step = step_rate * (MAXS[i] - MINS[i]);
                     if diff.abs() <= max_step {
@@ -158,8 +204,8 @@ impl VoicingSmoother {
                 }
             }
         }
-        for i in 0..4 {
-            if (self.current[i] - self.target[i]).abs() <= VOICING_SETTLE_TOL {
+        for i in 0..NUM_VOICING_PARAMS {
+            if (self.current[i] - self.target[i]).abs() <= settle_tol(i) {
                 self.current[i] = self.target[i];
             }
         }
@@ -170,7 +216,11 @@ impl VoicingSmoother {
         if self.current[0] != prev[0] {
             dirty |= DIRTY_HAMMER;
         }
-        if self.current[1] != prev[1] || self.current[2] != prev[2] || self.current[3] != prev[3] {
+        if self.current[1] != prev[1]
+            || self.current[2] != prev[2]
+            || self.current[3] != prev[3]
+            || self.current[4] != prev[4]
+        {
             dirty |= DIRTY_TUNING;
         }
         if dirty == 0 {
@@ -181,12 +231,23 @@ impl VoicingSmoother {
         spec.unison_detune_scale = self.current[1];
         spec.stretch_amount = self.current[2];
         spec.string_length_scale = self.current[3];
+        spec.a4_freq_hz = self.current[4];
         Some((spec, dirty))
     }
 
     pub fn set_tuning_applied(&mut self, unison: f32, stretch: f32, length: f32) {
-        let vals = [unison, stretch, length];
-        for idx in 1..4 {
+        self.set_tuning_applied_with_a4(unison, stretch, length, self.current[4]);
+    }
+
+    pub fn set_tuning_applied_with_a4(
+        &mut self,
+        unison: f32,
+        stretch: f32,
+        length: f32,
+        a4_freq_hz: f32,
+    ) {
+        let vals = [unison, stretch, length, a4_freq_hz];
+        for idx in 1..NUM_VOICING_PARAMS {
             let v = vals[idx - 1];
             let c = if v.is_finite() {
                 v.clamp(MINS[idx], MAXS[idx])
@@ -218,6 +279,11 @@ impl VoicingSmoother {
     #[must_use]
     pub const fn current_length_scale(&self) -> f32 {
         self.current[3]
+    }
+    #[inline]
+    #[must_use]
+    pub const fn current_a4_freq_hz(&self) -> f32 {
+        self.current[4]
     }
 }
 

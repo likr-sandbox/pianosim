@@ -4,12 +4,13 @@ use piano_spec::{LidState, ListenerPerspective};
 #[test]
 fn voicing_smoother_settles_and_idles() {
     let mut sm = VoicingSmoother::new();
-    sm.set_target(0.8, 1.5, 1.2, 0.9);
+    sm.set_target_with_a4(0.8, 1.5, 1.2, 0.9, 442.0);
     let sr = 48_000.0;
     let mut steps = 0;
     while sm.is_active() && steps < 1_000 {
         let spec = sm.step_block(128, sr).expect("spec expected");
         assert!(spec.hammer_hardness >= 0.5 && spec.hammer_hardness <= 0.8);
+        assert!(spec.a4_freq_hz >= 440.0 && spec.a4_freq_hz <= 442.0);
         steps += 1;
     }
     assert!(!sm.is_active());
@@ -17,6 +18,7 @@ fn voicing_smoother_settles_and_idles() {
     assert_eq!(sm.current_unison_detune(), 1.5);
     assert_eq!(sm.current_stretch(), 1.2);
     assert_eq!(sm.current_length_scale(), 0.9);
+    assert_eq!(sm.current_a4_freq_hz(), 442.0);
     assert!(sm.step_block(128, sr).is_none());
 }
 
@@ -50,11 +52,17 @@ fn spatial_crossfade_instant_on_silence() {
 }
 
 #[test]
-fn voicing_dirty_mask_isolates_hammer_from_tuning() {
+fn voicing_dirty_mask_isolates_hammer_from_tuning_and_a4() {
     let mut sm = VoicingSmoother::new();
     sm.set_target(0.85, 1.0, 1.0, 1.0);
     let (_, d_h) = sm.step_block_with_dirty(128, 48_000.0).expect("dirty");
     assert_eq!(d_h, DIRTY_HAMMER);
+
+    let mut sm_a4 = VoicingSmoother::new();
+    sm_a4.set_a4_target(415.0);
+    let (_, d_a4) = sm_a4.step_block_with_dirty(128, 48_000.0).expect("dirty");
+    assert_eq!(d_a4, DIRTY_TUNING);
+
     sm.set_target(0.85, 1.25, 1.0, 1.0);
     let (_, d_u) = sm.step_block_with_dirty(128, 48_000.0).expect("dirty");
     assert_ne!(d_u & DIRTY_TUNING, 0);

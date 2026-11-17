@@ -1,189 +1,4 @@
-/** Studio panels: Telemetry HUD, visualizer canvas, pedals, voicing, acoustic space, and transport bar. */
-
-.viz-section {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 16px;
-}
-
-@media (min-width: 900px) {
-  .viz-section {
-    grid-template-columns: 1.2fr 0.8fr;
-  }
-}
-
-.canvas-card {
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: 12px;
-  padding: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.spectrum-canvas {
-  width: 100%;
-  height: 120px;
-  display: block;
-  border-radius: 8px;
-  background: #080a0e;
-}
-
-/* Telemetry HUD */
-.hud-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 10px;
-}
-
-.hud-card {
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: 10px;
-  padding: 10px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.hud-label {
-  font-size: 11px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-weight: 500;
-}
-
-.hud-value-row {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-}
-
-.hud-value {
-  font-size: 16px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  font-family: ui-monospace, monospace;
-}
-
-.hud-unit {
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.hud-card-meter {
-  grid-column: span 2;
-}
-
-.hud-meter-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.hud-sub {
-  font-size: 11px;
-  color: var(--muted);
-  font-family: ui-monospace, monospace;
-  font-variant-numeric: tabular-nums;
-  margin-left: 6px;
-}
-
-.hud-level-track {
-  position: relative;
-  width: 100%;
-  height: 8px;
-  border-radius: 4px;
-  background: #141824;
-  border: 1px solid var(--panel-border);
-  overflow: hidden;
-  margin-top: 2px;
-}
-
-.hud-level-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #22c55e 0%, #22c55e 75%, #fbbf24 90%, #ef4444 100%);
-  transition: width 60ms linear;
-}
-
-.hud-level-hold {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: #f8fafc;
-  transform: translateX(-1px);
-  pointer-events: none;
-}
-
-.hud-clip {
-  appearance: none;
-  border: 1px solid var(--panel-border);
-  background: #141824;
-  color: var(--muted);
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  padding: 2px 6px;
-  cursor: pointer;
-}
-
-.hud-clip.is-clipping {
-  background: rgba(239, 68, 68, 0.25);
-  color: #f87171;
-  border-color: rgba(239, 68, 68, 0.75);
-}
-
-.hud-card-alert {
-  justify-content: space-between;
-}
-
-.hud-alert {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-}
-
-.hud-alert.ok {
-  background: rgba(34, 197, 94, 0.12);
-  color: #4ade80;
-  border: 1px solid rgba(34, 197, 94, 0.35);
-}
-
-.hud-alert.is-warning {
-  background: rgba(245, 158, 11, 0.15);
-  color: #fbbf24;
-  border: 1px solid rgba(245, 158, 11, 0.4);
-}
-
-.hud-alert.is-overloaded,
-.hud-alert.alert-critical {
-  background: rgba(239, 68, 68, 0.2);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.6);
-  animation: pulse-alert 1s infinite alternate;
-}
-
-.hud-alert-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-@keyframes pulse-alert {
-  0% { opacity: 0.8; }
-  100% { opacity: 1; filter: drop-shadow(0 0 6px currentColor); }
-}
+/** Studio panels: pedals, voicing, acoustic space, and transport bar. */
 
 /* Performance Controls & Pedals */
 .performance-controls {
@@ -378,6 +193,81 @@
 
 .control-row input[type='range'] {
   accent-color: var(--accent);
+}
+
+.control-row-a4 {
+  grid-column: 1 / -1;
+  padding-bottom: 10px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--panel-border);
+  gap: 8px;
+}
+
+.a4-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.a4-input-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.a4-number-input {
+  width: 78px;
+  background: var(--panel-card);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  text-align: right;
+  outline: none;
+}
+
+.a4-number-input:focus {
+  border-color: var(--accent);
+}
+
+.a4-unit {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.a4-chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.btn-a4-chip {
+  appearance: none;
+  background: var(--panel-card);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-a4-chip:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.btn-a4-chip.active,
+.btn-a4-chip[aria-pressed='true'] {
+  background: rgba(220, 163, 77, 0.2);
+  border-color: var(--accent);
+  color: var(--accent-strong);
 }
 
 .space-controls {

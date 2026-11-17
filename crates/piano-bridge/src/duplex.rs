@@ -43,12 +43,15 @@ pub struct DuplexBank {
     r_dup: [f64; NUM_BRIDGE_ZONES],
     alpha_dup: f64,
     ts: f64,
+    sample_rate_f64: f64,
+    lossless: bool,
+    a4_freq_hz: f32,
     last_stereo: (f32, f32),
     active: bool,
 }
 
 impl DuplexBank {
-    /// Constructs default passive `DuplexBank` (`duplex_gain = 1.0`, damped).
+    /// Constructs default passive `DuplexBank` (`duplex_gain = 1.0`, damped, `A4 = 440.0 Hz`).
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
         Self::new_with_params(sample_rate, 1.0, false)
@@ -75,17 +78,12 @@ impl DuplexBank {
             counts_per_zone[z] += 4;
         }
 
-        let mut d = [F32x4::splat(1.0); NUM_DUPLEX_VECS];
-        let mut s = [F32x4::zero(); NUM_DUPLEX_VECS];
         let mut beta = [F32x4::zero(); NUM_DUPLEX_VECS];
         let mut c_audio = [F32x4::zero(); NUM_DUPLEX_VECS];
-        let mut freqs_hz = [0.0_f32; NUM_DUPLEX_MODES];
         let mut r_dup = [0.0_f64; NUM_BRIDGE_ZONES];
         let mut seen_in_zone = [0usize; NUM_BRIDGE_ZONES];
 
-        for vec_idx in 0..NUM_DUPLEX_VECS {
-            let z = DUPLEX_VEC_ZONES[vec_idx];
-            let (f_min, f_max) = ZONE_FREQ_BANDS_HZ[z - TREBLE_DUPLEX_ZONE_START];
+        for (vec_idx, &z) in DUPLEX_VEC_ZONES.iter().enumerate() {
             let total_in_z = counts_per_zone[z];
             let beta_mag = if gain > 0.0 {
                 let per_mode = 2.0 * DUPLEX_TARGET_R_PER_ZONE * ts / (total_in_z as f64);
@@ -94,11 +92,69 @@ impl DuplexBank {
                 0.0
             };
 
-            let (mut d_arr, mut s_arr, mut b_arr, mut c_arr) =
-                ([1.0_f32; 4], [0.0_f32; 4], [0.0_f32; 4], [0.0_f32; 4]);
+            let (mut b_arr, mut c_arr) = ([0.0_f32; 4], [0.0_f32; 4]);
+            for lane in 0..4 {
+                let m_in_z = seen_in_zone[z];
+                seen_in_zone[z] += 1;
+                let sign = if (m_in_z & 1) == 0 { 1.0 } else { -1.0 };
+                let b_val = (sign * beta_mag) as f32;
+                b_arr[lane] = b_val;
+                c_arr[lane] = (sign * f64::from(DUPLEX_AUDIO_GAIN)) as f32;
+                r_dup[z] += 0.5 * alpha_dup * f64::from(b_val) * f64::from(b_val);
+            }
+            beta[vec_idx] = F32x4::from_array(b_arr);
+            c_audio[vec_idx] = F32x4::from_array(c_arr);
+        }
+
+        let mut bank = Self {
+            u: [F32x4::zero(); NUM_DUPLEX_VECS],
+            v: [F32x4::zero(); NUM_DUPLEX_VECS],
+            d: [F32x4::splat(1.0); NUM_DUPLEX_VECS],
+            s: [F32x4::zero(); NUM_DUPLEX_VECS],
+            beta,
+            c_audio,
+            freqs_hz: [0.0_f32; NUM_DUPLEX_MODES],
+            r_dup,
+            alpha_dup,
+            ts,
+            sample_rate_f64: safe_sr,
+            lossless,
+            a4_freq_hz: 0.0,
+            last_stereo: (0.0, 0.0),
+            active: false,
+        };
+        bank.retune_a4(440.0);
+        bank
+    }
+
+    /// Retunes all 64 non-speaking duplex wire-segment resonances in place for `a4_freq_hz`
+    /// (`[415.0, 466.0]` Hz) with zero heap allocations. No-op when `a4_freq_hz` is unchanged.
+    pub fn retune_a4(&mut self, a4_freq_hz: f32) {
+        let clamped = if a4_freq_hz.is_finite() {
+            a4_freq_hz.clamp(
+                piano_spec::voicing::A4_FREQ_MIN,
+                piano_spec::voicing::A4_FREQ_MAX,
+            )
+        } else {
+            piano_spec::voicing::A4_FREQ_DEFAULT
+        };
+        if (clamped - self.a4_freq_hz).abs() == 0.0 {
+            return;
+        }
+        self.a4_freq_hz = clamped;
+        let pitch_scale = f64::from(clamped) / piano_spec::A4_FREQ_HZ;
+
+        let mut counts_per_zone = [0usize; NUM_BRIDGE_ZONES];
+        for &z in &DUPLEX_VEC_ZONES {
+            counts_per_zone[z] += 4;
+        }
+        let mut seen_in_zone = [0usize; NUM_BRIDGE_ZONES];
+
+        for (vec_idx, &z) in DUPLEX_VEC_ZONES.iter().enumerate() {
+            let (f_min, f_max) = ZONE_FREQ_BANDS_HZ[z - TREBLE_DUPLEX_ZONE_START];
+            let total_in_z = counts_per_zone[z];
             let ratio_ln = if f_max > f_min {
                 let mut x = f_max / f_min;
-                // Compute ln(f_max/f_min) via 64-step Halley/midpoint or simple series:
                 let mut ln_approx = 0.0_f64;
                 while x > 2.0 {
                     x *= 0.5;
@@ -111,49 +167,36 @@ impl DuplexBank {
                 0.0
             };
 
+            let (mut d_arr, mut s_arr) = ([1.0_f32; 4], [0.0_f32; 4]);
             for lane in 0..4 {
                 let m_in_z = seen_in_zone[z];
                 seen_in_zone[z] += 1;
                 let frac = (m_in_z as f64) / ((total_in_z - 1).max(1) as f64);
                 let jitter = 1.0 + 0.015 * (((m_in_z * 7 + z * 3) % 5) as f64 - 2.0) * 0.5;
-                let f_hz = (f_min * exp_f64(frac * ratio_ln) * jitter).min(0.47 * safe_sr);
-                freqs_hz[vec_idx * 4 + lane] = f_hz as f32;
+                let f_hz = (f_min * pitch_scale * exp_f64(frac * ratio_ln) * jitter)
+                    .min(0.47 * self.sample_rate_f64);
+                self.freqs_hz[vec_idx * 4 + lane] = f_hz as f32;
 
-                let t60 = if lossless {
+                let t60 = if self.lossless {
                     f64::INFINITY
                 } else {
                     0.55 / (1.0 + 0.12 * (f_hz * 1.0e-3))
                 };
-                if let Some((df, sf)) = coupled_pole_f32(f_hz, safe_sr, t60) {
+                if let Some((df, sf)) = coupled_pole_f32(f_hz, self.sample_rate_f64, t60) {
                     d_arr[lane] = df;
                     s_arr[lane] = sf;
-                    let sign = if (m_in_z & 1) == 0 { 1.0 } else { -1.0 };
-                    let b_val = (sign * beta_mag) as f32;
-                    b_arr[lane] = b_val;
-                    c_arr[lane] = (sign * f64::from(DUPLEX_AUDIO_GAIN)) as f32;
-                    r_dup[z] += 0.5 * alpha_dup * f64::from(b_val) * f64::from(b_val);
                 }
             }
-            d[vec_idx] = F32x4::from_array(d_arr);
-            s[vec_idx] = F32x4::from_array(s_arr);
-            beta[vec_idx] = F32x4::from_array(b_arr);
-            c_audio[vec_idx] = F32x4::from_array(c_arr);
+            self.d[vec_idx] = F32x4::from_array(d_arr);
+            self.s[vec_idx] = F32x4::from_array(s_arr);
         }
+    }
 
-        Self {
-            u: [F32x4::zero(); NUM_DUPLEX_VECS],
-            v: [F32x4::zero(); NUM_DUPLEX_VECS],
-            d,
-            s,
-            beta,
-            c_audio,
-            freqs_hz,
-            r_dup,
-            alpha_dup,
-            ts,
-            last_stereo: (0.0, 0.0),
-            active: false,
-        }
+    /// Returns the currently configured concert pitch `A4` reference in Hz.
+    #[must_use]
+    #[inline]
+    pub const fn a4_freq_hz(&self) -> f32 {
+        self.a4_freq_hz
     }
 
     /// Resets all 64 duplex resonator states and cached stereo output to zero.
@@ -288,5 +331,33 @@ impl DuplexBank {
     #[must_use]
     pub fn mode_freq_hz(&self, mode_idx: usize) -> f32 {
         self.freqs_hz.get(mode_idx).copied().unwrap_or(0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplex_retune_a4_scales_mode_frequencies_and_clamps_bounds() {
+        let mut bank = DuplexBank::new(48_000.0);
+        assert_eq!(bank.a4_freq_hz(), 440.0);
+        let base_f0 = bank.mode_freq_hz(0);
+        assert!(base_f0 > 1_300.0);
+
+        bank.retune_a4(415.0);
+        assert_eq!(bank.a4_freq_hz(), 415.0);
+        let f_415 = bank.mode_freq_hz(0);
+        assert!((f_415 / base_f0 - 415.0 / 440.0).abs() < 1e-5);
+
+        bank.retune_a4(442.0);
+        assert_eq!(bank.a4_freq_hz(), 442.0);
+        let f_442 = bank.mode_freq_hz(0);
+        assert!((f_442 / base_f0 - 442.0 / 440.0).abs() < 1e-5);
+
+        bank.retune_a4(300.0);
+        assert_eq!(bank.a4_freq_hz(), 415.0);
+        bank.retune_a4(f32::NAN);
+        assert_eq!(bank.a4_freq_hz(), 440.0);
     }
 }

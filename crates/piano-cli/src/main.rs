@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use piano_engine::PianoEngine;
-use piano_spec::{u7_to_u16, EventKind, PedalKind, SampleEvent};
+use piano_spec::voicing::{A4_FREQ_DEFAULT, A4_FREQ_MAX, A4_FREQ_MIN};
+use piano_spec::{u7_to_u16, EventKind, PedalKind, SampleEvent, VoicingSpec};
 
 use check_lines::{check_repo, find_repo_root};
 use wasm_check::inspect_wasm_simd;
@@ -38,7 +39,7 @@ fn main() {
 
 fn usage() -> String {
     String::from(
-        "Usage:\n  piano-cli bench\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli render-wav <out.wav>\n  piano-cli scenarios [--json] [--markdown]",
+        "Usage:\n  piano-cli bench\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli render-wav <out.wav> [--a4 <415..466>]\n  piano-cli scenarios [--json] [--markdown]",
     )
 }
 
@@ -92,14 +93,58 @@ fn cmd_check_wasm_simd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn parse_a4_hz(raw: &str) -> Result<f32, String> {
+    let val: f32 = raw.parse().map_err(|_| {
+        format!("invalid --a4 frequency '{raw}' (expected number in 415.0..=466.0)")
+    })?;
+    if !val.is_finite() || !(A4_FREQ_MIN..=A4_FREQ_MAX).contains(&val) {
+        return Err(format!(
+            "--a4 frequency {raw} out of supported range [{A4_FREQ_MIN:.1}, {A4_FREQ_MAX:.1}] Hz"
+        ));
+    }
+    Ok(val)
+}
+
+fn parse_render_wav_args(args: &[String]) -> Result<(PathBuf, f32), String> {
+    let mut out_path: Option<PathBuf> = None;
+    let mut a4_hz = A4_FREQ_DEFAULT;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--a4" {
+            let next = args.get(i + 1).ok_or_else(usage)?;
+            a4_hz = parse_a4_hz(next)?;
+            i += 2;
+        } else if let Some(rest) = arg.strip_prefix("--a4=") {
+            a4_hz = parse_a4_hz(rest)?;
+            i += 1;
+        } else if arg.starts_with('-') {
+            return Err(usage());
+        } else if out_path.is_none() {
+            out_path = Some(PathBuf::from(arg));
+            i += 1;
+        } else {
+            return Err(usage());
+        }
+    }
+    let path = out_path.ok_or_else(usage)?;
+    Ok((path, a4_hz))
+}
+
 fn cmd_render_wav(args: &[String]) -> Result<(), String> {
-    let out_path = Path::new(args.first().ok_or_else(usage)?);
+    let (out_path, a4_hz) = parse_render_wav_args(args)?;
+    let out_path = Path::new(&out_path);
     let sample_rate = 48_000_u32;
     let total_frames = 96_000_usize; // 2.0s @ 48 kHz
     let block_size = 128_usize;
 
+    let voicing = VoicingSpec {
+        a4_freq_hz: a4_hz,
+        ..VoicingSpec::default()
+    };
+
     let script = build_m1_demo_phrase();
-    let mut engine = PianoEngine::new(sample_rate as f32);
+    let mut engine = PianoEngine::new_with_voicing(sample_rate as f32, &voicing);
     let mut out_l = vec![0.0_f32; total_frames];
     let mut out_r = vec![0.0_f32; total_frames];
     let mut block_events = Vec::with_capacity(16);
@@ -144,10 +189,11 @@ fn cmd_render_wav(args: &[String]) -> Result<(), String> {
 
     write_stereo_pcm16_wav(out_path, sample_rate, &out_l, &out_r)?;
     println!(
-        "render-wav OK: {} ({} frames @ {} Hz, peak_l={:.4}, peak_r={:.4}, rms={:.4}, non_finite=0)",
+        "render-wav OK: {} ({} frames @ {} Hz, A4={:.1} Hz, peak_l={:.4}, peak_r={:.4}, rms={:.4}, non_finite=0)",
         out_path.display(),
         metrics.frames,
         sample_rate,
+        a4_hz,
         metrics.peak_l,
         metrics.peak_r,
         metrics.rms_mono
@@ -242,4 +288,36 @@ fn build_m1_demo_phrase() -> Vec<(usize, EventKind)> {
             },
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_render_wav_args_supports_default_and_custom_a4() {
+        let args = vec![String::from("out.wav")];
+        let (path, a4) = parse_render_wav_args(&args).expect("default a4");
+        assert_eq!(path, PathBuf::from("out.wav"));
+        assert_eq!(a4, 440.0);
+
+        let args_space = vec![
+            String::from("out.wav"),
+            String::from("--a4"),
+            String::from("442.0"),
+        ];
+        assert_eq!(parse_render_wav_args(&args_space).unwrap().1, 442.0);
+
+        let args_eq = vec![String::from("--a4=415.0"), String::from("baroque.wav")];
+        let (path_eq, a4_eq) = parse_render_wav_args(&args_eq).expect("baroque a4");
+        assert_eq!(path_eq, PathBuf::from("baroque.wav"));
+        assert_eq!(a4_eq, 415.0);
+
+        assert!(
+            parse_render_wav_args(&[String::from("out.wav"), String::from("--a4=399.0")]).is_err()
+        );
+        assert!(
+            parse_render_wav_args(&[String::from("out.wav"), String::from("--a4=480.0")]).is_err()
+        );
+    }
 }

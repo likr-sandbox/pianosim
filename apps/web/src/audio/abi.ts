@@ -52,6 +52,11 @@ export const STRING_SCALE_MIN = 0.5;
 export const STRING_SCALE_MAX = 2.0;
 export const STRING_SCALE_DEFAULT = 1.0;
 
+export const A4_FREQ_MIN = 415.0;
+export const A4_FREQ_MAX = 466.0;
+export const A4_FREQ_DEFAULT = 440.0;
+export const A4_FREQ_STEP = 0.1;
+
 export type EngineStatus = 'locked' | 'initializing' | 'ready' | 'error';
 
 export interface PianoWasmExports extends WebAssembly.Exports {
@@ -68,6 +73,7 @@ export interface PianoWasmExports extends WebAssembly.Exports {
     unisonDetune: number,
     stretch: number,
     lengthScale: number,
+    a4FreqHz: number,
   ): number;
   piano_set_hammer_hardness(ctx: number, hammerHardness: number): number;
   piano_set_space(ctx: number, perspective: number, lid: number): number;
@@ -90,6 +96,7 @@ export interface PianoWasmExports extends WebAssembly.Exports {
     unisonDetune: number,
     stretch: number,
     lengthScale: number,
+    a4FreqHz: number,
     lenF32: number,
   ): number;
   piano_render(ctx: number, frames: number): void;
@@ -109,6 +116,7 @@ export interface PianoPrepWasmExports extends WebAssembly.Exports {
     unisonDetune: number,
     stretch: number,
     lengthScale: number,
+    a4FreqHz: number,
   ): number;
   piano_prep_out_ptr(prep: number): number;
 }
@@ -126,6 +134,7 @@ export type WorkletInboundMessage =
       unisonDetune: number;
       stretchTuning: number;
       stringLengthScale: number;
+      a4FreqHz: number;
     }
   | { type: 'setSpace'; perspective: ListenerPerspective; lidState: LidState }
   | { type: 'destroy' };
@@ -145,6 +154,7 @@ export type PrepInboundMessage =
       unisonDetune: number;
       stretchTuning: number;
       stringLengthScale: number;
+      a4FreqHz: number;
       seq: number;
     }
   | { type: 'destroy' };
@@ -163,6 +173,7 @@ export type PrepToWorkletMessage =
       unisonDetune: number;
       stretchTuning: number;
       stringLengthScale: number;
+      a4FreqHz: number;
       seq: number;
       blob: ArrayBuffer;
     };

@@ -261,6 +261,7 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
           clamp(msg.unisonDetune, 0.0, 4.0, 1.0),
           clamp(msg.stretchTuning, 0.0, 2.0, 1.0),
           clamp(msg.stringLengthScale, 0.5, 2.0, 1.0),
+          clamp(msg.a4FreqHz, 415.0, 466.0, 440.0),
         );
         break;
       case 'setSpace':

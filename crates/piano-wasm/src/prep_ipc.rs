@@ -48,8 +48,15 @@ impl PrepContext {
         unison_detune: f32,
         stretch: f32,
         length_scale: f32,
+        a4_freq_hz: f32,
     ) -> usize {
-        let spec = VoicingSpec::from_globals(hammer_hardness, unison_detune, stretch, length_scale);
+        let spec = VoicingSpec::from_globals_with_a4(
+            hammer_hardness,
+            unison_detune,
+            stretch,
+            length_scale,
+            a4_freq_hz,
+        );
         let len = self.voicing.prepare_voicing(&spec).len();
         self.last = LastKind::Voicing;
         len

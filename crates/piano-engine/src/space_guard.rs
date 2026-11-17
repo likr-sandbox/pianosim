@@ -1,4 +1,4 @@
-//! Spatial crossfade transitions and perspective/lid conversion traits.
+//! Spatial raised-cosine crossfade guard and perspective/lid conversion traits.
 
 use core::f32::consts::PI;
 use piano_spec::{LidState, ListenerPerspective};
