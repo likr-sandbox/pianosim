@@ -193,16 +193,32 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     const a4Key = page.locator('[data-midi="69"]');
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
     await setSlider(page, 'sustain-slider', 1.0);
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(250);
 
-    // Switch through lid states (Open -> Half -> Closed -> Open)
+    // Switch to Closed lid while A4 is sounding, allow PrepWorker + BlobStreamer (~300ms) + 8ms crossfade to settle
     await page.getByTestId('lid-closed').click();
+    await page.waitForTimeout(450);
+    const closedCrossfade = await sampleDestinationAudio(page);
+    expect(closedCrossfade.nonFiniteCount).toBe(0);
+    expect(closedCrossfade.peak).toBeLessThanOrEqual(1.0);
+
+    // Measure settled Closed lid spectrum at consistent post-attack time
+    await a4Key.dispatchEvent('pointerup', { buttons: 0 });
+    await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
     await page.waitForTimeout(150);
     const closedLid = await sampleDestinationAudio(page);
     expect(closedLid.nonFiniteCount).toBe(0);
     expect(closedLid.peak).toBeLessThanOrEqual(1.0);
 
+    // Switch back to Open lid while A4 is sounding and verify clickless crossfade + restored HF energy
     await page.getByTestId('lid-open').click();
+    await page.waitForTimeout(450);
+    const openCrossfade = await sampleDestinationAudio(page);
+    expect(openCrossfade.nonFiniteCount).toBe(0);
+    expect(openCrossfade.peak).toBeLessThanOrEqual(1.0);
+
+    await a4Key.dispatchEvent('pointerup', { buttons: 0 });
+    await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
     await page.waitForTimeout(150);
     const openLid = await sampleDestinationAudio(page);
     expect(openLid.highFreqRatio).toBeGreaterThan(closedLid.highFreqRatio);
