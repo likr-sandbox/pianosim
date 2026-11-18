@@ -180,6 +180,8 @@ export class WasmAudioHost {
         temperamentId,
         condition,
       };
+      const seq = ++this.voicingSeq;
+      this.telemetry.markVoicingRequested(seq);
       if (!this.prepWorker) {
         this.postToWorklet({
           type: 'setVoicing',
@@ -191,6 +193,7 @@ export class WasmAudioHost {
           temperamentId,
           condition,
         });
+        this.telemetry.updatePrepApplied(0, seq);
         return;
       }
       const req: Extract<PrepInboundMessage, { type: 'prepVoicing' }> = {
@@ -202,7 +205,7 @@ export class WasmAudioHost {
         a4FreqHz,
         temperamentId,
         condition,
-        seq: ++this.voicingSeq,
+        seq,
       };
       if (this.voicingInFlight) {
         this.pendingVoicingReq = req;
@@ -291,8 +294,11 @@ export class WasmAudioHost {
         return;
       }
       this.lastSpace = { body: targetBody, persp: perspective, lid: lidState };
+      const seq = ++this.spaceSeq;
+      this.telemetry.markSpaceRequested(seq);
       if (!this.prepWorker) {
         this.postToWorklet({ type: 'setSpace', bodyId: targetBody, perspective, lidState });
+        this.telemetry.updatePrepApplied(seq, 0);
         return;
       }
       const req: Extract<PrepInboundMessage, { type: 'prepSpace' }> = {
@@ -300,7 +306,7 @@ export class WasmAudioHost {
         bodyId: targetBody,
         perspective,
         lidState,
-        seq: ++this.spaceSeq,
+        seq,
       };
       if (this.spaceInFlight) {
         this.pendingSpaceReq = req;
@@ -333,6 +339,8 @@ export class WasmAudioHost {
     this.pendingBeforeReady.length = 0;
     this.pendingVoicingReq = null;
     this.pendingSpaceReq = null;
+    this.voicingSeq = 0;
+    this.spaceSeq = 0;
     this.voicingInFlight = false;
     this.spaceInFlight = false;
     this.stopRecordingResolver?.();

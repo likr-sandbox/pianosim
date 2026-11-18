@@ -66,6 +66,10 @@ export class TelemetryClient {
   private workletNode: AudioWorkletNode | null = null;
   private telemetry: TelemetrySnapshot = EMPTY_TELEMETRY;
   private telemetryBlocksReceived = 0;
+  private requestedSpaceSeq = 0;
+  private appliedSpaceSeq = 0;
+  private requestedVoicingSeq = 0;
+  private appliedVoicingSeq = 0;
   private error: string | null = null;
   private readonly listeners = new Set<DiagnosticsListener>();
 
@@ -91,6 +95,10 @@ export class TelemetryClient {
       workletNode: this.workletNode,
       telemetry: this.telemetry,
       telemetryBlocksReceived: this.telemetryBlocksReceived,
+      requestedSpaceSeq: this.requestedSpaceSeq,
+      appliedSpaceSeq: this.appliedSpaceSeq,
+      requestedVoicingSeq: this.requestedVoicingSeq,
+      appliedVoicingSeq: this.appliedVoicingSeq,
       peakHold: this.peakHold,
       peakHoldDbfs: this.peakHoldDbfs,
       rmsDbfs: this.rmsDbfs,
@@ -126,6 +134,35 @@ export class TelemetryClient {
     this.contextState = this.audioContext ? this.audioContext.state : 'none';
     this.sampleRate = this.audioContext ? this.audioContext.sampleRate : 0;
     this.emit();
+  }
+
+  markSpaceRequested(seq: number): void {
+    if (seq > this.requestedSpaceSeq) {
+      this.requestedSpaceSeq = seq;
+      this.syncGlobalDiag();
+    }
+  }
+
+  markVoicingRequested(seq: number): void {
+    if (seq > this.requestedVoicingSeq) {
+      this.requestedVoicingSeq = seq;
+      this.syncGlobalDiag();
+    }
+  }
+
+  updatePrepApplied(spaceSeq: number, voicingSeq: number): void {
+    let changed = false;
+    if (spaceSeq > this.appliedSpaceSeq) {
+      this.appliedSpaceSeq = spaceSeq;
+      changed = true;
+    }
+    if (voicingSeq > this.appliedVoicingSeq) {
+      this.appliedVoicingSeq = voicingSeq;
+      changed = true;
+    }
+    if (changed) {
+      this.syncGlobalDiag();
+    }
   }
 
   clearClip(): void {
@@ -197,6 +234,10 @@ export class TelemetryClient {
     this.workletNode = null;
     this.telemetry = EMPTY_TELEMETRY;
     this.telemetryBlocksReceived = 0;
+    this.requestedSpaceSeq = 0;
+    this.appliedSpaceSeq = 0;
+    this.requestedVoicingSeq = 0;
+    this.appliedVoicingSeq = 0;
     this.historyCount = 0;
     this.historyIndex = 0;
     this.p50Us = 0;

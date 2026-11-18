@@ -7,6 +7,7 @@ import {
 export const BLOB_STREAM_CHUNK = 8_192;
 
 interface PendingSpaceBlob {
+  seq: number;
   body: number;
   persp: number;
   lid: number;
@@ -15,6 +16,7 @@ interface PendingSpaceBlob {
 }
 
 interface PendingVoicingBlob {
+  seq: number;
   hammer: number;
   detune: number;
   stretch: number;
@@ -33,6 +35,8 @@ interface PendingVoicingBlob {
 export class BlobStreamer {
   private lastSpaceSeq = -1;
   private lastVoicingSeq = -1;
+  private committedSpaceSeq = 0;
+  private committedVoicingSeq = 0;
   private pendingSpace: PendingSpaceBlob | null = null;
   private queuedSpace: PendingSpaceBlob | null = null;
   private pendingVoicing: PendingVoicingBlob | null = null;
@@ -41,10 +45,20 @@ export class BlobStreamer {
   reset(): void {
     this.lastSpaceSeq = -1;
     this.lastVoicingSeq = -1;
+    this.committedSpaceSeq = 0;
+    this.committedVoicingSeq = 0;
     this.pendingSpace = null;
     this.queuedSpace = null;
     this.pendingVoicing = null;
     this.queuedVoicing = null;
+  }
+
+  getCommittedSpaceSeq(): number {
+    return this.committedSpaceSeq;
+  }
+
+  getCommittedVoicingSeq(): number {
+    return this.committedVoicingSeq;
   }
 
   onPrepBlob(msg: PrepToWorkletMessage): void {
@@ -52,6 +66,7 @@ export class BlobStreamer {
       if (msg.seq < this.lastSpaceSeq) return;
       this.lastSpaceSeq = msg.seq;
       const entry: PendingSpaceBlob = {
+        seq: msg.seq,
         body: (msg.bodyId ?? BODY_CONCERT_GRAND) >>> 0,
         persp: msg.perspective >>> 0,
         lid: msg.lidState >>> 0,
@@ -70,6 +85,7 @@ export class BlobStreamer {
       if (msg.seq < this.lastVoicingSeq) return;
       this.lastVoicingSeq = msg.seq;
       const entry: PendingVoicingBlob = {
+        seq: msg.seq,
         hammer: msg.hammerHardness,
         detune: msg.unisonDetune,
         stretch: msg.stretchTuning,
@@ -113,12 +129,18 @@ export class BlobStreamer {
     }
   }
 
-  private finishSpace(): void {
+  private finishSpace(seq: number): void {
+    if (seq > this.committedSpaceSeq) {
+      this.committedSpaceSeq = seq;
+    }
     this.pendingSpace = this.queuedSpace;
     this.queuedSpace = null;
   }
 
-  private finishVoicing(): void {
+  private finishVoicing(seq: number): void {
+    if (seq > this.committedVoicingSeq) {
+      this.committedVoicingSeq = seq;
+    }
     this.pendingVoicing = this.queuedVoicing;
     this.queuedVoicing = null;
   }
@@ -134,7 +156,7 @@ export class BlobStreamer {
     const n = Math.min(BLOB_STREAM_CHUNK, b.src.length - b.off);
     const ptr = exports.piano_staging_ptr(ctx, n) >>> 0;
     if (ptr === 0) {
-      this.finishSpace();
+      this.finishSpace(b.seq);
       return;
     }
     const mem = syncMemoryView();
@@ -143,13 +165,13 @@ export class BlobStreamer {
       exports.piano_stage_body_space_chunk(ctx, b.body, b.persp, b.lid, b.off, n, b.src.length) !==
       0
     ) {
-      this.finishSpace();
+      this.finishSpace(b.seq);
       return;
     }
     b.off += n;
     if (b.off >= b.src.length) {
       exports.piano_commit_body_space(ctx, b.body, b.persp, b.lid);
-      this.finishSpace();
+      this.finishSpace(b.seq);
     }
   }
 
@@ -163,7 +185,7 @@ export class BlobStreamer {
     const n = Math.min(BLOB_STREAM_CHUNK, b.src.length - b.off);
     const ptr = exports.piano_staging_offset_ptr(ctx, b.off, n) >>> 0;
     if (ptr === 0) {
-      this.finishVoicing();
+      this.finishVoicing(b.seq);
       return;
     }
     const mem = syncMemoryView();
@@ -181,7 +203,7 @@ export class BlobStreamer {
         b.condition,
         b.src.length,
       );
-      this.finishVoicing();
+      this.finishVoicing(b.seq);
     }
   }
 }

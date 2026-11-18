@@ -91,6 +91,8 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
   private destroyed = false;
   private prepPort: MessagePort | null = null;
   private readonly blobStreamer = new BlobStreamer();
+  private reportedSpaceSeq = 0;
+  private reportedVoicingSeq = 0;
   private readonly recorder = new WorkletRecorderPool();
   private readonly postTransferable = (
     msg: WorkletOutboundMessage,
@@ -349,6 +351,8 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
         this.outRView = null;
         this.cachedChunk = 0;
         this.blobStreamer.reset();
+        this.reportedSpaceSeq = 0;
+        this.reportedVoicingSeq = 0;
         this.recorder.reset();
         if (this.prepPort) {
           this.prepPort.close();
@@ -381,6 +385,13 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
     const totalFrames = outL.length;
     const t0 = nowMs();
     this.blobStreamer.stepStreamingBlobs(exports, ctx, this.syncMemForBlob);
+    const spSeq = this.blobStreamer.getCommittedSpaceSeq();
+    const vcSeq = this.blobStreamer.getCommittedVoicingSeq();
+    if (spSeq !== this.reportedSpaceSeq || vcSeq !== this.reportedVoicingSeq) {
+      this.reportedSpaceSeq = spSeq;
+      this.reportedVoicingSeq = vcSeq;
+      this.postOutbound({ type: 'prepApplied', spaceSeq: spSeq, voicingSeq: vcSeq });
+    }
     let offset = 0;
     let mem = this.memF32;
     while (offset < totalFrames) {

@@ -176,6 +176,10 @@ function handshakeWorklet(
         callbacks.onRecChunk?.(msg.samples, msg.frames);
         return;
       }
+      if (msg.type === 'prepApplied') {
+        telemetry.updatePrepApplied(msg.spaceSeq, msg.voicingSeq);
+        return;
+      }
       if (msg.type === 'recStopped') {
         callbacks.onRecStopped?.();
       }

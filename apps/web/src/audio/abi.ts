@@ -333,6 +333,7 @@ export interface TelemetrySnapshot {
 export type WorkletOutboundMessage =
   | { type: 'ready'; sampleRate: number }
   | ({ type: 'telemetry' } & TelemetrySnapshot)
+  | { type: 'prepApplied'; spaceSeq: number; voicingSeq: number }
   | { type: 'recChunk'; samples: ArrayBuffer; frames: number }
   | { type: 'recStopped' }
   | { type: 'error'; message: string };
@@ -346,6 +347,10 @@ export interface PianoDiagnostics {
   readonly workletNode: AudioWorkletNode | null;
   readonly telemetry: TelemetrySnapshot;
   readonly telemetryBlocksReceived: number;
+  readonly requestedSpaceSeq: number;
+  readonly appliedSpaceSeq: number;
+  readonly requestedVoicingSeq: number;
+  readonly appliedVoicingSeq: number;
   readonly peakHold: number;
   readonly peakHoldDbfs: number;
   readonly rmsDbfs: number;
