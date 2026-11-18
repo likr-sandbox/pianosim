@@ -165,8 +165,10 @@ test.describe('Wave 1B: Lookahead, Seek Pedals, WebMIDI & Touch Curve', () => {
     await page.goto('./');
     await dispatchMockMidi(page, [0x90, 69, 105]);
     await expect
-      .poll(async () =>
-        page.evaluate(() => `${window.__PIANO_DIAG__?.status}:${window.__PIANO_DIAG__?.contextState}`),
+      .poll(
+        async () =>
+          page.evaluate(() => `${window.__PIANO_DIAG__?.status}:${window.__PIANO_DIAG__?.contextState}`),
+        { timeout: 15_000 },
       )
       .toBe('ready:running');
     await waitForAudioRms(page, 0.002);

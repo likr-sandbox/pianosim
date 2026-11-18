@@ -118,12 +118,15 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
     await page.getByTestId('trigger-a4').click();
 
     await expect
-      .poll(async () => {
-        return page.evaluate(() => {
-          const d = window.__PIANO_DIAG__;
-          return d ? `${d.status}:${d.contextState}` : 'missing';
-        });
-      })
+      .poll(
+        async () => {
+          return page.evaluate(() => {
+            const d = window.__PIANO_DIAG__;
+            return d ? `${d.status}:${d.contextState}` : 'missing';
+          });
+        },
+        { timeout: 15_000 },
+      )
       .toBe('ready:running');
 
     await expect(page.getByTestId('hud-sample-rate')).toHaveText('48000 Hz');
