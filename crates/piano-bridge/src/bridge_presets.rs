@@ -1,13 +1,25 @@
 //! Precomputed physical soundboard/bridge modal constants and default string
 //! port-resistance builders for [`crate::AdmittanceSsm`].
 
-use piano_spec::{build_scale_design, VoicingSpec, CHOIR_LAYOUTS, TOTAL_STRINGS};
+use piano_spec::{
+    build_scale_design, PresetReducedPole, VoicingSpec, CHOIR_LAYOUTS, TOTAL_STRINGS,
+};
 
 use crate::math::sanitize_sample_rate;
 use crate::zone_proj::NUM_BRIDGE_ZONES;
 
 /// Number of reduced bidirectional soundboard/bridge modes (`~54..1,130 Hz`).
 pub const NUM_REDUCED_MODES: usize = 10;
+
+const MIN_Y_INF: f32 = 1.0e-9;
+const MAX_Y_INF: f32 = 0.05;
+const MIN_POLE_FREQ_HZ: f32 = 1.0;
+const MAX_POLE_FREQ_HZ: f32 = 24_000.0;
+const MIN_POLE_ZETA: f32 = 1.0e-6;
+const MAX_POLE_ZETA: f32 = 5.0;
+const MIN_MODAL_MASS_KG: f32 = 1.0e-4;
+const MAX_MODAL_MASS_KG: f32 = 1.0e4;
+const MAX_ABS_ZONE_GAIN: f32 = 10.0;
 
 /// Publicly exported reduced bridge pole descriptor for M6 `piano-body-gen` pole cancellation.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -78,6 +90,62 @@ pub(crate) fn build_default_poles(lossless: bool) -> [ReducedBridgePole; NUM_RED
             q_factor,
             modal_mass_kg: MODE_MASSES_KG[m],
             zone_gains: MODE_ZONE_GAINS[m],
+        };
+    }
+    poles
+}
+
+/// Validates and clamps high-frequency bridge mobility `y_inf` to strictly positive passive bounds.
+#[must_use]
+pub(crate) fn sanitize_y_inf(y_inf: &[f32; NUM_BRIDGE_ZONES]) -> [f32; NUM_BRIDGE_ZONES] {
+    let mut out = DEFAULT_Y_INF;
+    for (z, &src) in y_inf.iter().enumerate() {
+        out[z] = if src.is_finite() {
+            src.clamp(MIN_Y_INF, MAX_Y_INF)
+        } else {
+            DEFAULT_Y_INF[z]
+        };
+    }
+    out
+}
+
+/// Converts and validates [`PresetReducedPole`] entries into passive [`ReducedBridgePole`] values.
+#[must_use]
+pub(crate) fn sanitize_reduced_poles(
+    reduced_poles: &[PresetReducedPole; NUM_REDUCED_MODES],
+) -> [ReducedBridgePole; NUM_REDUCED_MODES] {
+    let mut poles = build_default_poles(false);
+    for (m, (dst, src)) in poles.iter_mut().zip(reduced_poles.iter()).enumerate() {
+        let freq_hz = if src.freq_hz.is_finite() {
+            src.freq_hz.clamp(MIN_POLE_FREQ_HZ, MAX_POLE_FREQ_HZ)
+        } else {
+            MODE_FREQS_HZ[m]
+        };
+        let zeta = if src.zeta.is_finite() {
+            src.zeta.clamp(MIN_POLE_ZETA, MAX_POLE_ZETA)
+        } else {
+            MODE_ZETAS[m]
+        };
+        let modal_mass_kg = if src.modal_mass_kg.is_finite() {
+            src.modal_mass_kg
+                .clamp(MIN_MODAL_MASS_KG, MAX_MODAL_MASS_KG)
+        } else {
+            MODE_MASSES_KG[m]
+        };
+        let mut zone_gains = [0.0_f32; NUM_BRIDGE_ZONES];
+        for (zg_dst, &zg_src) in zone_gains.iter_mut().zip(src.zone_gains.iter()) {
+            *zg_dst = if zg_src.is_finite() {
+                zg_src.clamp(-MAX_ABS_ZONE_GAIN, MAX_ABS_ZONE_GAIN)
+            } else {
+                0.0
+            };
+        }
+        *dst = ReducedBridgePole {
+            freq_hz,
+            zeta,
+            q_factor: 0.5 / zeta,
+            modal_mass_kg,
+            zone_gains,
         };
     }
     poles

@@ -20,8 +20,11 @@ mod duplex_tests;
 #[cfg(test)]
 #[path = "bridge_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "bridge_tests_pbdy.rs"]
+mod tests_pbdy;
 
-use piano_spec::{VoicingSpec, TOTAL_STRINGS};
+use piano_spec::{BodyPreset, PresetReducedPole, VoicingSpec, TOTAL_STRINGS};
 
 pub use admittance_ssm::{
     default_string_port_resistances, AdmittanceSsm, ReducedBridgePole, DEFAULT_Y_INF,
@@ -159,6 +162,26 @@ impl BridgeBank {
                 self.duplex.port_resistances(),
             );
         }
+    }
+
+    /// Replaces the Stage 3 reduced soundboard admittance `(y_inf, reduced_poles)` in place,
+    /// resynchronizes `solve_8x8`, `solve_abr`, and `solve_phi` via `set_port_resistances`,
+    /// and resets Stage 3 modal, Hertz contact, and duplex state to rest equilibrium.
+    pub fn set_reduced_model(
+        &mut self,
+        y_inf: &[f32; NUM_BRIDGE_ZONES],
+        reduced_poles: &[PresetReducedPole; NUM_REDUCED_MODES],
+    ) {
+        self.ssm.set_reduced_model(y_inf, reduced_poles);
+        self.ssm
+            .set_port_resistances(&self.r0, &self.zone_weights, self.duplex.port_resistances());
+        self.reset();
+    }
+
+    /// Applies the Stage 3 reduced soundboard admittance `(y_inf, reduced_poles)` from `preset`,
+    /// resynchronizes `8x8` WDF junction matrices, and resets Stage 3 dynamic state cleanly.
+    pub fn set_body_preset(&mut self, preset: &BodyPreset) {
+        self.set_reduced_model(&preset.y_inf, &preset.reduced_poles);
     }
 
     /// Flushes `< 1e-20` denormals/subnormals across Stage 3 SSM, Hertz contact, and duplex states,

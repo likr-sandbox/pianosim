@@ -6,9 +6,9 @@
 
 use core::f64::consts::TAU;
 
-use piano_spec::TOTAL_STRINGS;
+use piano_spec::{PresetReducedPole, TOTAL_STRINGS};
 
-use crate::bridge_presets::build_default_poles;
+use crate::bridge_presets::{build_default_poles, sanitize_reduced_poles, sanitize_y_inf};
 pub use crate::bridge_presets::{
     default_string_port_resistances, ReducedBridgePole, DEFAULT_Y_INF, MODE_ZONE_GAINS,
     NUM_REDUCED_MODES,
@@ -54,76 +54,144 @@ impl AdmittanceSsm {
         Self::build(sample_rate, true)
     }
 
-    fn build(sample_rate: f32, lossless: bool) -> Self {
-        let safe_sr = f64::from(sanitize_sample_rate(sample_rate));
-        let ts = 1.0 / safe_sr;
-        let h = 0.5 * ts;
+    /// Constructs a passive reduced soundboard admittance from external `.pbdy`
+    /// `(y_inf, reduced_poles)` data, clamping parameters to strictly positive bounds.
+    #[must_use]
+    pub fn from_reduced_model(
+        sample_rate: f32,
+        y_inf: &[f32; NUM_BRIDGE_ZONES],
+        reduced_poles: &[PresetReducedPole; NUM_REDUCED_MODES],
+    ) -> Self {
+        Self::build_with_model(
+            sample_rate,
+            sanitize_y_inf(y_inf),
+            sanitize_reduced_poles(reduced_poles),
+        )
+    }
 
+    fn build(sample_rate: f32, lossless: bool) -> Self {
         let y_inf = if lossless {
             [0.0_f32; NUM_BRIDGE_ZONES]
         } else {
             DEFAULT_Y_INF
         };
-        let mut y_inf_f64 = [0.0_f64; NUM_BRIDGE_ZONES];
-        for (dst, &src) in y_inf_f64.iter_mut().zip(y_inf.iter()) {
+        let poles = build_default_poles(lossless);
+        Self::build_with_model(sample_rate, y_inf, poles)
+    }
+
+    fn build_with_model(
+        sample_rate: f32,
+        y_inf: [f32; NUM_BRIDGE_ZONES],
+        poles: [ReducedBridgePole; NUM_REDUCED_MODES],
+    ) -> Self {
+        let safe_sr = f64::from(sanitize_sample_rate(sample_rate));
+        let ts = 1.0 / safe_sr;
+        let h = 0.5 * ts;
+        let mut ssm = Self {
+            poles,
+            y_inf,
+            y_inf_f64: [0.0_f64; NUM_BRIDGE_ZONES],
+            ts,
+            half_ts: h,
+            m_m: [0.0_f64; NUM_REDUCED_MODES],
+            c_m: [0.0_f64; NUM_REDUCED_MODES],
+            k_m: [0.0_f64; NUM_REDUCED_MODES],
+            y_m: [0.0_f64; NUM_REDUCED_MODES],
+            phi: [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_REDUCED_MODES],
+            q: [0.0; NUM_REDUCED_MODES],
+            q_dot: [0.0; NUM_REDUCED_MODES],
+            diss_energy_j: 0.0,
+            a_br: [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+            g_total: [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+            solve_8x8: identity_8x8(),
+            solve_abr: [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
+            solve_phi: [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_REDUCED_MODES],
+        };
+        ssm.apply_model(y_inf, poles);
+        ssm.solve_abr = ssm.a_br;
+        ssm.solve_phi = ssm.phi;
+        ssm
+    }
+
+    fn apply_model(
+        &mut self,
+        y_inf: [f32; NUM_BRIDGE_ZONES],
+        poles: [ReducedBridgePole; NUM_REDUCED_MODES],
+    ) {
+        self.poles = poles;
+        self.y_inf = y_inf;
+        for (dst, &src) in self.y_inf_f64.iter_mut().zip(y_inf.iter()) {
             *dst = f64::from(src);
         }
 
-        let poles = build_default_poles(lossless);
-        let mut m_m = [0.0_f64; NUM_REDUCED_MODES];
-        let mut c_m = [0.0_f64; NUM_REDUCED_MODES];
-        let mut k_m = [0.0_f64; NUM_REDUCED_MODES];
-        let mut y_m = [0.0_f64; NUM_REDUCED_MODES];
-        let mut phi = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_REDUCED_MODES];
-
+        let h = self.half_ts;
         for (m, pole) in poles.iter().enumerate() {
             let mass = f64::from(pole.modal_mass_kg);
             let omega = TAU * f64::from(pole.freq_hz);
             let stiff = mass * omega * omega;
             let damp = 2.0 * f64::from(pole.zeta) * mass * omega;
             let z_mode = mass / h + damp + h * stiff;
-            m_m[m] = mass;
-            c_m[m] = damp;
-            k_m[m] = stiff;
-            y_m[m] = 1.0 / z_mode;
-            for (dst, &src) in phi[m].iter_mut().zip(pole.zone_gains.iter()) {
+            self.m_m[m] = mass;
+            self.c_m[m] = damp;
+            self.k_m[m] = stiff;
+            self.y_m[m] = 1.0 / z_mode;
+            for (dst, &src) in self.phi[m].iter_mut().zip(pole.zone_gains.iter()) {
                 *dst = f64::from(src);
             }
         }
 
         let mut a_br = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
-        for z in 0..NUM_BRIDGE_ZONES {
-            a_br[z][z] = y_inf_f64[z];
-            for zp in 0..NUM_BRIDGE_ZONES {
+        for (z, a_row) in a_br.iter_mut().enumerate() {
+            a_row[z] = self.y_inf_f64[z];
+            for (zp, cell) in a_row.iter_mut().enumerate() {
                 let mut sum = 0.0_f64;
                 for m in 0..NUM_REDUCED_MODES {
-                    sum += y_m[m] * phi[m][z] * phi[m][zp];
+                    sum += self.y_m[m] * self.phi[m][z] * self.phi[m][zp];
                 }
-                a_br[z][zp] += sum;
+                *cell += sum;
+            }
+        }
+        self.a_br = a_br;
+        self.reset();
+    }
+
+    /// Updates `poles`, `y_inf`, `y_inf_f64`, modal matrices `(m_m, c_m, k_m, y_m, phi, a_br)`,
+    /// and junction solves `(solve_8x8, solve_abr, solve_phi)` from `.pbdy` data, resetting
+    /// `(q, q_dot, diss_energy_j)` to rest equilibrium.
+    pub fn set_reduced_model(
+        &mut self,
+        y_inf: &[f32; NUM_BRIDGE_ZONES],
+        reduced_poles: &[PresetReducedPole; NUM_REDUCED_MODES],
+    ) {
+        self.apply_model(sanitize_y_inf(y_inf), sanitize_reduced_poles(reduced_poles));
+        self.recompute_junction_matrices();
+    }
+
+    fn recompute_junction_matrices(&mut self) {
+        let mut sys = identity_8x8();
+        for (i, sys_row) in sys.iter_mut().enumerate() {
+            for (j, sys_cell) in sys_row.iter_mut().enumerate() {
+                let mut sum = 0.0_f64;
+                for (l, g_row) in self.g_total.iter().enumerate() {
+                    sum += self.a_br[i][l] * g_row[j];
+                }
+                *sys_cell += sum;
             }
         }
 
-        let ident = identity_8x8();
-        Self {
-            poles,
-            y_inf,
-            y_inf_f64,
-            ts,
-            half_ts: h,
-            m_m,
-            c_m,
-            k_m,
-            y_m,
-            phi,
-            q: [0.0; NUM_REDUCED_MODES],
-            q_dot: [0.0; NUM_REDUCED_MODES],
-            diss_energy_j: 0.0,
-            a_br,
-            g_total: [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
-            solve_8x8: ident,
-            solve_abr: a_br,
-            solve_phi: phi,
+        let inv = invert_8x8(&sys);
+        let solve_abr = matmul_8x8(&inv, &self.a_br);
+        for (dst_row, phi_row) in self.solve_phi.iter_mut().zip(self.phi.iter()) {
+            for (dst, inv_row) in dst_row.iter_mut().zip(inv.iter()) {
+                let mut sum = 0.0_f64;
+                for (&inv_ij, &phi_j) in inv_row.iter().zip(phi_row.iter()) {
+                    sum += inv_ij * phi_j;
+                }
+                *dst = sum;
+            }
         }
+        self.solve_8x8 = inv;
+        self.solve_abr = solve_abr;
     }
 
     /// Recomputes `G_total = G_str + diag(r_extra_diag)`, `(I_8 + A_br * G_total)^-1`,
@@ -154,31 +222,8 @@ impl AdmittanceSsm {
             }
         }
 
-        let mut sys = identity_8x8();
-        for (i, sys_row) in sys.iter_mut().enumerate() {
-            for (j, sys_cell) in sys_row.iter_mut().enumerate() {
-                let mut sum = 0.0_f64;
-                for (l, g_row) in g_tot.iter().enumerate() {
-                    sum += self.a_br[i][l] * g_row[j];
-                }
-                *sys_cell += sum;
-            }
-        }
-
-        let inv = invert_8x8(&sys);
-        let solve_abr = matmul_8x8(&inv, &self.a_br);
-        for (dst_row, phi_row) in self.solve_phi.iter_mut().zip(self.phi.iter()) {
-            for (dst, inv_row) in dst_row.iter_mut().zip(inv.iter()) {
-                let mut sum = 0.0_f64;
-                for (&inv_ij, &phi_j) in inv_row.iter().zip(phi_row.iter()) {
-                    sum += inv_ij * phi_j;
-                }
-                *dst = sum;
-            }
-        }
         self.g_total = g_tot;
-        self.solve_8x8 = inv;
-        self.solve_abr = solve_abr;
+        self.recompute_junction_matrices();
     }
 
     /// Resets modal displacements, velocities, and accumulated dissipation energy.
@@ -228,6 +273,13 @@ impl AdmittanceSsm {
     #[inline]
     pub const fn solve_abr(&self) -> &[[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES] {
         &self.solve_abr
+    }
+
+    /// Returns precomputed `solve_8x8 * phi` modal velocity projection matrix.
+    #[must_use]
+    #[inline]
+    pub const fn solve_phi(&self) -> &[[f64; NUM_BRIDGE_ZONES]; NUM_REDUCED_MODES] {
+        &self.solve_phi
     }
 
     /// Evaluates free modal midpoint velocities and free zone velocities `v_zone_free`.
