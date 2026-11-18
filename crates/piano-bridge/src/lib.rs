@@ -60,6 +60,7 @@ pub struct BridgeBank {
     pub(crate) ssm: AdmittanceSsm,
     pub(crate) hertz: HertzBridgeContact,
     pub(crate) duplex: DuplexBank,
+    pub(crate) fixed_end: bool,
 }
 
 impl BridgeBank {
@@ -79,6 +80,7 @@ impl BridgeBank {
             ssm,
             hertz,
             duplex,
+            fixed_end: false,
         }
     }
 
@@ -199,6 +201,19 @@ impl BridgeBank {
     /// resynchronizes `8x8` WDF junction matrices, and resets Stage 3 dynamic state cleanly.
     pub fn set_body_preset(&mut self, preset: &BodyPreset) {
         self.set_reduced_model(&preset.y_inf, &preset.reduced_poles);
+    }
+
+    /// Toggles rigid fixed-end diagnostic mode (`v_br = 0`, `b_waves_out = -a_waves`, zero
+    /// WDF inter-string coupling and zero duplex output) for F8 two-stage decay comparison.
+    pub fn set_fixed_end(&mut self, fixed_end: bool) {
+        self.fixed_end = fixed_end;
+    }
+
+    /// Returns `true` when rigid fixed-end diagnostic mode is active.
+    #[must_use]
+    #[inline]
+    pub const fn is_fixed_end(&self) -> bool {
+        self.fixed_end
     }
 
     /// Flushes `< 1e-20` denormals/subnormals across Stage 3 SSM, Hertz contact, and duplex states,

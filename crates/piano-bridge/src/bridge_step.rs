@@ -83,6 +83,24 @@ impl BridgeBank {
             f_inc_str[z1] += acc1;
         }
 
+        if self.fixed_end {
+            for (dst, &a) in b_waves_out.iter_mut().zip(a_waves.iter()) {
+                *dst = if a.is_finite() { -a } else { 0.0 };
+            }
+            dup_zone_out.fill(0.0);
+            let y_inf = self.ssm.y_inf();
+            for z in 0..NUM_BRIDGE_ZONES {
+                let f_audio = if zone_str_audio[z].is_finite() {
+                    zone_str_audio[z]
+                } else {
+                    0.0
+                };
+                let out_v = y_inf[z] * (f_inc_str[z] as f32 + f_audio);
+                zone_out[z] = if out_v.is_finite() { out_v } else { 0.0 };
+            }
+            return (0.0, 0.0);
+        }
+
         if run_a_finite[..n_runs].iter().all(|&ok| ok)
             && f_inc_str.iter().all(|&f| f == 0.0)
             && self.ssm.is_quiescent()

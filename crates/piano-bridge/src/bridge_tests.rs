@@ -384,3 +384,43 @@ fn stage3_subnormal_flush_restores_quiescence_and_idle_bypass() {
     assert_eq!(bridge.ssm_energy_joules(), 0.0);
     assert_eq!(bridge.duplex_energy_joules(), 0.0);
 }
+
+#[test]
+fn fixed_end_mode_reflects_inverted_waves_without_coupling_or_state_buildup() {
+    let mut bridge = BridgeBank::new(48_000.0);
+    assert!(!bridge.is_fixed_end());
+    bridge.set_fixed_end(true);
+    assert!(bridge.is_fixed_end());
+
+    let layout = CHOIR_LAYOUTS[48]; // A4 trichord
+    let s0 = usize::from(layout.first_string_idx);
+    let mut a = [0.0_f32; TOTAL_STRINGS];
+    a[s0] = 0.35;
+    let mut audio = [0.0_f32; NUM_BRIDGE_ZONES];
+    audio[4] = 1.25;
+    let mut b = [0.0_f32; TOTAL_STRINGS];
+    let mut z_out = [0.0_f32; NUM_BRIDGE_ZONES];
+    let mut dup_out = [1.0_f32; NUM_BRIDGE_ZONES];
+
+    let (dl, dr) =
+        bridge.step_bridge_sample_with_duplex_zones(&a, &audio, &mut b, &mut z_out, &mut dup_out);
+    assert_eq!((dl, dr), (0.0, 0.0));
+    assert_eq!(dup_out, [0.0_f32; NUM_BRIDGE_ZONES]);
+    assert!(bridge.is_quiescent());
+    assert!(bridge.total_energy_joules().abs() < 1.0e-16);
+    assert_eq!(b[s0], -a[s0]);
+    assert_eq!(b[s0 + 1], 0.0, "no inter-string coupling in fixed-end mode");
+    assert!(z_out.iter().any(|&v| v > 0.0));
+
+    // Non-finite inputs must remain sanitized without panic.
+    a[s0 + 1] = f32::NAN;
+    audio[4] = f32::INFINITY;
+    let (dl2, dr2) =
+        bridge.step_bridge_sample_with_duplex_zones(&a, &audio, &mut b, &mut z_out, &mut dup_out);
+    assert_eq!((dl2, dr2), (0.0, 0.0));
+    assert!(b.iter().all(|v| v.is_finite()));
+    assert!(z_out.iter().all(|v| v.is_finite()));
+
+    bridge.set_fixed_end(false);
+    assert!(!bridge.is_fixed_end());
+}
