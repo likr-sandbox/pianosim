@@ -1,7 +1,8 @@
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import { DEMO_SCORES } from '../src/midi/demo-scores';
-import type { MidiCcEvent, MidiNoteEvent } from '../src/midi/smf-parser';
+import { parseSmf, type MidiCcEvent, type MidiNoteEvent } from '../src/midi/smf-parser';
 import {
   expectAudioDecay,
   sampleDestinationAudio,
@@ -206,7 +207,10 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
   }) => {
     expect(DEMO_SCORES.length).toBe(6);
     for (const desc of DEMO_SCORES) {
-      const smf = desc.generator();
+      const bytes = fs.readFileSync(
+        fileURLToPath(new URL(`../public/demos/${desc.fileName}`, import.meta.url)),
+      );
+      const smf = parseSmf(bytes);
       const noteOns = smf.events.filter((e): e is MidiNoteEvent => e.type === 'noteOn');
       const cc64s = smf.events.filter(
         (e): e is MidiCcEvent => e.type === 'cc' && e.controller === 64,

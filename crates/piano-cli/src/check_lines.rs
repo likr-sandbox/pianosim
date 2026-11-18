@@ -14,6 +14,7 @@ const SKIP_DIR_NAMES: &[&str] = &[
     "target",
     "node_modules",
     "dist",
+    "demos",
     "test-results",
     "playwright-report",
     "blob-report",

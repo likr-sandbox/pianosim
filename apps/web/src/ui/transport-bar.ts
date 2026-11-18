@@ -5,7 +5,7 @@ import type { MidiPlayer } from '../midi/midi-player';
 import type { WebMidiManager } from '../midi/web-midi';
 
 export interface TransportBarCallbacks {
-  onSelectDemo(demoId: string): void;
+  onSelectDemo(demoId: string): Promise<void> | void;
   onUploadMidi(bytes: ArrayBuffer, fileName: string): void;
 }
 
@@ -26,6 +26,7 @@ export class TransportBar {
   private deviceSelect!: HTMLSelectElement;
   private recorderSlot!: HTMLElement;
 
+  private pendingLoad: Promise<void> = Promise.resolve();
   private readonly cleanupHandlers: Array<() => void> = [];
 
   constructor(
@@ -64,6 +65,15 @@ export class TransportBar {
 
   getRecorderMount(): HTMLElement {
     return this.recorderSlot;
+  }
+
+  triggerDemoLoad(demoId: string): Promise<void> {
+    if (this.demoSelect) {
+      this.demoSelect.value = demoId;
+    }
+    const loadPromise = Promise.resolve(this.callbacks.onSelectDemo(demoId));
+    this.pendingLoad = loadPromise;
+    return loadPromise;
   }
 
   destroy(): void {
@@ -167,13 +177,23 @@ export class TransportBar {
     this.recorderSlot = this.container.querySelector('#recorder-mount')!;
   }
 
+  private async awaitPendingLoad(): Promise<void> {
+    let current = this.pendingLoad;
+    await current;
+    while (current !== this.pendingLoad) {
+      current = this.pendingLoad;
+      await current;
+    }
+  }
+
   private bindEvents(): void {
     const onDemoChange = () => {
-      this.callbacks.onSelectDemo(this.demoSelect.value);
+      this.pendingLoad = Promise.resolve(this.callbacks.onSelectDemo(this.demoSelect.value));
     };
 
-    const onPlayClick = () => {
-      void this.player.play();
+    const onPlayClick = async () => {
+      await this.awaitPendingLoad();
+      await this.player.play();
     };
 
     const onPauseClick = () => {
@@ -184,8 +204,9 @@ export class TransportBar {
       this.player.stop();
     };
 
-    const onSeekInput = () => {
+    const onSeekInput = async () => {
       const targetSec = parseFloat(this.seekBar.value);
+      await this.awaitPendingLoad();
       this.player.seek(targetSec);
     };
 
@@ -198,6 +219,7 @@ export class TransportBar {
     const onFileChange = () => {
       const file = this.fileInput.files?.[0];
       if (!file) return;
+      this.pendingLoad = Promise.resolve();
       const reader = new FileReader();
       reader.onload = () => {
         if (reader.result instanceof ArrayBuffer) {

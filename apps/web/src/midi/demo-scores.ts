@@ -1,23 +1,16 @@
-/** Curated classical demo score registry for PianoSim physical modeling showcases. */
+/** Curated classical demo score registry backed by canonical binary SMF (.mid) files. */
 
-import type { ParsedSmf } from './smf-parser';
-import { createBachPrelude } from './scores/bach-prelude';
-import { createBeethovenMoonlight } from './scores/beethoven-moonlight';
-import { createChopinNocturne } from './scores/chopin-nocturne';
-import { createDebussyClaire } from './scores/debussy-claire';
-import { createRachmaninoffPrelude } from './scores/rachmaninoff-prelude';
-import { createSatieGymnopedie } from './scores/satie-gymnopedie';
-import type { DemoScoreDescriptor } from './scores/types';
+import { parseSmf, type ParsedSmf } from './smf-parser';
 
-export {
-  createBachPrelude,
-  createBeethovenMoonlight,
-  createChopinNocturne,
-  createDebussyClaire,
-  createRachmaninoffPrelude,
-  createSatieGymnopedie,
-};
-export type { DemoScoreDescriptor };
+export interface DemoScoreDescriptor {
+  readonly id: string;
+  readonly title: string;
+  readonly composer: string;
+  readonly era: string;
+  readonly description: string;
+  readonly durationSeconds: number;
+  readonly fileName: string;
+}
 
 export const DEMO_SCORES: ReadonlyArray<DemoScoreDescriptor> = [
   {
@@ -27,7 +20,7 @@ export const DEMO_SCORES: ReadonlyArray<DemoScoreDescriptor> = [
     era: 'Baroque (1722)',
     description: 'Crisp unpedaled 16th-note arpeggios, Railsback inharmonicity, polyphonic clarity.',
     durationSeconds: 33.0,
-    generator: createBachPrelude,
+    fileName: '01-bach-prelude-bwv846.mid',
   },
   {
     id: 'chopin-nocturne',
@@ -36,7 +29,7 @@ export const DEMO_SCORES: ReadonlyArray<DemoScoreDescriptor> = [
     era: 'Romantic (1832)',
     description: 'Bel canto singing melody, wide bass leaps, rhythmic damper pedal catch-and-release.',
     durationSeconds: 28.0,
-    generator: createChopinNocturne,
+    fileName: '02-chopin-nocturne-op9-no2.mid',
   },
   {
     id: 'beethoven-moonlight',
@@ -45,7 +38,7 @@ export const DEMO_SCORES: ReadonlyArray<DemoScoreDescriptor> = [
     era: 'Classical (1801)',
     description: 'Full damper pedal wash, deep C# minor bass octaves, sympathetic bridge resonance.',
     durationSeconds: 38.0,
-    generator: createBeethovenMoonlight,
+    fileName: '03-beethoven-moonlight-op27-no2.mid',
   },
   {
     id: 'debussy-claire',
@@ -54,7 +47,7 @@ export const DEMO_SCORES: ReadonlyArray<DemoScoreDescriptor> = [
     era: 'Impressionism (1905)',
     description: 'Delicate pianissimo touch, high-register shimmer, Una Corda soft pedal trichord shift.',
     durationSeconds: 35.0,
-    generator: createDebussyClaire,
+    fileName: '04-debussy-clair-de-lune.mid',
   },
   {
     id: 'satie-gymnopedie',
@@ -63,7 +56,7 @@ export const DEMO_SCORES: ReadonlyArray<DemoScoreDescriptor> = [
     era: 'Avant-Garde (1888)',
     description: 'Spacious ambient transparency, two-stage string damping, acoustic room reflection.',
     durationSeconds: 36.0,
-    generator: createSatieGymnopedie,
+    fileName: '05-satie-gymnopedie-no1.mid',
   },
   {
     id: 'rachmaninoff-prelude',
@@ -72,19 +65,45 @@ export const DEMO_SCORES: ReadonlyArray<DemoScoreDescriptor> = [
     era: 'Late Romantic (1892)',
     description: 'Fortissimo dynamic stress, hammer felt compression hardening, Zone 9 keybed thump.',
     durationSeconds: 25.0,
-    generator: createRachmaninoffPrelude,
+    fileName: '06-rachmaninoff-prelude-op3-no2.mid',
   },
 ];
 
-const SCORE_LOOKUP = new Map<string, () => ParsedSmf>(
-  DEMO_SCORES.map((s) => [s.id, s.generator]),
-);
+const SCORE_CACHE = new Map<string, ParsedSmf>();
+const IN_FLIGHT = new Map<string, Promise<ParsedSmf>>();
 
-/** Look up a demo score by ID; defaults to Bach Prelude if unknown for backward compatibility. */
-export function getDemoScore(id: string): ParsedSmf {
-  const gen = SCORE_LOOKUP.get(id);
-  if (gen) {
-    return gen();
+export function getDemoMidiUrl(fileName: string): string {
+  const base = (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/';
+  return `${base}demos/${fileName}`;
+}
+
+/** Fetch and parse a canonical `.mid` demo score by ID with per-ID caching. */
+export async function fetchDemoScore(id: string): Promise<ParsedSmf> {
+  const desc = DEMO_SCORES.find((s) => s.id === id) ?? DEMO_SCORES[0];
+  const cached = SCORE_CACHE.get(desc.id);
+  if (cached) {
+    return cached;
   }
-  return createBachPrelude();
+  const existing = IN_FLIGHT.get(desc.id);
+  if (existing) {
+    return existing;
+  }
+
+  const req = (async () => {
+    const res = await fetch(getDemoMidiUrl(desc.fileName));
+    if (!res.ok) {
+      throw new Error(`Failed to fetch demo MIDI ${desc.fileName}: HTTP ${res.status}`);
+    }
+    const buf = await res.arrayBuffer();
+    const parsed = parseSmf(buf);
+    SCORE_CACHE.set(desc.id, parsed);
+    return parsed;
+  })();
+
+  IN_FLIGHT.set(desc.id, req);
+  try {
+    return await req;
+  } finally {
+    IN_FLIGHT.delete(desc.id);
+  }
 }

@@ -107,7 +107,7 @@
    - 録音系は `WorkletRecorderPool`（事前確保済み 16 スロットの `Transferable` ピンポン転送によるオーディオ線内ゼロアロケーション収録）＋ `wav-recorder.ts`（24-bit TPDF ディザ PCM / 32-bit IEEE float WAV 書き出し）を提供する。
    - テレメトリは全ブロック走査の `maxCallbackUs`・p50・p99・D1 超過回数・Peak Hold / RMS（`dBFS` / 推定 `dB SPL`）・`appliedSpaceSeq` / `appliedVoicingSeq` を `window.__PIANO_DIAG__` と HUD へ配信する。
 3. **ネイティブ境界 (`piano-engine`, `piano-cli`)**:
-   - `PianoEngine::render_block(&mut self, events: &[SampleEvent], out_l: &mut [f32], out_r: &mut [f32])` を単一リアルタイム API とし、`piano-cli` から `bench`（64サンプル＠48kHz 実時間ベンチ）、`scenarios`（3大聴覚課題＋Wave 4 統合ゲート検証）、`render-wav`（`--a4`, `--format pcm16|pcm24|f32` オフライン書き出し）、`check-lines`（500行上限・クリーンルーム・E2E `waitForTimeout` 禁止検査）、`check-wasm-simd`（`0 imports` / `0xfd` / `relaxed-simd` 検査）を提供する。
+   - `PianoEngine::render_block(&mut self, events: &[SampleEvent], out_l: &mut [f32], out_r: &mut [f32])` を単一リアルタイム API とし、`piano-cli` から `bench`（64サンプル＠48kHz 実時間ベンチ）、`scenarios`（3大聴覚課題＋Wave 4 統合ゲート検証）、`render-wav`（`--midi`, `--preset`, `--sample-rate`, `--a4`, `--format pcm16|pcm24|f32` オフライン書き出し）、`render-demos`（`public/demos/*.mid` 一括書き出し）、`check-lines`（500行上限・クリーンルーム・E2E `waitForTimeout` 禁止検査）、`check-wasm-simd`（`0 imports` / `0xfd` / `relaxed-simd` 検査）を提供する。
 
 ---
 

@@ -28,13 +28,13 @@
 | **`piano-radiator`** (`no_std`) | `lib.rs` / `body_assets.rs` (`concert_grand_v1.pbdy`, `upright_studio_v1.pbdy`, `vintage_saloon_v1.pbdy`) / `ir_synth.rs` (18経路 0.5s IR + 3.8 kHz HPF ベルベットテール) / `modal_prepare.rs`, `modal_synth.rs`, `subrate_upsample.rs` / `mic_perspectives.rs`, `binaural_hrtf.rs` / `fir_head.rs` (64-tap 0遅延 FIR) / `partitioned_fft.rs`, `nupols_tier.rs` (Staggered MIMO NUPOLS) / `space_blob.rs` (`SpacePrepContext`) / `hall_fdn.rs` (3D ER + 8×8 Hadamard FDN) / `limiter.rs` ($C^2$ 安全リミッタ) / `math.rs` |
 | **`piano-engine`** | `lib.rs` / `engine.rs`, `engine_core.rs`, `drivers.rs` (Stage 1〜4統合) / `event_queue.rs` (キャリーオーバ対応) / `param_smooth.rs` (`VoicingSmoother`, Dirty Mask) / `space_control.rs`, `space_guard.rs` (3ボディキャッシュ・8msクロスフェード) / `telemetry.rs` |
 | **`piano-wasm`** | `lib.rs` / `ring_ipc.rs` (線形メモリ SPSC / ステージングバッファ) / `prep_ipc.rs` (`PrepContext`) / `exports.rs`, `wave3_exports.rs`, `wave4_exports.rs` (C-ABI エクスポート群) |
-| **`piano-cli`** | `main.rs` / `wav_writer.rs` (16b / 24b TPDF / 32f WAV) / `bench_rt.rs`, `bench_composite.rs` / `scenarios/` (`mod.rs`, `f0_estimator.rs`, `spectral_utils.rs`, `challenge1_chirp_precursor.rs`, `challenge2_ribattuto.rs`, `challenge3_body_resonance.rs`, `challenge4_wave4_gates.rs`) / `wasm_check.rs` / `check_lines.rs` |
+| **`piano-cli`** | `main.rs` / `smf_parser.rs` / `render_cmd.rs` / `wav_writer.rs` (16b / 24b TPDF / 32f WAV) / `bench_rt.rs`, `bench_composite.rs` / `scenarios/` (`mod.rs`, `f0_estimator.rs`, `spectral_utils.rs`, `challenge1_chirp_precursor.rs`, `challenge2_ribattuto.rs`, `challenge3_body_resonance.rs`, `challenge4_wave4_gates.rs`) / `wasm_check.rs` / `check_lines.rs` |
 
 ### 1.3 Webアプリケーション分割（`apps/web/`）
 - `vite.config.ts` (`?worklet`/`?blobworker` `esbuild` 自己完結バンドル, `base: '/pianosim/'`) / `playwright.config.ts` (`functional` 並列 + `perf-stability` 直列 on `vite preview`) / `bench/wasm-bench.js`
 - `src/main.ts` — アプリ起動とサブシステム結合
 - `src/audio/` — `abi.ts` / `wasm-loader.ts` / `pipeline-bootstrap.ts` / `blob-streamer.ts` / `prep-worker.ts` / `worklet-processor.ts` / `worklet-recorder.ts` / `wav-recorder.ts` / `wasm-host.ts` / `telemetry-client.ts`
-- `src/midi/` — `web-midi.ts` / `smf-parser.ts` / `midi-player.ts` / `demo-scores.ts` / `scores/{types,bach-prelude,beethoven-moonlight,chopin-nocturne,debussy-claire,rachmaninoff-prelude,satie-gymnopedie}.ts`
+- `src/midi/` — `web-midi.ts` / `smf-parser.ts` / `midi-player.ts` / `demo-scores.ts`（`public/demos/*.mid` 読込）
 - `src/input/` — `pointer-glissando.ts` / `pc-keyboard.ts` / `pedal-controller.ts` / `touch-curve.ts`
 - `src/presets/` — `parameter-presets.ts`（4音色プリセット）
 - `src/ui/` — `app-shell.ts` / `shell-template.ts` / `keyboard-view.ts` / `pedal-bar.ts` / `preset-bar.ts` / `voicing-panel.ts` / `space-panel.ts` / `touch-curve-selector.ts` / `transport-bar.ts` / `recorder-controls.ts`

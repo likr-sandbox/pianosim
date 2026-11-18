@@ -20,7 +20,7 @@ import {
   DEFAULT_TOUCH_CURVE,
   type TouchCurveMode,
 } from '../input/touch-curve';
-import { getDemoScore } from '../midi/demo-scores';
+import { fetchDemoScore } from '../midi/demo-scores';
 import { MidiPlayer } from '../midi/midi-player';
 import { parseSmf } from '../midi/smf-parser';
 import { WebMidiManager } from '../midi/web-midi';
@@ -70,6 +70,7 @@ export class AppShell {
   private touchCurve: TouchCurveMode = DEFAULT_TOUCH_CURVE;
   private a4PulseTimer: number | null = null;
   private a4PulseGen = 0;
+  private demoLoadGen = 0;
   private readonly cleanupHandlers: Array<() => void> = [];
 
   constructor(
@@ -100,8 +101,7 @@ export class AppShell {
     this.bindControls();
 
     // Load initial Bach Prelude demo score
-    const initialScore = getDemoScore('bach-prelude');
-    this.midiPlayer.load(initialScore);
+    void this.transportBar.triggerDemoLoad('bach-prelude');
   }
 
   showError(message: string): void {
@@ -268,12 +268,9 @@ export class AppShell {
       this.midiPlayer,
       this.midiManager,
       {
-        onSelectDemo: (demoId) => {
-          this.clearError();
-          const score = getDemoScore(demoId);
-          this.midiPlayer.load(score);
-        },
+        onSelectDemo: (demoId) => this.loadDemo(demoId),
         onUploadMidi: (bytes) => {
+          this.demoLoadGen++;
           this.clearError();
           try {
             const score = parseSmf(bytes);
@@ -431,6 +428,20 @@ export class AppShell {
         }
       }, A4_TEST_DURATION_MS);
     });
+  }
+
+  private async loadDemo(demoId: string): Promise<void> {
+    const gen = ++this.demoLoadGen;
+    this.clearError();
+    this.midiPlayer.stop();
+    try {
+      const score = await fetchDemoScore(demoId);
+      if (gen === this.demoLoadGen) this.midiPlayer.load(score);
+    } catch (err) {
+      if (gen === this.demoLoadGen) {
+        this.showError(err instanceof Error ? err.message : String(err));
+      }
+    }
   }
 
   private clearA4Pulse(): void {
