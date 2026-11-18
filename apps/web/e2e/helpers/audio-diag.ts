@@ -8,6 +8,23 @@ export interface StrikeAttackStats {
   readonly nonFiniteCount: number;
 }
 
+export interface HoldReleaseStats {
+  readonly sampleRate: number;
+  readonly initRms: number;
+  readonly decayedRms: number;
+  readonly decayRatio: number;
+  readonly peak: number;
+  readonly nonFiniteCount: number;
+}
+
+interface CapturedWav {
+  readonly sampleRate: number;
+  readonly mono: Float32Array;
+  readonly peak: number;
+  readonly nonFiniteCount: number;
+  readonly onsetFrame: number;
+}
+
 export interface AudioSampleStats {
   readonly sampleRate: number;
   readonly rms: number;
@@ -190,6 +207,90 @@ export async function setSlider(page: Page, testId: string, val: number): Promis
   }, val);
 }
 
+/** Polls until telemetry.blockCount advances by at least deltaBlocks (AudioWorklet clock). */
+export async function waitAudioBlocks(page: Page, deltaBlocks: number): Promise<number> {
+  return page.evaluate((delta) => {
+    return new Promise<number>((resolve, reject) => {
+      const start = window.__PIANO_DIAG__?.telemetry.blockCount ?? 0;
+      const target = start + delta;
+      const deadline = performance.now() + 10_000;
+      const tick = () => {
+        const diag = window.__PIANO_DIAG__;
+        if (!diag) {
+          reject(new Error('Diagnostic state missing while waiting for audio blocks'));
+          return;
+        }
+        const cur = diag.telemetry.blockCount;
+        if (cur >= target) {
+          resolve(cur);
+          return;
+        }
+        if (performance.now() > deadline) {
+          reject(new Error(`Timed out waiting for ${delta} audio blocks (${cur}/${target})`));
+          return;
+        }
+        setTimeout(tick, 10);
+      };
+      tick();
+    });
+  }, deltaBlocks);
+}
+
+/** Polls destination RMS until output decays below threshold after panic/release. */
+export async function waitForSilence(
+  page: Page,
+  thresholdRms = 0.0005,
+  timeoutMs = 3000,
+): Promise<void> {
+  await expect
+    .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: timeoutMs })
+    .toBeLessThan(thresholdRms);
+}
+
+async function stopAndReadMonoWav(page: Page): Promise<CapturedWav> {
+  await page.getByTestId('record-stop').click();
+  await expect(page.getByTestId('record-status')).toContainText('Ready', { timeout: 3000 });
+
+  const [dl] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByTestId('record-export').click(),
+  ]);
+  const path = await dl.path();
+  if (!path) throw new Error('Missing WAV download path');
+  const buf = fs.readFileSync(path);
+  expect(buf.subarray(0, 4).toString('ascii')).toBe('RIFF');
+  const sampleRate = buf.readUInt32LE(24);
+  const frames = buf.readUInt32LE(40) >>> 3;
+  const mono = new Float32Array(frames);
+  let peak = 0;
+  let nonFiniteCount = 0;
+  let onsetFrame = -1;
+  for (let i = 0; i < frames; i++) {
+    const l = buf.readFloatLE(44 + i * 8);
+    const r = buf.readFloatLE(48 + i * 8);
+    if (!Number.isFinite(l) || !Number.isFinite(r)) {
+      nonFiniteCount++;
+      continue;
+    }
+    const maxCh = Math.max(Math.abs(l), Math.abs(r));
+    if (maxCh > peak) peak = maxCh;
+    mono[i] = 0.5 * (l + r);
+    if (onsetFrame < 0 && maxCh > 0.002) {
+      onsetFrame = Math.max(0, i - 16);
+    }
+  }
+  expect(onsetFrame).toBeGreaterThanOrEqual(0);
+  return { sampleRate, mono, peak, nonFiniteCount, onsetFrame };
+}
+
+function windowRms(samples: Float32Array, start: number, len: number): number {
+  let sumSq = 0;
+  for (let i = start; i < start + len; i++) {
+    sumSq += samples[i] * samples[i];
+  }
+  return Math.sqrt(sumSq / len);
+}
+
 /** Captures an onset-aligned 85 ms attack window via the live f32 AudioWorklet WAV recorder. */
 export async function captureStrikeAttack(
   page: Page,
@@ -202,9 +303,7 @@ export async function captureStrikeAttack(
     await page.getByTestId('pedal-una-corda').click();
     expect(await page.getByTestId('pedal-una-corda').getAttribute('aria-pressed')).toBe('true');
   }
-  await expect
-    .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
-    .toBeLessThan(0.0005);
+  await waitForSilence(page);
 
   await page.getByTestId('record-format').selectOption('f32');
   await page.getByTestId('record-start').click();
@@ -212,47 +311,18 @@ export async function captureStrikeAttack(
 
   const key = page.locator(`[data-midi="${midi}"]`);
   await key.dispatchEvent('pointerdown', { buttons: 1 });
-  await page.waitForTimeout(200);
+  await waitAudioBlocks(page, 80);
   await key.dispatchEvent('pointerup', { buttons: 0 });
-  await page.getByTestId('record-stop').click();
-  await expect(page.getByTestId('record-status')).toContainText('Ready', { timeout: 3000 });
+  const wav = await stopAndReadMonoWav(page);
+  const t0 = wav.onsetFrame;
+  expect(wav.mono.length - t0).toBeGreaterThanOrEqual(4096);
 
-  const [dl] = await Promise.all([
-    page.waitForEvent('download'),
-    page.getByTestId('record-export').click(),
-  ]);
-  const path = await dl.path();
-  if (!path) throw new Error('Missing WAV download path');
-  const buf = fs.readFileSync(path);
-  expect(buf.subarray(0, 4).toString('ascii')).toBe('RIFF');
-  const sr = buf.readUInt32LE(24);
-  const frames = buf.readUInt32LE(40) >>> 3;
-  const mono = new Float32Array(frames);
-  let nonFiniteCount = 0;
-  let t0 = -1;
-  for (let i = 0; i < frames; i++) {
-    const l = buf.readFloatLE(44 + i * 8);
-    const r = buf.readFloatLE(48 + i * 8);
-    if (!Number.isFinite(l) || !Number.isFinite(r)) {
-      nonFiniteCount++;
-      continue;
-    }
-    mono[i] = 0.5 * (l + r);
-    if (t0 < 0 && Math.max(Math.abs(l), Math.abs(r)) > 0.002) {
-      t0 = Math.max(0, i - 16);
-    }
-  }
-  expect(t0).toBeGreaterThanOrEqual(0);
-  expect(frames - t0).toBeGreaterThanOrEqual(4096);
-
-  let sumSq = 0;
   let attackPeak = 0;
   for (let i = t0; i < t0 + 4096; i++) {
-    sumSq += mono[i] * mono[i];
-    attackPeak = Math.max(attackPeak, Math.abs(mono[i]));
+    attackPeak = Math.max(attackPeak, Math.abs(wav.mono[i]));
   }
   const n = 2048;
-  const binW = sr / n;
+  const binW = wav.sampleRate / n;
   let totLin = 0;
   let wFreq = 0;
   const maxBin = Math.min(n / 2 - 1, Math.ceil(12000 / binW));
@@ -261,7 +331,7 @@ export async function captureStrikeAttack(
     let im = 0;
     const step = (2 * Math.PI * k) / n;
     for (let i = 0; i < n; i++) {
-      const x = mono[t0 + i] * 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
+      const x = wav.mono[t0 + i] * 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
       re += x * Math.cos(step * i);
       im -= x * Math.sin(step * i);
     }
@@ -272,9 +342,55 @@ export async function captureStrikeAttack(
     }
   }
   return {
-    attackRms: Math.sqrt(sumSq / 4096),
+    attackRms: windowRms(wav.mono, t0, 4096),
     attackPeak,
     spectralCentroidHz: totLin > 0 ? wFreq / totLin : 0,
-    nonFiniteCount,
+    nonFiniteCount: wav.nonFiniteCount,
+  };
+}
+
+/** Captures sample-exact hold & post-release decay RMS via live f32 AudioWorklet WAV recording. */
+export async function captureHoldReleaseWindow(
+  page: Page,
+  midi: number,
+  sustain: number,
+  holdBlocks = 112,
+  releaseBlocks = 192,
+): Promise<HoldReleaseStats> {
+  await page.getByTestId('panic-btn').click();
+  await setSlider(page, 'sustain-slider', sustain);
+  await waitForSilence(page);
+
+  await page.getByTestId('record-format').selectOption('f32');
+  await page.getByTestId('record-start').click();
+  await expect(page.getByTestId('record-stop')).toBeEnabled();
+
+  const key = page.locator(`[data-midi="${midi}"]`);
+  const bDown = await waitAudioBlocks(page, 1);
+  await key.dispatchEvent('pointerdown', { buttons: 1 });
+  const bUp = await waitAudioBlocks(page, holdBlocks);
+  await key.dispatchEvent('pointerup', { buttons: 0 });
+  await waitAudioBlocks(page, releaseBlocks);
+
+  const wav = await stopAndReadMonoWav(page);
+  const sr = wav.sampleRate;
+  const t0 = wav.onsetFrame;
+  const holdFrames = (bUp - bDown) * 128;
+  const winLen = 2048;
+  const initStart = t0 + holdFrames - Math.round(0.04 * sr) - winLen;
+  const decayStart = t0 + holdFrames + Math.round(0.35 * sr);
+
+  expect(initStart).toBeGreaterThanOrEqual(t0);
+  expect(decayStart + winLen).toBeLessThanOrEqual(wav.mono.length);
+
+  const initRms = windowRms(wav.mono, initStart, winLen);
+  const decayedRms = windowRms(wav.mono, decayStart, winLen);
+  return {
+    sampleRate: sr,
+    initRms,
+    decayedRms,
+    decayRatio: decayedRms / initRms,
+    peak: wav.peak,
+    nonFiniteCount: wav.nonFiniteCount,
   };
 }

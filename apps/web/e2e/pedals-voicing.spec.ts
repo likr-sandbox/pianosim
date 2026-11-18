@@ -1,11 +1,14 @@
 import { expect, test } from '@playwright/test';
 import {
+  captureHoldReleaseWindow,
   captureStrikeAttack,
   expectAudioDecay,
   sampleDestinationAudio,
   setSlider,
   setupErrorMonitoring,
   unlockAudioEngine,
+  waitAudioBlocks,
+  waitForSilence,
 } from './helpers/audio-diag';
 
 test.describe('E2E Pedals & Voicing Studio Controls', () => {
@@ -23,51 +26,22 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
   });
 
   test('Damper pedal: continuous half-pedal clearance decay rate ordering', async ({ page }) => {
-    const a4Key = page.locator('[data-midi="69"]');
+    // Capture sample-exact hold & 350 ms release ratios via lossless f32 AudioWorklet WAV
+    // recording to eliminate wall-clock timing skew against A4 prompt decay.
+    const sustained = await captureHoldReleaseWindow(page, 69, 1.0);
+    const closed = await captureHoldReleaseWindow(page, 69, 0.0);
+    const half = await captureHoldReleaseWindow(page, 69, 0.5);
 
-    // 1. Full sustain (1.0): damper disengaged
-    await setSlider(page, 'sustain-slider', 1.0);
-    await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
-    const sustainedInit = await sampleDestinationAudio(page);
-    await a4Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(350);
-    const sustainedDecayed = await sampleDestinationAudio(page);
-    const sustainRatio = sustainedDecayed.rms / sustainedInit.rms;
-
-    // Reset silence
-    await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
-
-    // 2. Closed damper (0.0): full resting preload damping
-    await setSlider(page, 'sustain-slider', 0.0);
-    await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
-    const closedInit = await sampleDestinationAudio(page);
-    await a4Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(350);
-    const closedDecayed = await sampleDestinationAudio(page);
-    const closedRatio = closedDecayed.rms / closedInit.rms;
-
-    // Reset silence
-    await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
-
-    // 3. Half-pedal (0.5): ~32 um partial contact clearance
-    await setSlider(page, 'sustain-slider', 0.5);
-    await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
-    const halfInit = await sampleDestinationAudio(page);
-    await a4Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(350);
-    const halfDecayed = await sampleDestinationAudio(page);
-    const halfRatio = halfDecayed.rms / halfInit.rms;
+    for (const run of [sustained, closed, half]) {
+      expect(run.nonFiniteCount).toBe(0);
+      expect(run.peak).toBeLessThanOrEqual(1.0);
+      expect(run.initRms).toBeGreaterThan(0.002);
+    }
 
     // Strictly monotonic decay rate ordering: closed decays fastest, sustain slowest
-    expect(closedRatio).toBeLessThan(halfRatio);
-    expect(halfRatio).toBeLessThan(sustainRatio);
-    expect(halfDecayed.nonFiniteCount).toBe(0);
-    expect(halfDecayed.peak).toBeLessThanOrEqual(1.0);
+    expect(closed.decayRatio).toBeLessThan(0.1);
+    expect(closed.decayRatio).toBeLessThan(half.decayRatio);
+    expect(half.decayRatio).toBeLessThan(sustained.decayRatio);
   });
 
   test('Sostenuto pedal: mechanical latching sustains prior note while subsequent notes decay', async ({
@@ -78,24 +52,22 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     // Step 0: Measure unlatched C4 baseline release decay (damper closes immediately)
     await note1.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 128);
     const unlatchedHeld = await sampleDestinationAudio(page);
     expect(unlatchedHeld.rms).toBeGreaterThan(0.002);
 
     await note1.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 128);
     const unlatchedReleased = await sampleDestinationAudio(page);
     expect(unlatchedReleased.nonFiniteCount).toBe(0);
     expect(unlatchedReleased.rms).toBeLessThan(unlatchedHeld.rms * 0.05);
 
     await page.getByTestId('panic-btn').click();
-    await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
-      .toBeLessThan(0.0005);
+    await waitForSilence(page);
 
     // Step 1: Strike and hold Note 1
     await note1.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 128);
     const note1Held = await sampleDestinationAudio(page);
     expect(note1Held.rms).toBeGreaterThan(0.002);
 
@@ -105,7 +77,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     // Step 3: Release Note 1 - must sustain far above unlatched closed-damper baseline
     await note1.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 128);
     const note1Latched = await sampleDestinationAudio(page);
     expect(note1Latched.nonFiniteCount).toBe(0);
     expect(note1Latched.rms).toBeGreaterThan(0.002);
@@ -116,11 +88,11 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     // Step 4: Play Note 2 staccato (struck AFTER sostenuto engaged)
     await note2.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(150);
+    await waitAudioBlocks(page, 80);
     const note2Held = await sampleDestinationAudio(page);
     expect(note2Held.rms).toBeGreaterThan(note1Latched.rms);
     await note2.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(400); // Allow Note 2 to decay
+    await waitAudioBlocks(page, 160); // Allow Note 2 to decay
 
     // Step 5: Verify Note 2 decayed while Note 1 still rings
     const sustainedState = await sampleDestinationAudio(page);
@@ -169,7 +141,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     await page.locator('[data-midi="64"]').dispatchEvent('pointerdown', { buttons: 1 });
     await page.locator('[data-midi="67"]').dispatchEvent('pointerdown', { buttons: 1 });
     await setSlider(page, 'sustain-slider', 1.0);
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 128);
 
     const initial = await sampleDestinationAudio(page);
     expect(initial.rms).toBeGreaterThan(0.003);
@@ -179,7 +151,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     await setSlider(page, 'voicing-unison', 3.5);
     await setSlider(page, 'voicing-stretch', 1.8);
     await setSlider(page, 'voicing-length', 1.6);
-    await page.waitForTimeout(200);
+    await waitAudioBlocks(page, 96);
 
     const sweptHigh = await sampleDestinationAudio(page);
     expect(sweptHigh.nonFiniteCount).toBe(0);
@@ -191,7 +163,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     await setSlider(page, 'voicing-unison', 0.0);
     await setSlider(page, 'voicing-stretch', 0.1);
     await setSlider(page, 'voicing-length', 0.6);
-    await page.waitForTimeout(200);
+    await waitAudioBlocks(page, 96);
 
     const sweptLow = await sampleDestinationAudio(page);
     expect(sweptLow.nonFiniteCount).toBe(0);
@@ -287,14 +259,14 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     // Strike a note AFTER Sostenuto is engaged (e.g. E4 MIDI 64)
     const e4Key = page.locator('[data-midi="64"]');
     await e4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 112);
     const heldStats = await sampleDestinationAudio(page);
     expect(heldStats.rms).toBeGreaterThan(0.002);
     expect(heldStats.nonFiniteCount).toBe(0);
 
     // Release key: because Sostenuto was engaged before key-down, damper must NOT be latched
     await e4Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(350);
+    await waitAudioBlocks(page, 144);
     const decayedStats = await sampleDestinationAudio(page);
     expect(decayedStats.rms).toBeLessThan(heldStats.rms * 0.35);
     expect(decayedStats.nonFiniteCount).toBe(0);
@@ -322,13 +294,13 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     // Play note at minimum boundaries and verify numerical stability
     const a4Key = page.locator('[data-midi="69"]');
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 112);
     const minStats = await sampleDestinationAudio(page);
     expect(minStats.nonFiniteCount).toBe(0);
     expect(minStats.peak).toBeLessThanOrEqual(1.0);
     expect(minStats.rms).toBeGreaterThan(0.001);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 112);
 
     // 2. Max boundary limits
     await setSlider(page, 'voicing-hammer', 1.0);
@@ -343,13 +315,13 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     // Play note at maximum boundaries and verify numerical stability
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 112);
     const maxStats = await sampleDestinationAudio(page);
     expect(maxStats.nonFiniteCount).toBe(0);
     expect(maxStats.peak).toBeLessThanOrEqual(1.0);
     expect(maxStats.rms).toBeGreaterThan(0.001);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 112);
 
     // Reset to nominal defaults
     await setSlider(page, 'voicing-hammer', 0.5);
@@ -371,7 +343,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     const g4Key = page.locator('[data-midi="67"]');
     await c4Key.dispatchEvent('pointerdown', { buttons: 1 });
     await g4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 112);
     const bassHeld = await sampleDestinationAudio(page);
     expect(bassHeld.rms).toBeGreaterThan(0.002);
     expect(bassHeld.nonFiniteCount).toBe(0);
@@ -384,7 +356,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     // Release bass keys — bass strings continue ringing via Sostenuto latch
     await c4Key.dispatchEvent('pointerup', { buttons: 0 });
     await g4Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 112);
     const bassLatched = await sampleDestinationAudio(page);
     expect(bassLatched.rms).toBeGreaterThan(0.001);
     expect(bassLatched.nonFiniteCount).toBe(0);
@@ -393,9 +365,9 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     await setSlider(page, 'sustain-slider', 0.5);
     const e4Key = page.locator('[data-midi="64"]');
     await e4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(150);
+    await waitAudioBlocks(page, 64);
     await e4Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(200);
+    await waitAudioBlocks(page, 96);
 
     const halfPedalAudio = await sampleDestinationAudio(page);
     expect(halfPedalAudio.nonFiniteCount).toBe(0);
@@ -404,7 +376,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     // Step E: Release half-pedal to 0.0 while Sostenuto remains engaged
     await setSlider(page, 'sustain-slider', 0.0);
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 128);
     const onlySostAudio = await sampleDestinationAudio(page);
     expect(onlySostAudio.nonFiniteCount).toBe(0);
     expect(onlySostAudio.peak).toBeLessThanOrEqual(1.0);
@@ -425,7 +397,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     await page.locator('[data-midi="67"]').dispatchEvent('pointerdown', { buttons: 1 });
     await page.locator('[data-midi="72"]').dispatchEvent('pointerdown', { buttons: 1 });
     await setSlider(page, 'sustain-slider', 1.0);
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 128);
 
     const initialChord = await sampleDestinationAudio(page);
     expect(initialChord.rms).toBeGreaterThan(0.003);
@@ -443,7 +415,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     await setSlider(page, 'voicing-unison', 2.8);
     await setSlider(page, 'voicing-stretch', 1.6);
     await setSlider(page, 'voicing-length', 1.4);
-    await page.waitForTimeout(150);
+    await waitAudioBlocks(page, 80);
 
     const sweptStats = await sampleDestinationAudio(page);
     expect(sweptStats.nonFiniteCount).toBe(0);
@@ -454,7 +426,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     const lidStates = ['lid-half', 'lid-closed', 'lid-open'];
     for (const lid of lidStates) {
       await page.getByTestId(lid).click();
-      await page.waitForTimeout(120);
+      await waitAudioBlocks(page, 64);
       const lidAudio = await sampleDestinationAudio(page);
       expect(lidAudio.nonFiniteCount).toBe(0);
       expect(lidAudio.peak).toBeLessThanOrEqual(1.0);
@@ -470,7 +442,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     ];
     for (const persp of perspectives) {
       await page.getByTestId(persp).click();
-      await page.waitForTimeout(120);
+      await waitAudioBlocks(page, 64);
       const perspAudio = await sampleDestinationAudio(page);
       expect(perspAudio.nonFiniteCount).toBe(0);
       expect(perspAudio.peak).toBeLessThanOrEqual(1.0);
