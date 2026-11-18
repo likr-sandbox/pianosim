@@ -5,7 +5,7 @@ use core::ops::Range;
 use piano_simd::F32x4;
 
 use crate::bridge_damp_kernels::reduce_sum_4;
-use crate::bridge_port::{BridgePorts, PrefixState, C_SIGN_H_ARR, C_SIGN_V_ARR};
+use crate::bridge_port::{BridgePorts, PrefixState};
 use crate::contact_ports::ContactPorts;
 use crate::zoh_kernel::zoh_rotate;
 
@@ -15,6 +15,8 @@ pub(crate) fn step_string_prefix_wdf_br(
     beta_off: usize,
     nv: usize,
     nh: usize,
+    c_sign_v: F32x4,
+    c_sign_h: F32x4,
     neg_vbr: F32x4,
 ) -> (F32x4, F32x4) {
     let n = nv + nh;
@@ -35,10 +37,7 @@ pub(crate) fn step_string_prefix_wdf_br(
         acc_h = acc_h + vn;
         acc_br = vn.mul_add(c0.beta, acc_br);
     }
-    let acc_c = acc_v.mul_add(
-        F32x4::from_array(C_SIGN_V_ARR),
-        acc_h * F32x4::from_array(C_SIGN_H_ARR),
-    );
+    let acc_c = acc_v.mul_add(c_sign_v, acc_h * c_sign_h);
     (acc_c, acc_br)
 }
 
@@ -52,6 +51,32 @@ pub(crate) fn step_pol_prefix_wdf_inj(
     c_sign: F32x4,
     neg_vbr: F32x4,
     f_h: f32,
+    alpha_w: f32,
+    f_d: f32,
+    has_damper: bool,
+) -> (F32x4, F32x4) {
+    if alpha_w > 0.0 && f_h != 0.0 {
+        step_pol_prefix_wdf_inj_inner::<true>(
+            ports, bp, vr, beta_off, c_sign, neg_vbr, f_h, alpha_w, f_d, has_damper,
+        )
+    } else {
+        step_pol_prefix_wdf_inj_inner::<false>(
+            ports, bp, vr, beta_off, c_sign, neg_vbr, f_h, 0.0, f_d, has_damper,
+        )
+    }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn step_pol_prefix_wdf_inj_inner<const HAS_ALPHA: bool>(
+    ports: &ContactPorts,
+    bp: &mut BridgePorts,
+    vr: Range<usize>,
+    beta_off: usize,
+    c_sign: F32x4,
+    neg_vbr: F32x4,
+    f_h: f32,
+    alpha_w: f32,
     f_d: f32,
     has_damper: bool,
 ) -> (F32x4, F32x4) {
@@ -59,15 +84,21 @@ pub(crate) fn step_pol_prefix_wdf_inj(
     let st = &mut bp.state[beta_off..beta_off + n];
     let cf = &bp.coef[beta_off..beta_off + n];
     let bh = &ports.b_strike.as_f32x4_slice()[vr.clone()];
+    let bh_diff = &ports.b_strike_diff.as_f32x4_slice()[vr.clone()];
     let bd = &ports.b_damp.as_f32x4_slice()[vr];
-    let (fh_v, fd_v) = (F32x4::splat(f_h), F32x4::splat(f_d));
+    let (fh_v, alpha_v, fd_v) = (F32x4::splat(f_h), F32x4::splat(alpha_w), F32x4::splat(f_d));
     let (mut acc_v, mut acc_br) = (F32x4::zero(), F32x4::zero());
     for i in 0..n {
         let (c0, s0) = (cf[i], st[i]);
-        let u0 = if has_damper {
-            fd_v.mul_add(bd[i], fh_v.mul_add(bh[i], s0.u))
+        let bh_eff = if HAS_ALPHA {
+            alpha_v.mul_add(bh_diff[i], bh[i])
         } else {
-            fh_v.mul_add(bh[i], s0.u)
+            bh[i]
+        };
+        let u0 = if has_damper {
+            fd_v.mul_add(bd[i], fh_v.mul_add(bh_eff, s0.u))
+        } else {
+            fh_v.mul_add(bh_eff, s0.u)
         };
         let (un, vn) = zoh_rotate(u0, c0.beta.mul_add(neg_vbr, s0.v), c0.d, c0.s);
         st[i] = PrefixState { u: un, v: vn };

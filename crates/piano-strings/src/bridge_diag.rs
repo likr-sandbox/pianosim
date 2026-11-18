@@ -5,7 +5,7 @@ use core::ops::Range;
 use piano_simd::F32x4;
 use piano_spec::{NUM_KEYS, TOTAL_STRINGS};
 
-use crate::bridge_port::{BridgePorts, PrefixState, C_SIGN_H_ARR, C_SIGN_V_ARR};
+use crate::bridge_port::{BridgePorts, PrefixState, ALT_SIGN_ARR};
 use crate::choir_map::StringMapEntry;
 use crate::contact_ports::ContactPorts;
 use crate::modal_soa::{sqrt_f64, ModalSoa};
@@ -100,12 +100,13 @@ impl BridgePorts {
     pub fn measure_key_polarization_rms(&self, string_range: Range<usize>) -> (f32, f32) {
         let tv = self.tl_soa.v.as_f32x4_slice();
         let tc = self.tl_soa.c_bridge.as_f32x4_slice();
-        let cv = F32x4::from_array(C_SIGN_V_ARR);
-        let ch = F32x4::from_array(C_SIGN_H_ARR);
+        let alt = F32x4::from_array(ALT_SIGN_ARR);
         let (mut acc_v, mut cv_n) = (F32x4::zero(), 0usize);
         let (mut acc_h, mut ch_n) = (F32x4::zero(), 0usize);
         for s_idx in string_range {
             let m = &self.meta[s_idx];
+            let cv = F32x4::splat(self.c_vert[s_idx]) * alt;
+            let ch = F32x4::splat(self.c_horiz[s_idx]) * alt;
             for st in &self.state[m.beta_v_off..m.beta_v_off + m.v_br.len()] {
                 let v = st.v * cv;
                 acc_v = v.mul_add(v, acc_v);

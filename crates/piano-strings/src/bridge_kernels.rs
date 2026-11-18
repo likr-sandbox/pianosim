@@ -5,14 +5,13 @@ use piano_spec::TOTAL_STRINGS;
 
 use crate::bridge_damp_kernels::{step_prefix_quad_damp, step_single_prefix_damp};
 use crate::bridge_open_kernels::{step_open_quad_write, step_prefix_run_k_open};
-use crate::bridge_port::{BridgePorts, PrefixCoef, PrefixState, C_SIGN_V_ARR};
+use crate::bridge_port::{BridgePorts, PrefixCoef, PrefixState, ALT_SIGN_ARR};
 #[allow(unused_imports)]
 pub(crate) use crate::bridge_prefix_wdf::{
     step_pol_prefix_wdf_inj, step_string_prefix_wdf_br, step_string_prefix_wdf_symp_damp_vh,
 };
 use crate::bridge_tails::ChunkPlan;
 use crate::contact_ports::ContactPorts;
-use crate::modal_soa::{C_HORIZ, C_VERT};
 
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
@@ -20,11 +19,11 @@ fn step_open_quad_cold<const K: usize>(
     st4: &mut [PrefixState],
     cf4: &[PrefixCoef],
     nvp: F32x4,
-    h_proj: F32x4,
+    h_proj4: F32x4,
     gains: F32x4,
     a_out: &mut [f32],
 ) -> F32x4 {
-    step_open_quad_write::<K>(st4, cf4, nvp, h_proj, gains, a_out)
+    step_open_quad_write::<K>(st4, cf4, nvp, h_proj4, gains, a_out)
 }
 
 #[inline(never)]
@@ -42,8 +41,7 @@ fn step_prefix_run_k<const K: usize>(
     sum_l_vec: &mut F32x4,
     sum_r_vec: &mut F32x4,
 ) {
-    let h_proj = F32x4::splat(C_HORIZ / C_VERT);
-    let c_sign_v = F32x4::from_array(C_SIGN_V_ARR);
+    let alt_sign = F32x4::from_array(ALT_SIGN_ARR);
     let neg_half = F32x4::splat(-0.5);
     let stride = 2 * K;
     let total_vecs = count * stride;
@@ -55,6 +53,7 @@ fn step_prefix_run_k<const K: usize>(
     let gains = &bp.a_wave_gains;
     let pan_l = &bp.pan_l;
     let pan_r = &bp.pan_r;
+    let h_proj = &bp.h_proj;
     let mut idx = 0usize;
     while idx + 4 <= count {
         let s = start_s + idx;
@@ -97,12 +96,13 @@ fn step_prefix_run_k<const K: usize>(
                 | plan.symp_has_gains[s + 1]
                 | plan.symp_has_gains[s + 2]
                 | plan.symp_has_gains[s + 3];
+            let hp4 = F32x4::from_slice(&h_proj[s..s + 4]);
             let ms4 = if !any_damp {
                 step_open_quad_cold::<K>(
                     st4,
                     cf4,
                     nvp,
-                    h_proj,
+                    hp4,
                     F32x4::from_slice(&gains[s..s + 4]),
                     &mut a_waves[s..s + 4],
                 )
@@ -113,7 +113,7 @@ fn step_prefix_run_k<const K: usize>(
                     &damp_bd[base..base + 4 * stride],
                     &damp_ad[base..base + 4 * stride],
                     nvp,
-                    h_proj,
+                    hp4,
                     s,
                     ts,
                     &plan.symp_y_lim,
@@ -158,7 +158,7 @@ fn step_prefix_run_k<const K: usize>(
                 &damp_bd[off..off + stride],
                 &damp_ad[off..off + stride],
                 neg_vbr,
-                h_proj,
+                F32x4::splat(h_proj[s_idx]),
                 plan.symp_y_lim[s_idx],
                 &mut plan.str_coupled,
                 &mut plan.coupled_strs,
@@ -171,7 +171,7 @@ fn step_prefix_run_k<const K: usize>(
             );
             let fm = meta[s_idx];
             a_waves[s_idx] = fm.a_wave_gain * acc_br.reduce_sum();
-            let mc = acc_m * c_sign_v;
+            let mc = acc_m * alt_sign;
             *sum_l_vec = mc.mul_add(F32x4::splat(fm.pan_l), *sum_l_vec);
             *sum_r_vec = mc.mul_add(F32x4::splat(fm.pan_r), *sum_r_vec);
         }
@@ -199,7 +199,7 @@ fn step_prefix_run_k<const K: usize>(
                 &damp_bd[off..off + stride],
                 &damp_ad[off..off + stride],
                 neg_vbr,
-                h_proj,
+                F32x4::splat(h_proj[s_idx]),
                 plan.symp_y_lim[s_idx],
                 &mut plan.str_coupled,
                 &mut plan.coupled_strs,
@@ -212,7 +212,7 @@ fn step_prefix_run_k<const K: usize>(
             );
             let fm = meta[s_idx];
             a_waves[s_idx] = fm.a_wave_gain * acc_br.reduce_sum();
-            let mc = acc_m * c_sign_v;
+            let mc = acc_m * alt_sign;
             *sum_l_vec = mc.mul_add(F32x4::splat(fm.pan_l), *sum_l_vec);
             *sum_r_vec = mc.mul_add(F32x4::splat(fm.pan_r), *sum_r_vec);
         }

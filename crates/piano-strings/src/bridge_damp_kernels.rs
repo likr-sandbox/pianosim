@@ -157,7 +157,7 @@ pub(crate) fn step_prefix_quad_damp<const K: usize>(
     bd4: &[F32x4],
     ad4: &[F32x4],
     nvp: F32x4,
-    h_proj: F32x4,
+    h_proj4: F32x4,
     s: usize,
     ts: usize,
     symp_y_lim: &[f32; TOTAL_STRINGS],
@@ -183,7 +183,7 @@ pub(crate) fn step_prefix_quad_damp<const K: usize>(
         fdv4.splat_lane::<0>(),
         fdh4.splat_lane::<0>(),
         nvp.splat_lane::<0>(),
-        h_proj,
+        h_proj4.splat_lane::<0>(),
     );
     let (m1, br1, vdv1, vdh1) = step_one_prefix_vd_only::<K>(
         st1,
@@ -192,7 +192,7 @@ pub(crate) fn step_prefix_quad_damp<const K: usize>(
         fdv4.splat_lane::<1>(),
         fdh4.splat_lane::<1>(),
         nvp.splat_lane::<1>(),
-        h_proj,
+        h_proj4.splat_lane::<1>(),
     );
     let br01 = pair_sum_2(br0, br1);
     let vdv01 = pair_sum_2(vdv0, vdv1);
@@ -205,7 +205,7 @@ pub(crate) fn step_prefix_quad_damp<const K: usize>(
         fdv4.splat_lane::<2>(),
         fdh4.splat_lane::<2>(),
         nvp.splat_lane::<2>(),
-        h_proj,
+        h_proj4.splat_lane::<2>(),
     );
     let (m3, br3, vdv3, vdh3) = step_one_prefix_vd_only::<K>(
         st3,
@@ -214,7 +214,7 @@ pub(crate) fn step_prefix_quad_damp<const K: usize>(
         fdv4.splat_lane::<3>(),
         fdh4.splat_lane::<3>(),
         nvp.splat_lane::<3>(),
-        h_proj,
+        h_proj4.splat_lane::<3>(),
     );
     let alpha4 = F32x4::from_slice(&ports.alpha_vel[s..s + 4]);
     let vdv4 = vdv01.slide2(pair_sum_2(vdv2, vdv3)) * alpha4;

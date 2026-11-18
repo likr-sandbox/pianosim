@@ -16,7 +16,7 @@ use crate::zoh_kernel::inject_excitation;
 
 pub(crate) const LONG_AA_KNEE_HZ: f64 = 5_200.0;
 pub(crate) const LONG_AA_CUTOFF_HZ: f64 = 14_500.0;
-pub(crate) const PHANTOM_WEIGHT_SCALE: f64 = 0.42;
+pub(crate) const PHANTOM_WEIGHT_SCALE: f64 = 0.30;
 pub(crate) const HAMMER_WIDTH_M: f64 = 0.010;
 pub(crate) const KAPPA_PREC: f64 = 0.85;
 pub(crate) const PREC_T0_CAP_RATIO: f64 = 0.22;
@@ -27,7 +27,7 @@ pub(crate) fn nonlinear_register_weight(key_idx: usize) -> f64 {
     if key_idx >= LONGITUDINAL_MAX_KEY_IDX {
         return 0.0;
     }
-    let r = (key_idx as f64) / 30.0;
+    let r = (key_idx as f64) / 38.0;
     let r2 = r * r;
     1.0 / (1.0 + r2 * r2)
 }
@@ -86,7 +86,7 @@ pub(crate) fn long_bridge_weight(
         return 0.0;
     }
     let f_nom = (partial_m as f64) * f_long_hz;
-    let kappa_db = 0.048 * exp_f64(-0.9 * (key_idx as f64 / ((NUM_KEYS - 1) as f64))) * w_reg;
+    let kappa_db = 0.048 * exp_f64(-0.35 * (key_idx as f64 / ((NUM_KEYS - 1) as f64))) * w_reg;
     let sign = if partial_m % 2 == 1 { -1.0 } else { 1.0 };
     (sign * kappa_db * (f_long_hz / f0_vert_hz) * w_aa(f_nom)) as f32
 }
@@ -376,6 +376,21 @@ mod tests {
                 db_on > db_off + 10.0,
                 "{label} ({freq:.2} Hz) phantom peak insufficient: on={db_on:.2} off={db_off:.2}"
             );
+        }
+    }
+
+    #[test]
+    fn f2_to_g4_longitudinal_weight_rebalanced_and_bass_phantom_tamed() {
+        assert!((PHANTOM_WEIGHT_SCALE - 0.30).abs() < 1e-12);
+        let w_f2 = nonlinear_register_weight(20);
+        let w_c4 = nonlinear_register_weight(39);
+        let w_g4 = nonlinear_register_weight(46);
+        assert!(w_f2 > 0.90 && w_c4 > 0.45 && w_g4 > 0.30);
+        assert_eq!(nonlinear_register_weight(52), 0.0);
+        let specs = build_scale_design(&VoicingSpec::default());
+        for &k in &[20usize, 39, 46] {
+            let lb = long_bridge_weight(k, specs[k].f0_et_hz, specs[k].f_long_hz, 1);
+            assert!(lb.abs() > 0.01 && lb.is_finite(), "k={k} lb={lb}");
         }
     }
 }

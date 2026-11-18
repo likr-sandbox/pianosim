@@ -89,6 +89,7 @@ fn step_all_strings_prefix_wdf(
     for idx in 0..plan.n_a {
         let k = usize::from(plan.active_keys[idx]);
         if plan.key_has_hammer[k] {
+            let alpha_w = (driver.hammer_compression_norm(k) / 0.65).clamp(0.0, 1.0);
             for s_idx in r.keys[k].string_range.clone() {
                 if r.ports.may_be_nonzero[s_idx] {
                     refresh_string_ports_bp(
@@ -96,6 +97,7 @@ fn step_all_strings_prefix_wdf(
                         r.ports,
                         s_idx,
                         r.strings[s_idx].has_damper,
+                        alpha_w,
                     );
                 }
             }

@@ -4,8 +4,8 @@ use core::ops::Range;
 
 use piano_simd::F32x4;
 use piano_spec::{
-    build_scale_design, count_transverse_partials, effective_string_f0_hz, Polarization,
-    StringPhysicalParams, VoicingSpec, MAX_AUDIBLE_FREQ_HZ, NUM_KEYS,
+    bridge_pin_couplings, build_scale_design, count_transverse_partials, effective_string_f0_hz,
+    Polarization, StringPhysicalParams, VoicingSpec, MAX_AUDIBLE_FREQ_HZ, NUM_KEYS,
 };
 
 use crate::bridge_port::{
@@ -13,9 +13,7 @@ use crate::bridge_port::{
 };
 use crate::choir_map::StringMapEntry;
 use crate::contact_ports::populate_string_ports;
-use crate::modal_soa::{
-    populate_string_modes_with_mode, sqrt_f64, ModalSoa, C_HORIZ, C_VERT, NYQUIST_CUTOFF_RATIO,
-};
+use crate::modal_soa::{populate_string_modes_with_mode, sqrt_f64, ModalSoa, NYQUIST_CUTOFF_RATIO};
 use crate::sav_spec::SavStringSpec;
 use crate::StringBank;
 
@@ -154,8 +152,9 @@ fn update_string_bridge_ports(
         .min(24);
 
     let l_m = spec.speaking_length_m;
-    let gain_v = gamma * (2.0 * (2.0 * l_m * f0_v) * ts / l_m) * f64::from(C_VERT);
-    let gain_h = gamma * (2.0 * (2.0 * l_m * f0_h) * ts / l_m) * f64::from(C_HORIZ);
+    let (cv, ch) = bridge_pin_couplings(k, s_choir, entry.choir_size);
+    let gain_v = gamma * (2.0 * (2.0 * l_m * f0_v) * ts / l_m) * cv;
+    let gain_h = gamma * (2.0 * (2.0 * l_m * f0_h) * ts / l_m) * ch;
     let (d_src, s_src) = (soa.d_coeff.as_f32x4_slice(), soa.s_coeff.as_f32x4_slice());
     let sum_sq_v = update_prefix_pol(
         &mut bp.coef,
@@ -189,10 +188,18 @@ fn update_string_bridge_ports(
     };
     bp.meta[s_idx].a_wave_gain = a_wave_gain;
     bp.a_wave_gains[s_idx] = a_wave_gain;
+    let cv32 = cv as f32;
+    let pan_l_v = entry.pan_l * cv32;
+    let pan_r_v = entry.pan_r * cv32;
+    bp.c_vert[s_idx] = cv32;
+    bp.c_horiz[s_idx] = ch as f32;
+    bp.h_proj[s_idx] = (ch / cv) as f32;
+    bp.pan_l[s_idx] = pan_l_v;
+    bp.pan_r[s_idx] = pan_r_v;
     bp.fast_meta[s_idx] = FastPrefixMeta {
         a_wave_gain,
-        pan_l: entry.pan_l,
-        pan_r: entry.pan_r,
+        pan_l: pan_l_v,
+        pan_r: pan_r_v,
     };
 
     let base_n = if gamma > 0.0 {

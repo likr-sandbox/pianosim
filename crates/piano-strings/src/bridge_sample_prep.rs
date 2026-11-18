@@ -12,12 +12,14 @@ use crate::modal_soa::ModalSoa;
 use crate::zoh_kernel::{step_string_modes, zoh_rotate};
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn step_tail_pol_tl(
     tl_soa: &mut ModalSoa,
     ports: &ContactPorts,
     tl_r: Range<usize>,
     port_r: Range<usize>,
     f_h: f32,
+    alpha_w: f32,
     f_d: f32,
     has_damper: bool,
 ) -> f32 {
@@ -33,23 +35,52 @@ fn step_tail_pol_tl(
             &tl_soa.c_bridge.as_f32x4_slice()[tl_r],
         );
     }
+    if alpha_w > 0.0 && f_h != 0.0 {
+        step_tail_pol_tl_inner::<true>(tl_soa, ports, tl_r, port_r, f_h, alpha_w, f_d, has_damper)
+    } else {
+        step_tail_pol_tl_inner::<false>(tl_soa, ports, tl_r, port_r, f_h, 0.0, f_d, has_damper)
+    }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn step_tail_pol_tl_inner<const HAS_ALPHA: bool>(
+    tl_soa: &mut ModalSoa,
+    ports: &ContactPorts,
+    tl_r: Range<usize>,
+    port_r: Range<usize>,
+    f_h: f32,
+    alpha_w: f32,
+    f_d: f32,
+    has_damper: bool,
+) -> f32 {
     let (u, v) = (tl_soa.u.as_f32x4_slice_mut(), tl_soa.v.as_f32x4_slice_mut());
     let (u_sl, v_sl) = (&mut u[tl_r.clone()], &mut v[tl_r.clone()]);
     let d = &tl_soa.d_coeff.as_f32x4_slice()[tl_r.clone()];
     let s = &tl_soa.s_coeff.as_f32x4_slice()[tl_r.clone()];
     let c = &tl_soa.c_bridge.as_f32x4_slice()[tl_r];
     let bh = &ports.b_strike.as_f32x4_slice()[port_r.clone()];
+    let bh_diff = &ports.b_strike_diff.as_f32x4_slice()[port_r.clone()];
     let bd = &ports.b_damp.as_f32x4_slice()[port_r];
-    let (fh_v, fd_v) = (
+    let (fh_v, alpha_v, fd_v) = (
         F32x4::splat(f_h),
+        F32x4::splat(alpha_w),
         F32x4::splat(if has_damper { f_d } else { 0.0 }),
     );
     let mut acc = F32x4::zero();
     let n = u_sl.len();
     let mut i = 0usize;
     while i + 1 < n {
-        let inj0 = fd_v.mul_add(bd[i], fh_v.mul_add(bh[i], u_sl[i]));
-        let inj1 = fd_v.mul_add(bd[i + 1], fh_v.mul_add(bh[i + 1], u_sl[i + 1]));
+        let (bh0, bh1) = if HAS_ALPHA {
+            (
+                alpha_v.mul_add(bh_diff[i], bh[i]),
+                alpha_v.mul_add(bh_diff[i + 1], bh[i + 1]),
+            )
+        } else {
+            (bh[i], bh[i + 1])
+        };
+        let inj0 = fd_v.mul_add(bd[i], fh_v.mul_add(bh0, u_sl[i]));
+        let inj1 = fd_v.mul_add(bd[i + 1], fh_v.mul_add(bh1, u_sl[i + 1]));
         let (un0, vn0) = zoh_rotate(inj0, v_sl[i], d[i], s[i]);
         let (un1, vn1) = zoh_rotate(inj1, v_sl[i + 1], d[i + 1], s[i + 1]);
         (u_sl[i], v_sl[i]) = (un0, vn0);
@@ -58,7 +89,12 @@ fn step_tail_pol_tl(
         i += 2;
     }
     if i < n {
-        let inj = fd_v.mul_add(bd[i], fh_v.mul_add(bh[i], u_sl[i]));
+        let bhi = if HAS_ALPHA {
+            alpha_v.mul_add(bh_diff[i], bh[i])
+        } else {
+            bh[i]
+        };
+        let inj = fd_v.mul_add(bd[i], fh_v.mul_add(bhi, u_sl[i]));
         let (un, vn) = zoh_rotate(inj, v_sl[i], d[i], s[i]);
         (u_sl[i], v_sl[i]) = (un, vn);
         acc = vn.mul_add(c[i], acc);
@@ -194,6 +230,11 @@ pub(crate) fn prepare_sample_tails_and_hammers(
         let key = &r.keys[k];
         let sr = key.string_range.clone();
         let step_long_here = plan.key_has_hammer[k] || plan.key_has_mid_ev[k];
+        let alpha_sync = if plan.key_has_hammer[k] {
+            (driver.hammer_compression_norm(k) / 0.65).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         for s_idx in sr.clone() {
             if r.ports.may_be_nonzero[s_idx] && !r.ports.ports_synced[s_idx] {
                 refresh_string_ports_bp(
@@ -201,6 +242,7 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                     r.ports,
                     s_idx,
                     r.strings[s_idx].has_damper,
+                    alpha_sync,
                 );
             }
         }
@@ -213,8 +255,20 @@ pub(crate) fn prepare_sample_tails_and_hammers(
             };
         }
         let has_hammer = plan.key_has_hammer[k];
+        let alpha_w = if has_hammer {
+            (driver.hammer_compression_norm(k) / 0.65).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let fh_arr = if has_hammer {
-            eval_hammer_choir(driver, r.ports, k, sr.clone(), usize::from(key.choir_size))
+            eval_hammer_choir(
+                driver,
+                r.ports,
+                k,
+                sr.clone(),
+                usize::from(key.choir_size),
+                alpha_w,
+            )
         } else {
             [0.0; 3]
         };
@@ -235,7 +289,12 @@ pub(crate) fn prepare_sample_tails_and_hammers(
             } else {
                 (0.0, 0.0)
             };
-            plan.hammer_forces[s_idx] = HammerStepForce { fh, fd_v, fd_h };
+            plan.hammer_forces[s_idx] = HammerStepForce {
+                fh,
+                fd_v,
+                fd_h,
+                alpha_w,
+            };
             if fh != 0.0 {
                 r.ports.tail_nonzero[s_idx] = true;
                 r.ports.tl_v_active[s_idx] = u16::MAX;
@@ -268,8 +327,8 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                 let tl = &mut r.bridge_ports.tl_soa;
                 let hd = key.has_damper;
                 (
-                    step_tail_pol_tl(tl, r.ports, tl_v, v_tail, fh, fd_v, hd),
-                    step_tail_pol_tl(tl, r.ports, tl_h, h_tail, fh, fd_h, hd),
+                    step_tail_pol_tl(tl, r.ports, tl_v, v_tail, fh, alpha_w, fd_v, hd),
+                    step_tail_pol_tl(tl, r.ports, tl_h, h_tail, fh, alpha_w, fd_h, hd),
                 )
             } else {
                 let tl = &mut r.bridge_ports.tl_soa;

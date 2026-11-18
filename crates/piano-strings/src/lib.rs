@@ -41,6 +41,7 @@ pub(crate) mod sav_spec;
 pub(crate) mod sav_tile;
 mod sav_tile_3x6;
 mod voicing_blob;
+mod voicing_blob_sav;
 mod voicing_update;
 pub mod zoh_kernel;
 

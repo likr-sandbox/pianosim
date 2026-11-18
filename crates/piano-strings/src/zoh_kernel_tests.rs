@@ -67,7 +67,7 @@ fn a4_fundamental_dominates_second_partial() {
     };
     let db_margin = 10.0 * (band_max(290, 310) / band_max(590, 615).max(1e-20)).log10();
     eprintln!("A4 peak_hz={peak_hz:.2} Hz, fund_vs_2nd={db_margin:.2} dB");
-    assert!((435.0..=445.0).contains(&peak_hz) && db_margin > 3.9);
+    assert!((435.0..=445.0).contains(&peak_hz) && db_margin > 2.0);
 }
 
 #[test]

@@ -5,150 +5,15 @@ use alloc::vec::Vec;
 use piano_simd::F32x4;
 use piano_spec::{VoicingSpec, LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS};
 
-use crate::phantom::{
-    MAX_PHANTOM_LONG_MODES, MAX_PHANTOM_LONG_VECS, MAX_PHANTOM_TRANSVERSE_MODES,
-    MAX_PHANTOM_TRANSVERSE_VECS,
+use crate::voicing_blob_sav::{
+    push_copy, push_f64_bits, push_sav_entry, read_copy, read_f64_bits, read_sav_entry,
+    SAV_ENTRY_FLOATS,
 };
-use crate::sav_spec::{SavEnergySlopes, SavStringSpec};
 use crate::voicing_update::rescale_active_string_uv;
 use crate::StringBank;
 
 const VOICING_BLOB_MAGIC: u32 = 0x564F_4943; // "VOIC"
 const VOICING_HEADER_LEN: usize = 11;
-
-#[inline]
-fn push_f64_bits(out: &mut Vec<f32>, val: f64) {
-    let bits = val.to_bits();
-    out.push(f32::from_bits(bits as u32));
-    out.push(f32::from_bits((bits >> 32) as u32));
-}
-
-#[inline]
-fn read_f64_bits(src: &[f32], cur: &mut usize) -> f64 {
-    let lo = u64::from(src[*cur].to_bits());
-    let hi = u64::from(src[*cur + 1].to_bits());
-    *cur += 2;
-    f64::from_bits(lo | (hi << 32))
-}
-
-#[inline]
-fn push_vec4s(out: &mut Vec<f32>, slice: &[F32x4]) {
-    for v in slice {
-        out.extend_from_slice(&v.to_array());
-    }
-}
-
-#[inline]
-fn read_vec4s(src: &[f32], cur: &mut usize, dst: &mut [F32x4]) {
-    for d in dst {
-        *d = F32x4::from_slice(&src[*cur..*cur + 4]);
-        *cur += 4;
-    }
-}
-
-#[inline]
-fn push_copy(out: &mut Vec<f32>, src: &[f32]) {
-    out.extend_from_slice(src);
-}
-
-#[inline]
-fn read_copy(src: &[f32], cur: &mut usize, dst: &mut [f32]) {
-    dst.copy_from_slice(&src[*cur..*cur + dst.len()]);
-    *cur += dst.len();
-}
-
-fn push_sav_entry(out: &mut Vec<f32>, sp: &SavStringSpec, sl: &SavEnergySlopes) {
-    for &u in &[
-        sp.n_vh, sp.m_ph, sp.nv_vecs, sp.nh_vecs, sp.nl_vecs, sl.nv_c, sl.nh_c,
-    ] {
-        out.push(f32::from_bits(u as u32));
-    }
-    for &f in &[sp.length_m, sp.quarter_l, sp.kappa_0, sp.kappa_ph] {
-        push_f64_bits(out, f);
-    }
-    for arr in [
-        &sp.sigma_v4,
-        &sp.omega_sigma_v4,
-        &sp.mask_v4,
-        &sp.sigma_h4,
-        &sp.omega_sigma_h4,
-        &sp.mask_h4,
-    ] {
-        push_vec4s(out, arr);
-    }
-    for arr in [
-        &sp.alpha_l4,
-        &sp.half_ql_mask4,
-        &sp.mask_l4,
-        &sp.omega_alpha_l_norm4,
-    ] {
-        push_vec4s(out, arr);
-    }
-    for &f in &sl.sigma_v {
-        push_f64_bits(out, f);
-    }
-    for &f in &sl.sigma_h {
-        push_f64_bits(out, f);
-    }
-    for &f in &sl.alpha_l {
-        push_f64_bits(out, f);
-    }
-}
-
-fn read_sav_entry(src: &[f32], cur: &mut usize, sp: &mut SavStringSpec, sl: &mut SavEnergySlopes) {
-    let ru = |c: &mut usize| -> usize {
-        let v = src[*c].to_bits() as usize;
-        *c += 1;
-        v
-    };
-    (
-        sp.n_vh, sp.m_ph, sp.nv_vecs, sp.nh_vecs, sp.nl_vecs, sl.nv_c, sl.nh_c,
-    ) = (
-        ru(cur),
-        ru(cur),
-        ru(cur),
-        ru(cur),
-        ru(cur),
-        ru(cur),
-        ru(cur),
-    );
-    sp.length_m = read_f64_bits(src, cur);
-    sp.quarter_l = read_f64_bits(src, cur);
-    sp.kappa_0 = read_f64_bits(src, cur);
-    sp.kappa_ph = read_f64_bits(src, cur);
-    for arr in [
-        &mut sp.sigma_v4,
-        &mut sp.omega_sigma_v4,
-        &mut sp.mask_v4,
-        &mut sp.sigma_h4,
-        &mut sp.omega_sigma_h4,
-        &mut sp.mask_h4,
-    ] {
-        read_vec4s(src, cur, arr);
-    }
-    for arr in [
-        &mut sp.alpha_l4,
-        &mut sp.half_ql_mask4,
-        &mut sp.mask_l4,
-        &mut sp.omega_alpha_l_norm4,
-    ] {
-        read_vec4s(src, cur, arr);
-    }
-    for d in &mut sl.sigma_v {
-        *d = read_f64_bits(src, cur);
-    }
-    for d in &mut sl.sigma_h {
-        *d = read_f64_bits(src, cur);
-    }
-    for d in &mut sl.alpha_l {
-        *d = read_f64_bits(src, cur);
-    }
-}
-
-const SAV_ENTRY_FLOATS: usize = 7
-    + 4 * 2
-    + (6 * MAX_PHANTOM_TRANSVERSE_VECS + 4 * MAX_PHANTOM_LONG_VECS) * 4
-    + (2 * MAX_PHANTOM_TRANSVERSE_MODES + MAX_PHANTOM_LONG_MODES) * 2;
 
 /// Computes the exact serialized `f32` length of a `VoicingBlob` for a bridge-coupled bank.
 #[must_use]
@@ -192,8 +57,8 @@ impl VoicingPrepContext {
             .filter(|e| usize::from(e.key_idx) < LONGITUDINAL_MAX_KEY_IDX)
             .count();
         VOICING_HEADER_LEN
-            + 8 * soa_floats
-            + 18 * TOTAL_STRINGS
+            + 10 * soa_floats
+            + 21 * TOTAL_STRINGS
             + long_floats
             + coef_floats
             + 3 * tl_floats
@@ -228,6 +93,8 @@ impl VoicingPrepContext {
             b.soa.b_exc.as_slice(),
             b.ports.b_strike.as_slice(),
             b.ports.a_strike.as_slice(),
+            b.ports.b_strike_diff.as_slice(),
+            b.ports.a_strike_diff.as_slice(),
             b.ports.b_damp.as_slice(),
             b.ports.a_damp.as_slice(),
         ] {
@@ -236,6 +103,9 @@ impl VoicingPrepContext {
         for s in [
             &b.ports.alpha_vel[..],
             &b.ports.r_port_strike[..],
+            &b.ports.r_strike_00[..],
+            &b.ports.r_strike_01[..],
+            &b.ports.r_strike_11[..],
             &b.ports.r_port_damp_v[..],
             &b.ports.r_port_damp_h[..],
         ] {
@@ -325,6 +195,8 @@ impl StringBank {
             self.soa.b_exc.as_mut_slice(),
             self.ports.b_strike.as_mut_slice(),
             self.ports.a_strike.as_mut_slice(),
+            self.ports.b_strike_diff.as_mut_slice(),
+            self.ports.a_strike_diff.as_mut_slice(),
             self.ports.b_damp.as_mut_slice(),
             self.ports.a_damp.as_mut_slice(),
         ] {
@@ -333,6 +205,9 @@ impl StringBank {
         for d in [
             &mut self.ports.alpha_vel[..],
             &mut self.ports.r_port_strike[..],
+            &mut self.ports.r_strike_00[..],
+            &mut self.ports.r_strike_01[..],
+            &mut self.ports.r_strike_11[..],
             &mut self.ports.r_port_damp_v[..],
             &mut self.ports.r_port_damp_h[..],
         ] {
@@ -451,6 +326,17 @@ mod tests {
                 fast_bank.soa.s_coeff.as_slice()
             );
             assert_eq!(ref_bank.ports.gamma_s, fast_bank.ports.gamma_s);
+            assert_eq!(ref_bank.ports.r_strike_00, fast_bank.ports.r_strike_00);
+            assert_eq!(ref_bank.ports.r_strike_01, fast_bank.ports.r_strike_01);
+            assert_eq!(ref_bank.ports.r_strike_11, fast_bank.ports.r_strike_11);
+            assert_eq!(
+                ref_bank.ports.b_strike_diff.as_slice(),
+                fast_bank.ports.b_strike_diff.as_slice()
+            );
+            assert_eq!(
+                ref_bank.ports.a_strike_diff.as_slice(),
+                fast_bank.ports.a_strike_diff.as_slice()
+            );
             assert_eq!(
                 ref_bank.string_linear_energy_joules(144),
                 fast_bank.string_linear_energy_joules(144)

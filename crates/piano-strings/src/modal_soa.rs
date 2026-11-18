@@ -8,9 +8,9 @@
 use core::f64::consts::{LN_10, TAU};
 use piano_simd::AlignedBuf;
 use piano_spec::{
-    count_longitudinal_partials, count_transverse_partials, effective_string_f0_hz,
-    partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec, MAX_AUDIBLE_FREQ_HZ,
-    NUM_KEYS,
+    bridge_pin_couplings, count_longitudinal_partials, count_transverse_partials,
+    effective_string_f0_hz, partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec,
+    MAX_AUDIBLE_FREQ_HZ, NUM_KEYS,
 };
 
 use crate::choir_map::{ChoirMap, StringMapEntry};
@@ -21,8 +21,6 @@ pub(crate) use crate::math::{exp_f64, one_minus_exp_neg_f64, sin_cos_f64, sqrt_f
 
 const LN_1000: f64 = 6.907_755_278_982_137;
 pub(crate) const NYQUIST_CUTOFF_RATIO: f64 = 0.49;
-pub(crate) const C_VERT: f32 = 1.0;
-pub(crate) const C_HORIZ: f32 = 0.18;
 
 /// 64-byte aligned Structure-of-Arrays resonator state and pole coefficients.
 #[derive(Clone, Debug)]
@@ -190,6 +188,7 @@ pub(crate) fn populate_string_modes_with_mode(
 
     let f0_vert = effective_string_f0_hz(k, s_choir, Polarization::Vertical, specs, voicing);
     let f0_horiz = effective_string_f0_hz(k, s_choir, Polarization::Horizontal, specs, voicing);
+    let (cv, ch) = bridge_pin_couplings(k, s_choir, entry.choir_size);
     let level_gain = exp_f64(f64::from(voicing.effective_level_db_offset(k)) * (LN_10 / 20.0));
     let nyquist = NYQUIST_CUTOFF_RATIO * sample_rate;
     let (v_cap, h_cap, l_cap) = (
@@ -205,16 +204,14 @@ pub(crate) fn populate_string_modes_with_mode(
     for j in 1..=v_modes {
         let f_j = partial_frequency_hz(f0_vert, b_inharm, j);
         if f_j > 0.0 && f_j < nyquist {
-            let w = strike_mode_shape(k, j, spec.speaking_length_m, f_j, tau_c) * f64::from(C_VERT);
+            let w = strike_mode_shape(k, j, spec.speaking_length_m, f_j, tau_c) * cv;
             energy_sq += w * w;
         }
     }
     for j in 1..=h_modes {
         let f_j = partial_frequency_hz(f0_horiz, b_inharm, j);
         if f_j > 0.0 && f_j < nyquist {
-            let w = 0.85
-                * strike_mode_shape(k, j, spec.speaking_length_m, f_j, tau_c)
-                * f64::from(C_HORIZ);
+            let w = 0.85 * strike_mode_shape(k, j, spec.speaking_length_m, f_j, tau_c) * ch;
             energy_sq += w * w;
         }
     }
@@ -236,7 +233,7 @@ pub(crate) fn populate_string_modes_with_mode(
             sample_rate,
             tau_c,
             hold_mult: 1.0,
-            c_bridge: C_VERT,
+            c_bridge: cv as f32,
             exc_scale: norm,
             lossless,
             bridge_coupled,
@@ -254,7 +251,7 @@ pub(crate) fn populate_string_modes_with_mode(
             sample_rate,
             tau_c,
             hold_mult: h_mult,
-            c_bridge: C_HORIZ,
+            c_bridge: ch as f32,
             exc_scale: 0.85 * norm,
             lossless,
             bridge_coupled,

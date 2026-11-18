@@ -4,38 +4,46 @@ use piano_simd::F32x4;
 use piano_spec::TOTAL_STRINGS;
 
 use crate::bridge_damp_kernels::{pair_alt_hi, pair_alt_lo, pair_sum_2, step_one_prefix};
-use crate::bridge_port::{BridgePorts, PrefixCoef, PrefixState, C_SIGN_V_ARR};
+use crate::bridge_port::{BridgePorts, PrefixCoef, PrefixState, ALT_SIGN_ARR};
 use crate::bridge_tails::ChunkPlan;
 use crate::contact_ports::ContactPorts;
-use crate::modal_soa::{C_HORIZ, C_VERT};
 
 #[inline(always)]
 pub(crate) fn step_open_quad<const K: usize>(
     st4: &mut [PrefixState],
     cf4: &[PrefixCoef],
     nvp: F32x4,
-    h_proj: F32x4,
+    h_proj4: F32x4,
 ) -> (F32x4, F32x4) {
     let stride = 2 * K;
     let (st01, st23) = st4.split_at_mut(2 * stride);
     let (st0, st1) = st01.split_at_mut(stride);
     let (st2, st3) = st23.split_at_mut(stride);
-    let (m0, br0) = step_one_prefix::<K>(st0, &cf4[0..stride], nvp.splat_lane::<0>(), h_proj);
-    let (m1, br1) =
-        step_one_prefix::<K>(st1, &cf4[stride..2 * stride], nvp.splat_lane::<1>(), h_proj);
+    let (m0, br0) = step_one_prefix::<K>(
+        st0,
+        &cf4[0..stride],
+        nvp.splat_lane::<0>(),
+        h_proj4.splat_lane::<0>(),
+    );
+    let (m1, br1) = step_one_prefix::<K>(
+        st1,
+        &cf4[stride..2 * stride],
+        nvp.splat_lane::<1>(),
+        h_proj4.splat_lane::<1>(),
+    );
     let br01 = pair_sum_2(br0, br1);
     let m01 = pair_alt_hi(m0, m1);
     let (m2, br2) = step_one_prefix::<K>(
         st2,
         &cf4[2 * stride..3 * stride],
         nvp.splat_lane::<2>(),
-        h_proj,
+        h_proj4.splat_lane::<2>(),
     );
     let (m3, br3) = step_one_prefix::<K>(
         st3,
         &cf4[3 * stride..4 * stride],
         nvp.splat_lane::<3>(),
-        h_proj,
+        h_proj4.splat_lane::<3>(),
     );
     (
         br01.slide2(pair_sum_2(br2, br3)),
@@ -48,11 +56,11 @@ pub(crate) fn step_open_quad_write<const K: usize>(
     st4: &mut [PrefixState],
     cf4: &[PrefixCoef],
     nvp: F32x4,
-    h_proj: F32x4,
+    h_proj4: F32x4,
     gains4: F32x4,
     aw_out: &mut [f32],
 ) -> F32x4 {
-    let (br4, ms4) = step_open_quad::<K>(st4, cf4, nvp, h_proj);
+    let (br4, ms4) = step_open_quad::<K>(st4, cf4, nvp, h_proj4);
     (br4 * gains4).write_to_slice(aw_out);
     ms4
 }
@@ -71,8 +79,7 @@ pub(crate) fn step_prefix_run_k_open<const K: usize>(
     sum_l_vec: &mut F32x4,
     sum_r_vec: &mut F32x4,
 ) {
-    let h_proj = F32x4::splat(C_HORIZ / C_VERT);
-    let c_sign_v = F32x4::from_array(C_SIGN_V_ARR);
+    let alt_sign = F32x4::from_array(ALT_SIGN_ARR);
     let neg_half = F32x4::splat(-0.5);
     let stride = 2 * K;
     let total_vecs = count * stride;
@@ -82,6 +89,7 @@ pub(crate) fn step_prefix_run_k_open<const K: usize>(
     let gains = &bp.a_wave_gains;
     let pan_l = &bp.pan_l;
     let pan_r = &bp.pan_r;
+    let h_proj = &bp.h_proj;
     let mut idx = 0usize;
     while idx + 4 <= count {
         let s = start_s + idx;
@@ -120,7 +128,8 @@ pub(crate) fn step_prefix_run_k_open<const K: usize>(
             let base = idx * stride;
             let st4 = &mut state[base..base + 4 * stride];
             let cf4 = &coef[base..base + 4 * stride];
-            let (br4, ms4) = step_open_quad::<K>(st4, cf4, nvp, h_proj);
+            let (br4, ms4) =
+                step_open_quad::<K>(st4, cf4, nvp, F32x4::from_slice(&h_proj[s..s + 4]));
             let aw4 = br4 * F32x4::from_slice(&gains[s..s + 4]);
             aw4.write_to_slice(&mut a_waves[s..s + 4]);
             *sum_l_vec = ms4.mul_add(F32x4::from_slice(&pan_l[s..s + 4]), *sum_l_vec);
@@ -147,11 +156,11 @@ pub(crate) fn step_prefix_run_k_open<const K: usize>(
                 &mut state[off..off + stride],
                 &coef[off..off + stride],
                 neg_vbr,
-                h_proj,
+                F32x4::splat(h_proj[s_idx]),
             );
             let fm = meta[s_idx];
             a_waves[s_idx] = fm.a_wave_gain * acc_br.reduce_sum();
-            let mc = acc_m * c_sign_v;
+            let mc = acc_m * alt_sign;
             *sum_l_vec = mc.mul_add(F32x4::splat(fm.pan_l), *sum_l_vec);
             *sum_r_vec = mc.mul_add(F32x4::splat(fm.pan_r), *sum_r_vec);
         }
@@ -175,11 +184,11 @@ pub(crate) fn step_prefix_run_k_open<const K: usize>(
                 &mut state[off..off + stride],
                 &coef[off..off + stride],
                 neg_vbr,
-                h_proj,
+                F32x4::splat(h_proj[s_idx]),
             );
             let fm = meta[s_idx];
             a_waves[s_idx] = fm.a_wave_gain * acc_br.reduce_sum();
-            let mc = acc_m * c_sign_v;
+            let mc = acc_m * alt_sign;
             *sum_l_vec = mc.mul_add(F32x4::splat(fm.pan_l), *sum_l_vec);
             *sum_r_vec = mc.mul_add(F32x4::splat(fm.pan_r), *sum_r_vec);
         }

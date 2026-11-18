@@ -3,80 +3,18 @@
 
 use core::ops::Range;
 
-use piano_simd::F32x4;
-
 use crate::choir_map::{ChoirMap, KeyMapEntry, StringMapEntry};
+use crate::contact_port_sync::{accum_pol_vel, step_transverse_pol};
 use crate::contact_ports::{refresh_string_ports, ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
 use crate::longitudinal::LongitudinalBank;
 use crate::modal_soa::ModalSoa;
 use crate::sav_drift::SavBank;
 use crate::sav_pair::SavPairQueue;
 use crate::zoh_kernel::{
-    flush_subnormals_range, step_string_modes, step_string_subblock, step_string_tile, zoh_rotate,
-    TILE,
+    flush_subnormals_range, step_string_modes, step_string_subblock, step_string_tile, TILE,
 };
 
 pub use crate::action_driver::KeyActionDriver;
-
-#[inline]
-pub(crate) fn step_transverse_pol<const HAS_DAMPER: bool>(
-    soa: &mut ModalSoa,
-    ports: &ContactPorts,
-    vr: Range<usize>,
-    f_h: f32,
-    f_d: f32,
-) -> (f32, f32, f32) {
-    let (u_s, v_s) = (soa.u.as_f32x4_slice_mut(), soa.v.as_f32x4_slice_mut());
-    let (d_s, s_s, c_s) = (
-        soa.d_coeff.as_f32x4_slice(),
-        soa.s_coeff.as_f32x4_slice(),
-        soa.c_bridge.as_f32x4_slice(),
-    );
-    let (bh_s, ah_s) = (
-        ports.b_strike.as_f32x4_slice(),
-        ports.a_strike.as_f32x4_slice(),
-    );
-    let (bd_s, ad_s) = (ports.b_damp.as_f32x4_slice(), ports.a_damp.as_f32x4_slice());
-    let (fh_v, fd_v) = (F32x4::splat(f_h), F32x4::splat(f_d));
-    let (mut acc_b, mut acc_yh, mut acc_yd) = (F32x4::zero(), F32x4::zero(), F32x4::zero());
-    for i in vr {
-        let u_inj = if HAS_DAMPER {
-            fd_v.mul_add(bd_s[i], fh_v.mul_add(bh_s[i], u_s[i]))
-        } else {
-            fh_v.mul_add(bh_s[i], u_s[i])
-        };
-        let (un, vn) = zoh_rotate(u_inj, v_s[i], d_s[i], s_s[i]);
-        u_s[i] = un;
-        v_s[i] = vn;
-        acc_b = vn.mul_add(c_s[i], acc_b);
-        acc_yh = vn.mul_add(ah_s[i], acc_yh);
-        if HAS_DAMPER {
-            acc_yd = vn.mul_add(ad_s[i], acc_yd);
-        }
-    }
-    (acc_b.reduce_sum(), acc_yh.reduce_sum(), acc_yd.reduce_sum())
-}
-
-#[inline]
-fn accum_pol_vel<const HAS_DAMPER: bool>(
-    soa: &ModalSoa,
-    ports: &ContactPorts,
-    vr: Range<usize>,
-) -> (f32, f32) {
-    let (u_s, bh_s, bd_s) = (
-        soa.u.as_f32x4_slice(),
-        ports.b_strike.as_f32x4_slice(),
-        ports.b_damp.as_f32x4_slice(),
-    );
-    let (mut acc_vh, mut acc_vd) = (F32x4::zero(), F32x4::zero());
-    for i in vr {
-        acc_vh = u_s[i].mul_add(bh_s[i], acc_vh);
-        if HAS_DAMPER {
-            acc_vd = u_s[i].mul_add(bd_s[i], acc_vd);
-        }
-    }
-    (acc_vh.reduce_sum(), acc_vd.reduce_sum())
-}
 
 struct CoupledRun<'a> {
     soa: &'a mut ModalSoa,
@@ -94,14 +32,27 @@ fn step_string_coupled<const HAS_DAMPER: bool>(
     r: &mut CoupledRun<'_>,
     s_idx: usize,
     f_h: f32,
+    alpha_w: f32,
     fd_v: f32,
     fd_h: f32,
 ) -> f32 {
     let entry = &r.strings[s_idx];
-    let (tv, yhv, ydv) =
-        step_transverse_pol::<HAS_DAMPER>(r.soa, r.ports, entry.vert_vecs.clone(), f_h, fd_v);
-    let (th, yhh, ydh) =
-        step_transverse_pol::<HAS_DAMPER>(r.soa, r.ports, entry.horiz_vecs.clone(), f_h, fd_h);
+    let (tv, yhv, ydv) = step_transverse_pol::<HAS_DAMPER>(
+        r.soa,
+        r.ports,
+        entry.vert_vecs.clone(),
+        f_h,
+        alpha_w,
+        fd_v,
+    );
+    let (th, yhh, ydh) = step_transverse_pol::<HAS_DAMPER>(
+        r.soa,
+        r.ports,
+        entry.horiz_vecs.clone(),
+        f_h,
+        alpha_w,
+        fd_h,
+    );
     let rl = entry.long_vecs.clone();
     let tl = if rl.is_empty() {
         0.0
@@ -124,8 +75,17 @@ fn step_string_coupled<const HAS_DAMPER: bool>(
     {
         r.sav.step_string_sav(s_idx, entry, r.soa, r.long_on);
     }
-    let (vhv, vdv) = accum_pol_vel::<HAS_DAMPER>(r.soa, r.ports, entry.vert_vecs.clone());
-    let (vhh, vdh) = accum_pol_vel::<HAS_DAMPER>(r.soa, r.ports, entry.horiz_vecs.clone());
+    let ((vhv, vdv), (vhh, vdh)) = if alpha_w > 0.0 {
+        (
+            accum_pol_vel::<HAS_DAMPER, true>(r.soa, r.ports, entry.vert_vecs.clone(), alpha_w),
+            accum_pol_vel::<HAS_DAMPER, true>(r.soa, r.ports, entry.horiz_vecs.clone(), alpha_w),
+        )
+    } else {
+        (
+            accum_pol_vel::<HAS_DAMPER, false>(r.soa, r.ports, entry.vert_vecs.clone(), 0.0),
+            accum_pol_vel::<HAS_DAMPER, false>(r.soa, r.ports, entry.horiz_vecs.clone(), 0.0),
+        )
+    };
     let alpha = r.ports.alpha_vel[s_idx];
     let (p, s) = (&mut *r.ports, s_idx);
     (p.y_h[s], p.v_h[s]) = (yhv + yhh, alpha * (vhv + vhh));
@@ -146,6 +106,7 @@ pub(crate) fn eval_hammer_choir(
     key_idx: usize,
     sr: Range<usize>,
     choir_size: usize,
+    alpha_w: f32,
 ) -> [f32; 3] {
     let w = driver.strike_weights(key_idx);
     let (mut w_eff, mut w_sum) = ([0.0_f32; 3], 0.0_f32);
@@ -163,7 +124,7 @@ pub(crate) fn eval_hammer_choir(
         let wc = w_eff[c];
         y_eff += wc * ports.y_h[s_idx];
         v_eff += wc * ports.v_h[s_idx];
-        r_eff += wc * wc * ports.r_port_strike[s_idx];
+        r_eff += wc * wc * ports.effective_strike_r_port(s_idx, alpha_w);
     }
     let f_tot =
         driver.step_hammer_sample(key_idx, y_eff * inv_w, v_eff * inv_w, r_eff * inv_w * inv_w);
@@ -218,9 +179,14 @@ fn step_active_key_tile(
     let (hammer_active, damper_engaged) = flags;
     let (l_tile, r_tile) = out;
     let sr = key.string_range.clone();
+    let alpha0 = if hammer_active {
+        (driver.hammer_compression_norm(k) / 0.65).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     for s_idx in sr.clone() {
         if r.ports.may_be_nonzero[s_idx] && !r.ports.ports_synced[s_idx] {
-            refresh_string_ports(r.soa, r.ports, s_idx, &r.strings[s_idx]);
+            refresh_string_ports(r.soa, r.ports, s_idx, &r.strings[s_idx], alpha0);
         }
     }
     let choir_size = usize::from(key.choir_size);
@@ -230,8 +196,13 @@ fn step_active_key_tile(
         step_string_coupled::<false>
     };
     for (t, &yc) in y_clear_tile.iter().enumerate() {
+        let alpha_w = if hammer_active {
+            (driver.hammer_compression_norm(k) / 0.65).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let fh = if hammer_active {
-            eval_hammer_choir(driver, r.ports, k, sr.clone(), choir_size)
+            eval_hammer_choir(driver, r.ports, k, sr.clone(), choir_size, alpha_w)
         } else {
             [0.0; 3]
         };
@@ -241,7 +212,7 @@ fn step_active_key_tile(
             } else {
                 (0.0, 0.0)
             };
-            let term = step_fn(r, s_idx, fh[c], fd_v, fd_h);
+            let term = step_fn(r, s_idx, fh[c], alpha_w, fd_v, fd_h);
             let e = &r.strings[s_idx];
             l_tile[t] += term * e.pan_l;
             r_tile[t] += term * e.pan_r;

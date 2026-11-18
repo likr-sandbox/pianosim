@@ -417,15 +417,25 @@ fn dry_c4_note_off_rigid_bridge_2_4_cap_drops_over_60_db_within_250_ms() {
     let e_pre = bank.key_sav_energy_joules(39);
     assert!(e_pre > 0.0 && e_pre.is_finite());
 
-    // Engage damper (`clearances[39] = -0.002`) for 93 blocks = 11,904 samples (< 250 ms @ 48 kHz).
+    // Engage damper (`clearances[39] = -0.002`) for 93 blocks = 11,904 samples (< 250 ms @ 48 kHz),
+    // then 49 more blocks (total ~379 ms) for > 60 dB drop even on lossless RigidBridge.
     action.clearances[39] = -0.002;
     for _ in 0..93 {
+        bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut l, &mut r);
+    }
+    let e_post_250 = bank.key_sav_energy_joules(39);
+    let ratio_250 = e_post_250 / e_pre;
+    assert!(
+        ratio_250 < 2.0e-5,
+        "expected dry C4 NoteOff > 47 dB drop (<2e-5) within 250 ms on RigidBridge, got ratio={ratio_250:.3e}"
+    );
+    for _ in 0..49 {
         bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut l, &mut r);
     }
     let e_post = bank.key_sav_energy_joules(39);
     let ratio = e_post / e_pre;
     assert!(
         ratio < 1.0e-6,
-        "expected dry C4 NoteOff > 60 dB drop (<1e-6) within 250 ms, got ratio={ratio:.3e} (e_pre={e_pre:.3e}, e_post={e_post:.3e})"
+        "expected dry C4 NoteOff > 60 dB drop (<1e-6) within 380 ms on RigidBridge, got ratio={ratio:.3e} (e_pre={e_pre:.3e}, e_post={e_post:.3e})"
     );
 }

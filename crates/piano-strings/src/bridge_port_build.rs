@@ -5,8 +5,8 @@ use core::ops::Range;
 
 use piano_simd::{AlignedBuf, F32x4};
 use piano_spec::{
-    effective_string_f0_hz, Polarization, StringPhysicalParams, VoicingSpec, NUM_KEYS,
-    TOTAL_STRINGS,
+    bridge_pin_couplings, effective_string_f0_hz, Polarization, StringPhysicalParams, VoicingSpec,
+    NUM_KEYS, TOTAL_STRINGS,
 };
 
 use crate::bridge_port::{
@@ -15,7 +15,7 @@ use crate::bridge_port::{
 };
 use crate::choir_map::ChoirMap;
 use crate::contact_ports::ContactPorts;
-use crate::modal_soa::{sqrt_f64, ModalSoa, C_HORIZ, C_VERT, NYQUIST_CUTOFF_RATIO};
+use crate::modal_soa::{sqrt_f64, ModalSoa, NYQUIST_CUTOFF_RATIO};
 use crate::phantom::max_phantom_transverse_vecs_for_key;
 
 impl BridgePorts {
@@ -94,6 +94,9 @@ impl BridgePorts {
         let mut a_wave_gains = [0.0_f32; TOTAL_STRINGS];
         let mut pan_l = [0.0_f32; TOTAL_STRINGS];
         let mut pan_r = [0.0_f32; TOTAL_STRINGS];
+        let mut c_vert = [0.0_f32; TOTAL_STRINGS];
+        let mut c_horiz = [0.0_f32; TOTAL_STRINGS];
+        let mut h_proj = [0.0_f32; TOTAL_STRINGS];
         let mut key_tails = [KeyTailRanges::ZERO; NUM_KEYS];
         let d_src = soa.d_coeff.as_f32x4_slice();
         let s_src = soa.s_coeff.as_f32x4_slice();
@@ -115,8 +118,9 @@ impl BridgePorts {
                 let f0_h =
                     effective_string_f0_hz(k, s_choir, Polarization::Horizontal, specs, voicing);
                 let gamma = ports.gamma_s[s_idx];
-                let gain_v = gamma * (2.0 * (2.0 * l_m * f0_v) * ts / l_m) * f64::from(C_VERT);
-                let gain_h = gamma * (2.0 * (2.0 * l_m * f0_h) * ts / l_m) * f64::from(C_HORIZ);
+                let (cv, ch) = bridge_pin_couplings(k, s_choir, entry.choir_size);
+                let gain_v = gamma * (2.0 * (2.0 * l_m * f0_v) * ts / l_m) * cv;
+                let gain_h = gamma * (2.0 * (2.0 * l_m * f0_h) * ts / l_m) * ch;
 
                 let beta_v_off = p_cur;
                 let mut bv_tmp = Vec::new();
@@ -204,12 +208,16 @@ impl BridgePorts {
                     a_wave_gain: meta[s_idx].a_wave_gain,
                 };
                 a_wave_gains[s_idx] = meta[s_idx].a_wave_gain;
-                pan_l[s_idx] = entry.pan_l;
-                pan_r[s_idx] = entry.pan_r;
+                let cv32 = cv as f32;
+                c_vert[s_idx] = cv32;
+                c_horiz[s_idx] = ch as f32;
+                h_proj[s_idx] = (ch / cv) as f32;
+                pan_l[s_idx] = entry.pan_l * cv32;
+                pan_r[s_idx] = entry.pan_r * cv32;
                 fast_meta[s_idx] = FastPrefixMeta {
                     a_wave_gain: meta[s_idx].a_wave_gain,
-                    pan_l: entry.pan_l,
-                    pan_r: entry.pan_r,
+                    pan_l: pan_l[s_idx],
+                    pan_r: pan_r[s_idx],
                 };
 
                 if entry.has_damper {
@@ -285,6 +293,9 @@ impl BridgePorts {
             a_wave_gains,
             pan_l,
             pan_r,
+            c_vert,
+            c_horiz,
+            h_proj,
             prefix_runs,
             n_prefix_runs,
             key_tails,

@@ -149,3 +149,167 @@ fn strike_phi_singularity_guard_near_u_equals_one_on_short_treble_strings() {
         }
     }
 }
+
+#[test]
+fn dynamic_strike_width_blending_preserves_port_duality_and_modulates_hf() {
+    let voicing = VoicingSpec::default();
+    let specs = build_scale_design(&voicing);
+    let map = ChoirMap::build_with_specs(&specs, &voicing);
+    let mut bank = StringBank::new(48_000.0, &voicing);
+
+    for (s_idx, entry) in map.strings().iter().enumerate() {
+        let vr = entry.all_vecs();
+        let b0 = &bank.ports.b_strike.as_slice()[vr.start * 4..vr.end * 4];
+        let bd = &bank.ports.b_strike_diff.as_slice()[vr.start * 4..vr.end * 4];
+        let alpha_v = f64::from(bank.ports.alpha_vel[s_idx]);
+        assert!(
+            (bank.ports.effective_strike_r_port(s_idx, 0.0) - bank.ports.r_strike_00[s_idx]).abs()
+                < 1e-9
+        );
+        assert!(
+            (bank.ports.effective_strike_r_port(s_idx, 1.0) - bank.ports.r_strike_11[s_idx]).abs()
+                < 1e-9
+        );
+        let a = 0.35_f32;
+        let r_blend = f64::from(bank.ports.effective_strike_r_port(s_idx, a));
+        let r_exact = alpha_v
+            * b0.iter()
+                .zip(bd.iter())
+                .map(|(&x0, &xd)| {
+                    let b = f64::from(x0 + a * xd);
+                    b * b
+                })
+                .sum::<f64>();
+        let rel = (r_blend - r_exact).abs() / r_exact.max(1e-20);
+        assert!(
+            rel < 1e-5,
+            "s={s_idx} r_blend={r_blend} r_exact={r_exact} rel={rel}"
+        );
+    }
+
+    // Narrow pp width (alpha=0) preserves upper partial energy compared to wide ff width (alpha=1).
+    let (w_narrow, w_wide) = hammer_contact_width_bounds_m(39);
+    assert!((w_narrow - 0.38 * w_wide).abs() < 1e-12);
+    let l_c4 = specs[39].speaking_length_m;
+    let p_narrow_12 = strike_phi_with_width(39, 12, l_c4, w_narrow).abs();
+    let p_wide_12 = strike_phi_with_width(39, 12, l_c4, w_wide).abs();
+    assert!(p_narrow_12 > p_wide_12);
+    let (w_n_c2, w_w_c2) = hammer_contact_width_bounds_m(15);
+    let l_c2 = specs[15].speaking_length_m;
+    let p_n_c2 = strike_phi_with_width(15, 45, l_c2, w_n_c2).abs();
+    let p_w_c2 = strike_phi_with_width(15, 45, l_c2, w_w_c2).abs();
+    assert!(p_n_c2 > p_w_c2 * 1.5, "p_n={p_n_c2} p_w={p_w_c2}");
+
+    // 1-sample impulse duality with non-zero compression alpha_w = 0.6 / 0.65.
+    bank.sav_phantom_enabled = false;
+    bank.longitudinal_enabled = false;
+    struct CompAction(MockAction);
+    impl crate::KeyActionDriver for CompAction {
+        fn is_hammer_active(&self, k: usize) -> bool {
+            self.0.is_hammer_active(k)
+        }
+        fn hammer_compression_norm(&self, k: usize) -> f32 {
+            if self.0.hammer_active[k] {
+                0.45
+            } else {
+                0.0
+            }
+        }
+        fn damper_clearance_m(&self, k: usize) -> f32 {
+            self.0.damper_clearance_m(k)
+        }
+        fn strike_weights(&self, k: usize) -> [f32; 3] {
+            self.0.strike_weights(k)
+        }
+        fn step_key_clearance(&mut self, k: usize) -> f32 {
+            self.0.step_key_clearance(k)
+        }
+        fn step_key_clearance_tile(&mut self, k: usize, t: usize, out: &mut [f32; 8]) -> f32 {
+            self.0.step_key_clearance_tile(k, t, out)
+        }
+        fn step_hammer_sample(&mut self, k: usize, y: f32, v: f32, r: f32) -> f32 {
+            self.0.step_hammer_sample(k, y, v, r)
+        }
+        fn step_damper_sample(
+            &mut self,
+            k: usize,
+            s: usize,
+            yd: f32,
+            vd: f32,
+            rp: f32,
+            yc: f32,
+        ) -> f32 {
+            self.0.step_damper_sample(k, s, yd, vd, rp, yc)
+        }
+    }
+    let s_c4 = map.keys()[39].string_range.start;
+    let mut drv = CompAction(MockAction::new(48_000.0));
+    drv.0.hammer_active[39] = true;
+    drv.0.last_impulse_once = Some((39, 9.0));
+    let (mut ol, mut or) = ([0.0_f32; 1], [0.0_f32; 1]);
+    bank.render_subblock_coupled(&mut drv, &mut ol, &mut or);
+    let alpha_w = (0.45_f32 / 0.65).clamp(0.0, 1.0);
+    let h_lin = bank
+        .ports
+        .linear_energy_joules(s_c4, &bank.soa, map.strings()[s_c4].all_vecs());
+    let f_str = 9.0 / 3.0;
+    let expected_h =
+        0.5 * f64::from(bank.ports.effective_strike_r_port(s_c4, alpha_w)) * f_str * f_str
+            / 48_000.0;
+    assert!((h_lin - expected_h).abs() / expected_h < 1e-3);
+
+    // Bridge-coupled path with alpha_w > 0.0 exercises prefix+tail diff injection and refresh.
+    struct RigidBr([f32; TOTAL_STRINGS], [(u8, f32, u8, f32); TOTAL_STRINGS]);
+    impl crate::BridgePortDriver for RigidBr {
+        fn port_resistances(&self) -> &[f32; TOTAL_STRINGS] {
+            &self.0
+        }
+        fn zone_weights(&self) -> &[(u8, f32, u8, f32); TOTAL_STRINGS] {
+            &self.1
+        }
+        fn step_bridge_sample(
+            &mut self,
+            a: &[f32; TOTAL_STRINGS],
+            _: &[f32; 8],
+            b: &mut [f32; TOTAL_STRINGS],
+            z: &mut [f32; 8],
+        ) -> (f32, f32) {
+            for (bw, &aw) in b.iter_mut().zip(a.iter()) {
+                *bw = -aw;
+            }
+            z.fill(0.0);
+            (0.0, 0.0)
+        }
+    }
+    let mut b_bank = StringBank::new_bridge_coupled(48_000.0, &voicing);
+    let mut br = RigidBr(
+        *b_bank.bridge_port_resistances(),
+        [(0, 1.0, 0, 0.0); TOTAL_STRINGS],
+    );
+    let mut b_drv = CompAction(MockAction::new(48_000.0));
+    b_drv.0.strike(39, 1.8);
+    let (mut bl, mut br_out) = ([0.0_f32; 128], [0.0_f32; 128]);
+    b_bank.render_subblock_bridge_coupled(&mut b_drv, &mut br, &mut bl, &mut br_out);
+    assert!(bl.iter().chain(br_out.iter()).all(|x| x.is_finite()));
+    assert!(bl.iter().map(|x| x * x).sum::<f32>() > 0.0);
+}
+
+#[test]
+fn bridge_pin_angle_breaks_trichord_vh_symmetry_at_condition_zero() {
+    let flat = VoicingSpec {
+        condition: 0.0,
+        unison_detune_scale: 0.0,
+        ..VoicingSpec::default()
+    };
+    let bank = StringBank::new_bridge_coupled(48_000.0, &flat);
+    let s0 = bank.choir_map.keys()[39].string_range.start;
+    let bp = &bank.bridge_ports;
+    let (h0, h1, h2) = (bp.h_proj[s0], bp.h_proj[s0 + 1], bp.h_proj[s0 + 2]);
+    assert!((h0 - h1).abs() > 0.01 && (h1 - h2).abs() > 0.004 && (h0 - h2).abs() > 0.04);
+    for s in s0..s0 + 3 {
+        let e = &bank.choir_map.strings()[s];
+        assert!((bp.pan_l[s] - e.pan_l * bp.c_vert[s]).abs() < 1e-7);
+        assert!((bp.pan_r[s] - e.pan_r * bp.c_vert[s]).abs() < 1e-7);
+        assert!((bp.h_proj[s] - bp.c_horiz[s] / bp.c_vert[s]).abs() < 1e-7);
+    }
+}

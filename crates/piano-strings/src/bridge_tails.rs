@@ -29,11 +29,12 @@ pub(crate) struct HammerStepForce {
     pub fh: f32,
     pub fd_v: f32,
     pub fd_h: f32,
+    pub alpha_w: f32,
 }
 
 #[rustfmt::skip]
 impl HammerStepForce {
-    pub const ZERO: Self = Self { fh: 0.0, fd_v: 0.0, fd_h: 0.0 };
+    pub const ZERO: Self = Self { fh: 0.0, fd_v: 0.0, fd_h: 0.0, alpha_w: 0.0 };
 }
 
 #[derive(Copy, Clone)]

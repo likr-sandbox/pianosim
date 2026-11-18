@@ -7,6 +7,11 @@ use crate::zoh_kernel::TILE;
 pub trait KeyActionDriver {
     /// Returns `true` while hammer `key_idx` is still in flight or rebounding toward rest.
     fn is_hammer_active(&self, key_idx: usize) -> bool;
+    /// Instantaneous normalized hammer compression `u_norm` (`0.0..=1.0`), `0.0` when idle.
+    #[inline]
+    fn hammer_compression_norm(&self, _key_idx: usize) -> f32 {
+        0.0
+    }
     /// Instantaneous geometric clearance `y_clear` (m) of damper pad `key_idx`.
     fn damper_clearance_m(&self, key_idx: usize) -> f32;
     /// Returns per-choir-string hammer strike weights `[w0, w1, w2]` (Una Corda support).

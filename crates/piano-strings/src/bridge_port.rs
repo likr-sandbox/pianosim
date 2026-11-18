@@ -7,12 +7,10 @@ use core::ops::Range;
 use piano_simd::F32x4;
 use piano_spec::{partial_frequency_hz, NUM_KEYS, TOTAL_STRINGS};
 
-use crate::modal_soa::{sqrt_f64, ModalSoa, C_HORIZ, C_VERT};
+use crate::modal_soa::{sqrt_f64, ModalSoa};
 
-/// Alternating spatial mode sign `[+C_VERT, -C_VERT, +C_VERT, -C_VERT]` for vertical prefix vectors.
-pub(crate) const C_SIGN_V_ARR: [f32; 4] = [C_VERT, -C_VERT, C_VERT, -C_VERT];
-/// Alternating spatial mode sign `[+C_HORIZ, -C_HORIZ, +C_HORIZ, -C_HORIZ]` for horizontal prefix vectors.
-pub(crate) const C_SIGN_H_ARR: [f32; 4] = [C_HORIZ, -C_HORIZ, C_HORIZ, -C_HORIZ];
+/// Alternating spatial mode sign `[+1, -1, +1, -1]` for prefix SIMD vectors.
+pub(crate) const ALT_SIGN_ARR: [f32; 4] = [1.0, -1.0, 1.0, -1.0];
 
 /// Stage 3 bidirectional reduced bridge and duplex scale driver (`0` runtime allocs).
 pub trait BridgePortDriver {
@@ -147,6 +145,9 @@ pub(crate) struct BridgePorts {
     pub a_wave_gains: [f32; TOTAL_STRINGS],
     pub pan_l: [f32; TOTAL_STRINGS],
     pub pan_r: [f32; TOTAL_STRINGS],
+    pub c_vert: [f32; TOTAL_STRINGS],
+    pub c_horiz: [f32; TOTAL_STRINGS],
+    pub h_proj: [f32; TOTAL_STRINGS],
     pub prefix_runs: [PrefixRun; MAX_PREFIX_RUNS],
     pub n_prefix_runs: usize,
     pub key_tails: [KeyTailRanges; NUM_KEYS],

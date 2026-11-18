@@ -5,8 +5,9 @@ use core::f64::consts::{PI, TAU};
 
 use piano_simd::AlignedBuf;
 use piano_spec::{
-    count_transverse_partials, effective_string_f0_hz, partial_frequency_hz, Polarization,
-    StringPhysicalParams, VoicingSpec, DAMPED_KEYS, MAX_AUDIBLE_FREQ_HZ, NUM_KEYS, TOTAL_STRINGS,
+    bridge_pin_couplings, count_transverse_partials, effective_string_f0_hz, hammer_beta,
+    partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec, DAMPED_KEYS,
+    MAX_AUDIBLE_FREQ_HZ, NUM_KEYS, TOTAL_STRINGS,
 };
 
 use crate::choir_map::{ChoirMap, StringMapEntry};
@@ -15,7 +16,7 @@ pub(crate) use crate::contact_port_sync::{
     accum_prefix_damp_vel_bp, refresh_prefix_damp_ports_bp, refresh_string_ports,
     refresh_string_ports_bp,
 };
-use crate::modal_soa::{exp_f64, sin_cos_f64, sqrt_f64, C_HORIZ, C_VERT, NYQUIST_CUTOFF_RATIO};
+use crate::modal_soa::{exp_f64, sin_cos_f64, sqrt_f64, NYQUIST_CUTOFF_RATIO};
 
 pub(crate) const HORIZ_STRIKE_SCALE: f64 = 0.65;
 pub(crate) const HORIZ_DAMP_SCALE: f64 = 0.85;
@@ -26,12 +27,17 @@ pub(crate) const DAMPER_CLEAR_THRESHOLD_M: f32 = 4.5e-3;
 pub(crate) struct ContactPorts {
     pub b_strike: AlignedBuf,
     pub a_strike: AlignedBuf,
+    pub b_strike_diff: AlignedBuf,
+    pub a_strike_diff: AlignedBuf,
     pub b_damp: AlignedBuf,
     pub a_damp: AlignedBuf,
     pub gamma_s: [f64; TOTAL_STRINGS],
     pub beta_s: [f64; TOTAL_STRINGS],
     pub alpha_vel: [f32; TOTAL_STRINGS],
     pub r_port_strike: [f32; TOTAL_STRINGS],
+    pub r_strike_00: [f32; TOTAL_STRINGS],
+    pub r_strike_01: [f32; TOTAL_STRINGS],
+    pub r_strike_11: [f32; TOTAL_STRINGS],
     pub r_port_damp_v: [f32; TOTAL_STRINGS],
     pub r_port_damp_h: [f32; TOTAL_STRINGS],
     pub y_h: [f32; TOTAL_STRINGS],
@@ -65,12 +71,17 @@ impl ContactPorts {
         let mut ports = Self {
             b_strike: AlignedBuf::zeroed(len),
             a_strike: AlignedBuf::zeroed(len),
+            b_strike_diff: AlignedBuf::zeroed(len),
+            a_strike_diff: AlignedBuf::zeroed(len),
             b_damp: AlignedBuf::zeroed(len),
             a_damp: AlignedBuf::zeroed(len),
             gamma_s: [1.0; TOTAL_STRINGS],
             beta_s: [0.0; TOTAL_STRINGS],
             alpha_vel: [0.0; TOTAL_STRINGS],
             r_port_strike: [0.0; TOTAL_STRINGS],
+            r_strike_00: [0.0; TOTAL_STRINGS],
+            r_strike_01: [0.0; TOTAL_STRINGS],
+            r_strike_11: [0.0; TOTAL_STRINGS],
             r_port_damp_v: [0.0; TOTAL_STRINGS],
             r_port_damp_h: [0.0; TOTAL_STRINGS],
             y_h: [0.0; TOTAL_STRINGS],
@@ -156,12 +167,29 @@ impl ContactPorts {
         }
         0.5 * self.beta_s[s_idx] * sum_sq
     }
+
+    /// Exact quadratic dual strike port resistance for compression blend `alpha in [0.0, 1.0]`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn effective_strike_r_port(&self, s_idx: usize, alpha: f32) -> f32 {
+        let a = alpha.clamp(0.0, 1.0);
+        if a == 0.0 {
+            return self.r_strike_00[s_idx];
+        }
+        let om = 1.0 - a;
+        om * om * self.r_strike_00[s_idx]
+            + 2.0 * a * om * self.r_strike_01[s_idx]
+            + a * a * self.r_strike_11[s_idx]
+    }
 }
 
 #[inline]
-pub(crate) fn hammer_beta(key_idx: usize) -> f64 {
+pub(crate) fn hammer_contact_width_bounds_m(key_idx: usize) -> (f64, f64) {
     let x = (key_idx as f64) / ((NUM_KEYS - 1) as f64);
-    0.138 - 0.043 * x
+    let r = x / 0.28;
+    let w_wide = (0.072 / (1.0 + r * r * r)).max(0.0028);
+    let w_narrow = 0.38 * w_wide;
+    (w_narrow, w_wide)
 }
 
 #[inline]
@@ -178,13 +206,17 @@ pub(crate) fn hammer_contact_time_s(key_idx: usize) -> f64 {
 }
 
 #[inline]
-pub(crate) fn strike_phi(key_idx: usize, partial_index: usize, speaking_length_m: f64) -> f64 {
+pub(crate) fn strike_phi_with_width(
+    key_idx: usize,
+    partial_index: usize,
+    speaking_length_m: f64,
+    width_m: f64,
+) -> f64 {
     let jf = partial_index as f64;
     let beta = hammer_beta(key_idx);
-    let w_h = hammer_contact_width_m(key_idx);
     let sin_term = sin_cos_f64(jf * PI * beta).0;
     let u = if speaking_length_m > 0.0 {
-        jf * w_h / speaking_length_m
+        jf * width_m / speaking_length_m
     } else {
         0.0
     };
@@ -194,6 +226,16 @@ pub(crate) fn strike_phi(key_idx: usize, partial_index: usize, speaking_length_m
         sin_cos_f64(0.5 * PI * u).1 / (1.0 - u * u)
     };
     sin_term * window
+}
+
+#[inline]
+pub(crate) fn strike_phi(key_idx: usize, partial_index: usize, speaking_length_m: f64) -> f64 {
+    strike_phi_with_width(
+        key_idx,
+        partial_index,
+        speaking_length_m,
+        hammer_contact_width_m(key_idx),
+    )
 }
 
 const DAMPER_W_BASS_M: f64 = 0.080;
@@ -263,27 +305,22 @@ pub(crate) fn populate_string_ports(
         count_transverse_partials(f0_h, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ)
             .min(entry.horiz_vecs.len() * 4),
     );
+    let (cv, ch) = bridge_pin_couplings(k, s_choir, entry.choir_size);
+    let (w_narrow, w_wide) = hammer_contact_width_bounds_m(k);
     let pols = [
-        (vb, vm, f0_v, 1.0, 1.0, f64::from(C_VERT), false),
-        (
-            hb,
-            hm,
-            f0_h,
-            HORIZ_STRIKE_SCALE,
-            HORIZ_DAMP_SCALE,
-            f64::from(C_HORIZ),
-            true,
-        ),
+        (vb, vm, f0_v, 1.0, 1.0, cv, false),
+        (hb, hm, f0_h, HORIZ_STRIKE_SCALE, HORIZ_DAMP_SCALE, ch, true),
     ];
     for &(_, modes, f0, hs, _, c_b, _) in &pols {
         for j in 1..=modes {
             let f_j = partial_frequency_hz(f0, spec.inharmonicity_b, j);
             if f_j > 0.0 && f_j < nyquist {
-                let ph_raw = hs * strike_phi(k, j, spec.speaking_length_m);
+                let ph_raw = hs * strike_phi_with_width(k, j, spec.speaking_length_m, w_narrow);
                 s_raw_sq += ph_raw * ph_raw;
+                let ph_nom = hs * strike_phi(k, j, spec.speaking_length_m);
                 let ft = 2.0 * f_j * tau_c;
                 let sinc = 1.0 / sqrt_f64(1.0 + ft * ft);
-                let w = ph_raw * c_b * sinc;
+                let w = ph_nom * c_b * sinc;
                 s_eff_sq += w * w;
             }
         }
@@ -317,28 +354,45 @@ pub(crate) fn populate_string_ports(
     let full_slots = (entry.vert_vecs.start * 4)..(entry.long_vecs.end * 4);
     ports.b_strike.as_mut_slice()[full_slots.clone()].fill(0.0);
     ports.a_strike.as_mut_slice()[full_slots.clone()].fill(0.0);
+    ports.b_strike_diff.as_mut_slice()[full_slots.clone()].fill(0.0);
+    ports.a_strike_diff.as_mut_slice()[full_slots.clone()].fill(0.0);
     ports.b_damp.as_mut_slice()[full_slots.clone()].fill(0.0);
     ports.a_damp.as_mut_slice()[full_slots].fill(0.0);
 
-    let (mut sum_bh_sq, mut sum_bd_v_sq, mut sum_bd_h_sq) = (0.0_f64, 0.0_f64, 0.0_f64);
-    let (bh_s, ah_s) = (ports.b_strike.as_mut_slice(), ports.a_strike.as_mut_slice());
-    let (bd_s, ad_s) = (ports.b_damp.as_mut_slice(), ports.a_damp.as_mut_slice());
+    let (mut sum_b0_sq, mut sum_b0_b1, mut sum_b1_sq) = (0.0_f64, 0.0_f64, 0.0_f64);
+    let (mut sum_bd_v_sq, mut sum_bd_h_sq) = (0.0_f64, 0.0_f64);
+    let bh_s = ports.b_strike.as_mut_slice();
+    let ah_s = ports.a_strike.as_mut_slice();
+    let bh_diff_s = ports.b_strike_diff.as_mut_slice();
+    let ah_diff_s = ports.a_strike_diff.as_mut_slice();
+    let bd_s = ports.b_damp.as_mut_slice();
+    let ad_s = ports.a_damp.as_mut_slice();
 
     for &(base, modes, f0, hs, ds, _, is_horiz) in &pols {
         for j in 1..=modes {
             let f_j = partial_frequency_hz(f0, spec.inharmonicity_b, j);
             if f_j > 0.0 && f_j < nyquist {
                 let omega = TAU * f_j;
-                let ph = hs * c_port * strike_phi(k, j, spec.speaking_length_m);
-                let (bh, ah) = ((b_gain * ph) as f32, (ph / (omega * gamma_k)) as f32);
-                bh_s[base + (j - 1)] = bh;
-                ah_s[base + (j - 1)] = ah;
-                sum_bh_sq += f64::from(bh) * f64::from(bh);
+                let ph0 =
+                    hs * c_port * strike_phi_with_width(k, j, spec.speaking_length_m, w_narrow);
+                let ph1 = hs * c_port * strike_phi_with_width(k, j, spec.speaking_length_m, w_wide);
+                let (bh0, ah0) = ((b_gain * ph0) as f32, (ph0 / (omega * gamma_k)) as f32);
+                let (bh1, ah1) = ((b_gain * ph1) as f32, (ph1 / (omega * gamma_k)) as f32);
+                let (d_bh, d_ah) = (bh1 - bh0, ah1 - ah0);
+                let slot = base + (j - 1);
+                bh_s[slot] = bh0;
+                ah_s[slot] = ah0;
+                bh_diff_s[slot] = d_bh;
+                ah_diff_s[slot] = d_ah;
+                let (b0, b1) = (f64::from(bh0), f64::from(bh0 + d_bh));
+                sum_b0_sq += b0 * b0;
+                sum_b0_b1 += b0 * b1;
+                sum_b1_sq += b1 * b1;
                 if entry.has_damper {
                     let pd = ds * damper_phi(k, j, spec.speaking_length_m, f_j);
                     let (bd, ad) = ((b_gain * pd) as f32, (pd / (omega * gamma_k)) as f32);
-                    bd_s[base + (j - 1)] = bd;
-                    ad_s[base + (j - 1)] = ad;
+                    bd_s[slot] = bd;
+                    ad_s[slot] = ad;
                     let bd_sq = f64::from(bd) * f64::from(bd);
                     if is_horiz {
                         sum_bd_h_sq += bd_sq;
@@ -351,7 +405,11 @@ pub(crate) fn populate_string_ports(
     }
     // Longitudinal modes remain strictly orthogonal to the transverse damper pads (`b_damp = a_damp = 0`).
     let alpha64 = f64::from(ports.alpha_vel[s_idx]);
-    ports.r_port_strike[s_idx] = (alpha64 * sum_bh_sq) as f32;
+    let r00 = (alpha64 * sum_b0_sq) as f32;
+    ports.r_strike_00[s_idx] = r00;
+    ports.r_strike_01[s_idx] = (alpha64 * sum_b0_b1) as f32;
+    ports.r_strike_11[s_idx] = (alpha64 * sum_b1_sq) as f32;
+    ports.r_port_strike[s_idx] = r00;
     ports.r_port_damp_v[s_idx] = (alpha64 * sum_bd_v_sq) as f32;
     ports.r_port_damp_h[s_idx] = (alpha64 * sum_bd_h_sq) as f32;
 }
