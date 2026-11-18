@@ -314,7 +314,16 @@
 }
 
 .btn-segmented.active,
-.btn-segmented[aria-checked='true'] {
+.btn-segmented[aria-checked='true'],
+.btn-segmented[aria-pressed='true'] {
   background: var(--accent);
   color: #120e06;
+}
+
+.reverb-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding-top: 6px;
+  border-top: 1px solid var(--panel-border);
 }

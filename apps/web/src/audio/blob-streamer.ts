@@ -1,8 +1,13 @@
-import type { PianoWasmExports, PrepToWorkletMessage } from './abi';
+import {
+  BODY_CONCERT_GRAND,
+  type PianoWasmExports,
+  type PrepToWorkletMessage,
+} from './abi';
 
 export const BLOB_STREAM_CHUNK = 8_192;
 
 interface PendingSpaceBlob {
+  body: number;
   persp: number;
   lid: number;
   src: Float32Array;
@@ -45,6 +50,7 @@ export class BlobStreamer {
       if (msg.seq < this.lastSpaceSeq) return;
       this.lastSpaceSeq = msg.seq;
       const entry: PendingSpaceBlob = {
+        body: (msg.bodyId ?? BODY_CONCERT_GRAND) >>> 0,
         persp: msg.perspective >>> 0,
         lid: msg.lidState >>> 0,
         src: new Float32Array(msg.blob),
@@ -129,13 +135,16 @@ export class BlobStreamer {
     }
     const mem = syncMemoryView();
     mem.set(b.src.subarray(b.off, b.off + n), ptr >>> 2);
-    if (exports.piano_stage_space_chunk(ctx, b.persp, b.lid, b.off, n, b.src.length) !== 0) {
+    if (
+      exports.piano_stage_body_space_chunk(ctx, b.body, b.persp, b.lid, b.off, n, b.src.length) !==
+      0
+    ) {
       this.finishSpace();
       return;
     }
     b.off += n;
     if (b.off >= b.src.length) {
-      exports.piano_commit_space(ctx, b.persp, b.lid);
+      exports.piano_commit_body_space(ctx, b.body, b.persp, b.lid);
       this.finishSpace();
     }
   }
@@ -179,7 +188,12 @@ export function warmPrepInstallers(
   syncMemoryView: () => Float32Array,
 ): void {
   const p = raw as Record<string, ((...a: number[]) => number) | undefined>;
-  if (!p.piano_prep_init || !p.piano_prep_voicing || !p.piano_prep_space || !p.piano_prep_out_ptr) {
+  if (
+    !p.piano_prep_init ||
+    !p.piano_prep_voicing ||
+    !p.piano_prep_space_for_body ||
+    !p.piano_prep_out_ptr
+  ) {
     return;
   }
   const prep = p.piano_prep_init(sr) >>> 0;
@@ -193,16 +207,16 @@ export function warmPrepInstallers(
       if (dst) mem.set(mem.subarray(src >>> 2, (src >>> 2) + vcLen), dst >>> 2);
       exports.piano_apply_voicing_blob(ctx, h, d, 1.0, 1.0, 440.0, vcLen);
     }
-    const spLen = p.piano_prep_space(prep, 0, 2) >>> 0;
+    const spLen = p.piano_prep_space_for_body(prep, 0, 0, 2) >>> 0;
     const spSrc = p.piano_prep_out_ptr(prep) >>> 0;
     const m2 = syncMemoryView();
     for (let off = 0; off < spLen; off += BLOB_STREAM_CHUNK) {
       const n = Math.min(BLOB_STREAM_CHUNK, spLen - off);
       const dst = exports.piano_staging_ptr(ctx, n) >>> 0;
       if (dst) m2.set(m2.subarray((spSrc >>> 2) + off, (spSrc >>> 2) + off + n), dst >>> 2);
-      exports.piano_stage_space_chunk(ctx, 0, 2, off, n, spLen);
+      exports.piano_stage_body_space_chunk(ctx, 0, 0, 2, off, n, spLen);
     }
-    exports.piano_commit_space(ctx, 0, 2);
+    exports.piano_commit_body_space(ctx, 0, 0, 2);
     exports.piano_is_space_crossfading(ctx);
     for (let i = 0; i < 4; i++) exports.piano_render(ctx, 128);
   } finally {

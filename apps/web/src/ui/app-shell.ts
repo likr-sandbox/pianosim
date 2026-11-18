@@ -5,6 +5,7 @@ import {
   PEDAL_SUSTAIN,
   PEDAL_UNA_CORDA,
   u7ToU16,
+  type BodyId,
   type LidState,
   type ListenerPerspective,
   type PedalKind,
@@ -192,10 +193,17 @@ export class AppShell {
 
     // Space Panel
     const spaceContainer = this.root.querySelector<HTMLElement>('#space-mount')!;
-    this.spacePanel = new SpacePanel(spaceContainer, (persp: ListenerPerspective, lid: LidState) => {
-      this.ensureUnlocked();
-      this.presetBar?.setCustom();
-      this.host.setSpace(persp, lid);
+    this.spacePanel = new SpacePanel(spaceContainer, {
+      onSpaceChange: (persp: ListenerPerspective, lid: LidState, bodyId: BodyId) => {
+        this.ensureUnlocked();
+        this.presetBar?.setCustom();
+        this.host.setSpace(persp, lid, bodyId);
+      },
+      onReverbChange: (decayS: number, mix: number) => {
+        this.ensureUnlocked();
+        this.presetBar?.setCustom();
+        this.host.setReverb(decayS, mix);
+      },
     });
 
     // Parameter Preset Bar
@@ -205,7 +213,7 @@ export class AppShell {
         this.ensureUnlocked();
         this.voicingPanel.setState(preset.voicing);
         this.updateA4ButtonLabel(preset.voicing.a4FreqHz);
-        this.spacePanel.setSpace(preset.space.perspective, preset.space.lidState);
+        this.spacePanel.setState(preset.space);
         this.host.setVoicing(
           preset.voicing.hammerHardness,
           preset.voicing.unisonDetune,
@@ -213,7 +221,12 @@ export class AppShell {
           preset.voicing.stringLengthScale,
           preset.voicing.a4FreqHz,
         );
-        this.host.setSpace(preset.space.perspective, preset.space.lidState);
+        this.host.setSpace(
+          preset.space.perspective,
+          preset.space.lidState,
+          preset.space.bodyId,
+        );
+        this.host.setReverb(preset.space.reverbDecayS, preset.space.reverbMix);
       },
     });
 

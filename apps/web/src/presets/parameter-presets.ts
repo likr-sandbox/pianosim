@@ -3,11 +3,17 @@
  */
 
 import {
+  BODY_CONCERT_GRAND,
+  BODY_UPRIGHT_STUDIO,
+  BODY_VINTAGE_SALOON,
   LID_CLOSED,
   LID_HALF,
   LID_OPEN,
   PERSPECTIVE_CLOSE,
   PERSPECTIVE_PLAYER,
+  REVERB_DECAY_DEFAULT,
+  REVERB_MIX_DEFAULT,
+  type BodyId,
   type LidState,
   type ListenerPerspective,
 } from '../audio/abi';
@@ -24,8 +30,11 @@ export interface ParameterPreset {
     readonly a4FreqHz: number;
   };
   readonly space: {
+    readonly bodyId: BodyId;
     readonly perspective: ListenerPerspective; // ListenerPerspective (0: Player, 1: Close, 2: Hall, 3: Binaural)
     readonly lidState: LidState;                // LidState (0: Closed, 1: Half, 2: Open)
+    readonly reverbDecayS: number;
+    readonly reverbMix: number;
   };
 }
 
@@ -42,8 +51,11 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
       a4FreqHz: 440.0,
     },
     space: {
+      bodyId: BODY_CONCERT_GRAND,
       perspective: PERSPECTIVE_PLAYER, // 0
       lidState: LID_OPEN,              // 2
+      reverbDecayS: REVERB_DECAY_DEFAULT, // 1.6 s
+      reverbMix: REVERB_MIX_DEFAULT,      // 0.18
     },
   },
   {
@@ -58,8 +70,11 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
       a4FreqHz: 440.0,
     },
     space: {
+      bodyId: BODY_UPRIGHT_STUDIO,
       perspective: PERSPECTIVE_CLOSE,  // 1
       lidState: LID_CLOSED,            // 0
+      reverbDecayS: 0.85,
+      reverbMix: 0.12,
     },
   },
   {
@@ -74,8 +89,11 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
       a4FreqHz: 442.0,
     },
     space: {
+      bodyId: BODY_CONCERT_GRAND,
       perspective: PERSPECTIVE_CLOSE,  // 1
       lidState: LID_OPEN,              // 2
+      reverbDecayS: 1.25,
+      reverbMix: 0.22,
     },
   },
   {
@@ -90,8 +108,11 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
       a4FreqHz: 435.0,
     },
     space: {
+      bodyId: BODY_VINTAGE_SALOON,
       perspective: PERSPECTIVE_PLAYER, // 0
       lidState: LID_HALF,              // 1
+      reverbDecayS: 0.55,
+      reverbMix: 0.08,
     },
   },
 ];

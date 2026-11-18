@@ -31,8 +31,11 @@ test.describe('E2E Parameter Presets Suite', () => {
     expect(Number(await page.getByTestId('voicing-a4-number').inputValue())).toBeCloseTo(440.0, 1);
     await expect(page.getByTestId('voicing-a4-chip-440')).toHaveClass(/active/);
     await expect(page.getByTestId('trigger-a4')).toHaveText('A4 = 440.0 Hz');
+    await expect(page.getByTestId('body-concert-grand')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('lid-open')).toHaveClass(/active/);
     await expect(page.getByTestId('perspective-player')).toHaveClass(/active/);
+    expect(Number(await page.getByTestId('reverb-decay-slider').inputValue())).toBeCloseTo(1.6, 2);
+    expect(Number(await page.getByTestId('reverb-mix-slider').inputValue())).toBe(18);
     await expect(page.getByTestId('preset-description')).toContainText('D-274');
 
     // 2. Intimate Upright (440.0 Hz)
@@ -44,8 +47,11 @@ test.describe('E2E Parameter Presets Suite', () => {
     expect(Number(await page.getByTestId('voicing-a4').inputValue())).toBeCloseTo(440.0, 1);
     await expect(page.getByTestId('voicing-a4-chip-440')).toHaveClass(/active/);
     await expect(page.getByTestId('trigger-a4')).toHaveText('A4 = 440.0 Hz');
+    await expect(page.getByTestId('body-upright-studio')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('lid-closed')).toHaveClass(/active/);
     await expect(page.getByTestId('perspective-close')).toHaveClass(/active/);
+    expect(Number(await page.getByTestId('reverb-decay-slider').inputValue())).toBeCloseTo(0.85, 2);
+    expect(Number(await page.getByTestId('reverb-mix-slider').inputValue())).toBe(12);
     await expect(page.getByTestId('preset-description')).toContainText('chamber');
 
     // 3. Bright Pop (442.0 Hz)
@@ -58,8 +64,11 @@ test.describe('E2E Parameter Presets Suite', () => {
     expect(Number(await page.getByTestId('voicing-a4-number').inputValue())).toBeCloseTo(442.0, 1);
     await expect(page.getByTestId('voicing-a4-chip-442')).toHaveClass(/active/);
     await expect(page.getByTestId('trigger-a4')).toHaveText('A4 = 442.0 Hz');
+    await expect(page.getByTestId('body-concert-grand')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('lid-open')).toHaveClass(/active/);
     await expect(page.getByTestId('perspective-close')).toHaveClass(/active/);
+    expect(Number(await page.getByTestId('reverb-decay-slider').inputValue())).toBeCloseTo(1.25, 2);
+    expect(Number(await page.getByTestId('reverb-mix-slider').inputValue())).toBe(22);
     await expect(page.getByTestId('preset-description')).toContainText('modern');
 
     // 4. Vintage Saloon (435.0 Hz)
@@ -72,8 +81,11 @@ test.describe('E2E Parameter Presets Suite', () => {
     expect(Number(await page.getByTestId('voicing-a4-number').inputValue())).toBeCloseTo(435.0, 1);
     expect(await page.locator('.btn-a4-chip.active').count()).toBe(0);
     await expect(page.getByTestId('trigger-a4')).toHaveText('A4 = 435.0 Hz');
+    await expect(page.getByTestId('body-vintage-saloon')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('lid-half')).toHaveClass(/active/);
     await expect(page.getByTestId('perspective-player')).toHaveClass(/active/);
+    expect(Number(await page.getByTestId('reverb-decay-slider').inputValue())).toBeCloseTo(0.55, 2);
+    expect(Number(await page.getByTestId('reverb-mix-slider').inputValue())).toBe(8);
     await expect(page.getByTestId('preset-description')).toContainText('saloon');
   });
 

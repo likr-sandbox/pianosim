@@ -1,29 +1,32 @@
 import {
   A4_FREQ_DEFAULT,
+  BODY_CONCERT_GRAND,
   HAMMER_HARDNESS_DEFAULT,
   LID_OPEN,
   PERSPECTIVE_PLAYER,
+  REVERB_DECAY_DEFAULT,
+  REVERB_DECAY_MAX,
+  REVERB_DECAY_MIN,
+  REVERB_MIX_DEFAULT,
+  REVERB_MIX_MAX,
+  REVERB_MIX_MIN,
   STRING_SCALE_DEFAULT,
   STRETCH_TUNING_DEFAULT,
   UNISON_DETUNE_DEFAULT,
-  WEB_AUDIO_SAMPLE_RATE,
-  WORKLET_PROCESSOR_NAME,
+  type BodyId,
   type LidState,
   type ListenerPerspective,
   type PedalKind,
   type PrepInboundMessage,
-  type PrepOutboundMessage,
   type WorkletInboundMessage,
-  type WorkletOutboundMessage,
 } from './abi';
-import prepWorkerCode from './prep-worker.ts?blobworker';
+import { bootstrapAudioPipeline } from './pipeline-bootstrap';
 import { TelemetryClient } from './telemetry-client';
-import { compileWasmModule } from './wasm-loader';
-import workletCode from './worklet-processor.ts?worklet';
 
-const INIT_TIMEOUT_MS = 10_000;
-const ANALYSER_FFT_SIZE = 2048;
 const MAX_PENDING_BEFORE_READY = 256;
+
+const clampReverb = (v: number, lo: number, hi: number, fallback: number): number =>
+  Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : fallback;
 
 /** Manages 48 kHz AudioContext lifecycle, Wasm Worklet, and off-thread Prep Web Worker. */
 export class WasmAudioHost {
@@ -47,13 +50,19 @@ export class WasmAudioHost {
   private voicingInFlight = false;
   private pendingVoicingReq: Extract<PrepInboundMessage, { type: 'prepVoicing' }> | null = null;
 
-  private lastSpace: { persp: ListenerPerspective; lid: LidState } = {
+  private lastSpace: { body: BodyId; persp: ListenerPerspective; lid: LidState } = {
+    body: BODY_CONCERT_GRAND,
     persp: PERSPECTIVE_PLAYER,
     lid: LID_OPEN,
   };
   private spaceSeq = 0;
   private spaceInFlight = false;
   private pendingSpaceReq: Extract<PrepInboundMessage, { type: 'prepSpace' }> | null = null;
+
+  private lastReverb = {
+    decayS: REVERB_DECAY_DEFAULT,
+    mix: REVERB_MIX_DEFAULT,
+  };
 
   constructor(telemetry: TelemetryClient) {
     this.telemetry = telemetry;
@@ -170,21 +179,28 @@ export class WasmAudioHost {
     });
   }
 
-  setSpace(perspective: ListenerPerspective, lidState: LidState): void {
+  setSpace(
+    perspective: ListenerPerspective,
+    lidState: LidState,
+    bodyId?: BodyId,
+  ): void {
     this.enqueueOrRun(() => {
+      const targetBody = bodyId ?? this.lastSpace.body;
       if (
+        targetBody === this.lastSpace.body &&
         perspective === this.lastSpace.persp &&
         lidState === this.lastSpace.lid
       ) {
         return;
       }
-      this.lastSpace = { persp: perspective, lid: lidState };
+      this.lastSpace = { body: targetBody, persp: perspective, lid: lidState };
       if (!this.prepWorker) {
-        this.postToWorklet({ type: 'setSpace', perspective, lidState });
+        this.postToWorklet({ type: 'setSpace', bodyId: targetBody, perspective, lidState });
         return;
       }
       const req: Extract<PrepInboundMessage, { type: 'prepSpace' }> = {
         type: 'prepSpace',
+        bodyId: targetBody,
         perspective,
         lidState,
         seq: ++this.spaceSeq,
@@ -195,6 +211,23 @@ export class WasmAudioHost {
         this.spaceInFlight = true;
         this.prepWorker.postMessage(req);
       }
+    });
+  }
+
+  setReverb(decayS: number, mix: number): void {
+    const clampedDecay = clampReverb(
+      decayS,
+      REVERB_DECAY_MIN,
+      REVERB_DECAY_MAX,
+      REVERB_DECAY_DEFAULT,
+    );
+    const clampedMix = clampReverb(mix, REVERB_MIX_MIN, REVERB_MIX_MAX, REVERB_MIX_DEFAULT);
+    this.enqueueOrRun(() => {
+      if (clampedDecay === this.lastReverb.decayS && clampedMix === this.lastReverb.mix) {
+        return;
+      }
+      this.lastReverb = { decayS: clampedDecay, mix: clampedMix };
+      this.postToWorklet({ type: 'setReverb', decayS: clampedDecay, mix: clampedMix });
     });
   }
 
@@ -234,76 +267,32 @@ export class WasmAudioHost {
 
   private async initializePipeline(): Promise<void> {
     this.telemetry.setStatus('initializing');
-    let audioContext: AudioContext | null = null;
-    let workletNode: AudioWorkletNode | null = null;
-    let prepWorker: Worker | null = null;
-    let analyser: AnalyserNode | null = null;
-
     try {
-      const AudioCtx =
-        window.AudioContext ??
-        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AudioCtx) {
-        throw new Error('Web Audio API is not supported in this browser.');
-      }
-
-      audioContext = new AudioCtx({
-        latencyHint: 'interactive',
-        sampleRate: WEB_AUDIO_SAMPLE_RATE,
+      const handles = await bootstrapAudioPipeline({
+        telemetry: this.telemetry,
+        onSpaceDone: () => {
+          if (this.pendingSpaceReq && this.prepWorker) {
+            const next = this.pendingSpaceReq;
+            this.pendingSpaceReq = null;
+            this.prepWorker.postMessage(next);
+          } else {
+            this.spaceInFlight = false;
+          }
+        },
+        onVoicingDone: () => {
+          if (this.pendingVoicingReq && this.prepWorker) {
+            const next = this.pendingVoicingReq;
+            this.pendingVoicingReq = null;
+            this.prepWorker.postMessage(next);
+          } else {
+            this.voicingInFlight = false;
+          }
+        },
       });
-      audioContext.onstatechange = () => {
-        this.telemetry.syncContextState();
-      };
-      if (audioContext.state === 'suspended') {
-        await audioContext.resume();
-      }
-      if (typeof audioContext.audioWorklet === 'undefined') {
-        throw new Error('AudioWorklet is unavailable in this execution context.');
-      }
-
-      const workletBlobUrl = URL.createObjectURL(
-        new Blob([workletCode], { type: 'application/javascript' }),
-      );
-      const workerBlobUrl = URL.createObjectURL(
-        new Blob([prepWorkerCode], { type: 'application/javascript' }),
-      );
-      let wasmModule: WebAssembly.Module;
-      try {
-        const [, compiled] = await Promise.all([
-          audioContext.audioWorklet.addModule(workletBlobUrl),
-          compileWasmModule(),
-        ]);
-        wasmModule = compiled;
-        prepWorker = new Worker(workerBlobUrl, { type: 'module' });
-      } finally {
-        URL.revokeObjectURL(workletBlobUrl);
-        URL.revokeObjectURL(workerBlobUrl);
-      }
-
-      workletNode = new AudioWorkletNode(audioContext, WORKLET_PROCESSOR_NAME, {
-        numberOfInputs: 0,
-        numberOfOutputs: 1,
-        outputChannelCount: [2],
-      });
-
-      analyser = audioContext.createAnalyser();
-      analyser.fftSize = ANALYSER_FFT_SIZE;
-      analyser.smoothingTimeConstant = 0;
-      workletNode.connect(analyser);
-      analyser.connect(audioContext.destination);
-
-      this.audioContext = audioContext;
-      this.workletNode = workletNode;
-      this.prepWorker = prepWorker;
-      this.analyser = analyser;
-      this.telemetry.setAudioGraph(audioContext, analyser, workletNode);
-
-      const channel = new MessageChannel();
-      await Promise.all([
-        this.handshakeWorklet(workletNode, wasmModule, channel.port2),
-        this.handshakePrepWorker(prepWorker, wasmModule, audioContext.sampleRate, channel.port1),
-      ]);
-
+      this.audioContext = handles.audioContext;
+      this.workletNode = handles.workletNode;
+      this.prepWorker = handles.prepWorker;
+      this.analyser = handles.analyser;
       this.pipelineReady = true;
       this.telemetry.syncContextState();
       this.telemetry.setStatus('ready');
@@ -316,162 +305,12 @@ export class WasmAudioHost {
       const message = err instanceof Error ? err.message : String(err);
       this.pipelineReady = false;
       this.pendingBeforeReady.length = 0;
-      if (prepWorker) {
-        prepWorker.terminate();
-      }
-      if (workletNode) {
-        workletNode.disconnect();
-      }
-      if (analyser) {
-        analyser.disconnect();
-      }
-      if (audioContext) {
-        await audioContext.close().catch(() => undefined);
-      }
       this.audioContext = null;
       this.workletNode = null;
       this.prepWorker = null;
       this.analyser = null;
-      this.telemetry.setAudioGraph(null, null, null);
       this.telemetry.setStatus('error', message);
       throw err;
     }
-  }
-
-  private handshakeWorklet(
-    node: AudioWorkletNode,
-    wasmModule: WebAssembly.Module,
-    prepPort: MessagePort,
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const timer = window.setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new Error('Timed out waiting for Wasm AudioWorklet initialization.'));
-        }
-      }, INIT_TIMEOUT_MS);
-
-      node.onprocessorerror = (event) => {
-        const msg = `AudioWorklet processor error: ${String(event)}`;
-        this.telemetry.setStatus('error', msg);
-        if (!settled) {
-          settled = true;
-          window.clearTimeout(timer);
-          reject(new Error(msg));
-        }
-      };
-
-      node.port.onmessage = (event: MessageEvent<WorkletOutboundMessage>) => {
-        const msg = event.data;
-        if (msg.type === 'ready') {
-          if (!settled) {
-            settled = true;
-            window.clearTimeout(timer);
-            resolve();
-          }
-          return;
-        }
-        if (msg.type === 'error') {
-          this.telemetry.setStatus('error', msg.message);
-          if (!settled) {
-            settled = true;
-            window.clearTimeout(timer);
-            reject(new Error(msg.message));
-          }
-          return;
-        }
-        if (msg.type === 'telemetry') {
-          this.telemetry.updateTelemetry({
-            activeVoices: msg.activeVoices,
-            peakL: msg.peakL,
-            peakR: msg.peakR,
-            rmsMono: msg.rmsMono,
-            callbackUs: msg.callbackUs,
-            maxCallbackUs: msg.maxCallbackUs,
-            p50Us: msg.p50Us,
-            p99Us: msg.p99Us,
-            overrunCount: msg.overrunCount,
-            clipped: msg.clipped,
-            blockCount: msg.blockCount,
-          });
-        }
-      };
-
-      node.port.postMessage(
-        { type: 'init', wasmModule, prepPort } satisfies WorkletInboundMessage,
-        [prepPort],
-      );
-    });
-  }
-
-  private handshakePrepWorker(
-    worker: Worker,
-    wasmModule: WebAssembly.Module,
-    sampleRate: number,
-    workletPort: MessagePort,
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const timer = window.setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new Error('Timed out waiting for Prep Web Worker initialization.'));
-        }
-      }, INIT_TIMEOUT_MS);
-
-      worker.onerror = (ev) => {
-        const msg = `Prep Worker error: ${ev.message}`;
-        if (!settled) {
-          settled = true;
-          window.clearTimeout(timer);
-          reject(new Error(msg));
-        }
-      };
-
-      worker.onmessage = (event: MessageEvent<PrepOutboundMessage>) => {
-        const msg = event.data;
-        if (msg.type === 'ready') {
-          if (!settled) {
-            settled = true;
-            window.clearTimeout(timer);
-            resolve();
-          }
-          return;
-        }
-        if (msg.type === 'spaceDone') {
-          if (this.pendingSpaceReq && this.prepWorker) {
-            const next = this.pendingSpaceReq;
-            this.pendingSpaceReq = null;
-            this.prepWorker.postMessage(next);
-          } else {
-            this.spaceInFlight = false;
-          }
-          return;
-        }
-        if (msg.type === 'voicingDone') {
-          if (this.pendingVoicingReq && this.prepWorker) {
-            const next = this.pendingVoicingReq;
-            this.pendingVoicingReq = null;
-            this.prepWorker.postMessage(next);
-          } else {
-            this.voicingInFlight = false;
-          }
-          return;
-        }
-        if (msg.type === 'error') {
-          if (!settled) {
-            settled = true;
-            window.clearTimeout(timer);
-            reject(new Error(msg.message));
-          }
-        }
-      };
-
-      worker.postMessage(
-        { type: 'init', wasmModule, sampleRate, workletPort } satisfies PrepInboundMessage,
-        [workletPort],
-      );
-    });
   }
 }

@@ -1,10 +1,11 @@
 /** Dedicated off-thread Prep Web Worker running spatial IR/NUPOLS & tuning precomputation. */
 
-import type {
-  PianoPrepWasmExports,
-  PrepInboundMessage,
-  PrepOutboundMessage,
-  PrepToWorkletMessage,
+import {
+  BODY_CONCERT_GRAND,
+  type PianoPrepWasmExports,
+  type PrepInboundMessage,
+  type PrepOutboundMessage,
+  type PrepToWorkletMessage,
 } from './abi';
 
 const REQUIRED_PREP_EXPORTS: ReadonlyArray<keyof PianoPrepWasmExports> = [
@@ -12,6 +13,7 @@ const REQUIRED_PREP_EXPORTS: ReadonlyArray<keyof PianoPrepWasmExports> = [
   'piano_prep_init',
   'piano_prep_destroy',
   'piano_prep_space',
+  'piano_prep_space_for_body',
   'piano_prep_voicing',
   'piano_prep_out_ptr',
 ];
@@ -98,11 +100,19 @@ self.onmessage = (event: MessageEvent<PrepInboundMessage>) => {
         postStatus({ type: 'spaceDone', seq: msg.seq });
         return;
       }
-      const len = exportsRef.piano_prep_space(prepPtr, msg.perspective >>> 0, msg.lidState >>> 0) >>> 0;
+      const bodyId = msg.bodyId ?? BODY_CONCERT_GRAND;
+      const len =
+        exportsRef.piano_prep_space_for_body(
+          prepPtr,
+          bodyId >>> 0,
+          msg.perspective >>> 0,
+          msg.lidState >>> 0,
+        ) >>> 0;
       const buf = copyPreparedSlice(len);
       if (buf) {
         const transferMsg: PrepToWorkletMessage = {
           type: 'spaceBlob',
+          bodyId,
           perspective: msg.perspective,
           lidState: msg.lidState,
           seq: msg.seq,

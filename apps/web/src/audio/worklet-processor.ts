@@ -1,8 +1,15 @@
-import type {
-  PianoWasmExports,
-  PrepToWorkletMessage,
-  WorkletInboundMessage,
-  WorkletOutboundMessage,
+import {
+  BODY_CONCERT_GRAND,
+  REVERB_DECAY_DEFAULT,
+  REVERB_DECAY_MAX,
+  REVERB_DECAY_MIN,
+  REVERB_MIX_DEFAULT,
+  REVERB_MIX_MAX,
+  REVERB_MIX_MIN,
+  type PianoWasmExports,
+  type PrepToWorkletMessage,
+  type WorkletInboundMessage,
+  type WorkletOutboundMessage,
 } from './abi';
 import { BlobStreamer, warmPrepInstallers } from './blob-streamer';
 
@@ -32,8 +39,9 @@ const ACTIVE12_WARMUP_KEYS = [21, 28, 36, 43, 48, 55, 60, 64, 67, 76, 88, 100];
 const REQUIRED_EXPORTS: ReadonlyArray<keyof PianoWasmExports> = [
   'memory', 'piano_init', 'piano_destroy', 'piano_note_on', 'piano_note_off', 'piano_pedal',
   'piano_all_notes_off', 'piano_set_voicing', 'piano_set_hammer_hardness', 'piano_set_space',
-  'piano_staging_ptr', 'piano_staging_offset_ptr', 'piano_stage_space_chunk',
-  'piano_commit_space', 'piano_is_space_crossfading', 'piano_apply_space_blob',
+  'piano_set_reverb', 'piano_set_body_space', 'piano_staging_ptr', 'piano_staging_offset_ptr',
+  'piano_stage_space_chunk', 'piano_stage_body_space_chunk', 'piano_commit_space',
+  'piano_commit_body_space', 'piano_is_space_crossfading', 'piano_apply_space_blob',
   'piano_apply_voicing_blob', 'piano_render', 'piano_out_l_ptr', 'piano_out_r_ptr',
   'piano_telemetry_ptr',
 ];
@@ -185,9 +193,11 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       exports.piano_pedal(ctx, 0, 40_000, 0);
       for (const midi of ACTIVE12_WARMUP_KEYS) exports.piano_note_on(ctx, midi, 42_000, 0);
       for (let i = 0; i < 120; i++) exports.piano_render(ctx, 128);
-      exports.piano_set_space(ctx, 1, 1);
+      exports.piano_set_body_space(ctx, BODY_CONCERT_GRAND, 1, 1);
+      exports.piano_set_reverb(ctx, 2.0, 0.25);
       for (let i = 0; i < 4; i++) exports.piano_render(ctx, 128);
-      exports.piano_set_space(ctx, 0, 2);
+      exports.piano_set_body_space(ctx, BODY_CONCERT_GRAND, 0, 2);
+      exports.piano_set_reverb(ctx, REVERB_DECAY_DEFAULT, REVERB_MIX_DEFAULT);
       exports.piano_set_hammer_hardness(ctx, 0.65);
       for (let i = 0; i < 32; i++) exports.piano_render(ctx, 128);
       exports.piano_set_hammer_hardness(ctx, 0.5);
@@ -264,8 +274,22 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
           clamp(msg.a4FreqHz, 415.0, 466.0, 440.0),
         );
         break;
-      case 'setSpace':
-        exports.piano_set_space(ctx, (msg.perspective >>> 0) & 0x3, (msg.lidState >>> 0) & 0x3);
+      case 'setSpace': {
+        const bodyId = (msg.bodyId ?? BODY_CONCERT_GRAND) >>> 0;
+        exports.piano_set_body_space(
+          ctx,
+          bodyId & 0x3,
+          (msg.perspective >>> 0) & 0x3,
+          (msg.lidState >>> 0) & 0x3,
+        );
+        break;
+      }
+      case 'setReverb':
+        exports.piano_set_reverb(
+          ctx,
+          clamp(msg.decayS, REVERB_DECAY_MIN, REVERB_DECAY_MAX, REVERB_DECAY_DEFAULT),
+          clamp(msg.mix, REVERB_MIX_MIN, REVERB_MIX_MAX, REVERB_MIX_DEFAULT),
+        );
         break;
       case 'destroy':
         exports.piano_destroy(ctx);

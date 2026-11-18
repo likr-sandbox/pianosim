@@ -36,6 +36,37 @@ export type LidState =
   | typeof LID_HALF
   | typeof LID_OPEN;
 
+export const BODY_CONCERT_GRAND = 0 as const;
+export const BODY_UPRIGHT_STUDIO = 1 as const;
+export const BODY_VINTAGE_SALOON = 2 as const;
+
+export type BodyId =
+  | typeof BODY_CONCERT_GRAND
+  | typeof BODY_UPRIGHT_STUDIO
+  | typeof BODY_VINTAGE_SALOON;
+
+export interface BodyOption {
+  readonly id: BodyId;
+  readonly slug: string;
+  readonly label: string;
+  readonly testId: string;
+}
+
+export const BODY_OPTIONS: ReadonlyArray<BodyOption> = [
+  { id: BODY_CONCERT_GRAND, slug: 'concert-grand', label: 'Concert Grand', testId: 'body-concert-grand' },
+  { id: BODY_UPRIGHT_STUDIO, slug: 'upright-studio', label: 'Upright Studio', testId: 'body-upright-studio' },
+  { id: BODY_VINTAGE_SALOON, slug: 'vintage-saloon', label: 'Vintage Saloon', testId: 'body-vintage-saloon' },
+];
+
+export const REVERB_DECAY_MIN = 0.0;
+export const REVERB_DECAY_MAX = 3.2;
+export const REVERB_DECAY_DEFAULT = 1.6;
+export const REVERB_DECAY_STEP = 0.05;
+
+export const REVERB_MIX_MIN = 0.0;
+export const REVERB_MIX_MAX = 1.0;
+export const REVERB_MIX_DEFAULT = 0.18;
+
 export const HAMMER_HARDNESS_MIN = 0.0;
 export const HAMMER_HARDNESS_MAX = 1.0;
 export const HAMMER_HARDNESS_DEFAULT = 0.5;
@@ -77,6 +108,8 @@ export interface PianoWasmExports extends WebAssembly.Exports {
   ): number;
   piano_set_hammer_hardness(ctx: number, hammerHardness: number): number;
   piano_set_space(ctx: number, perspective: number, lid: number): number;
+  piano_set_reverb(ctx: number, decayS: number, mix: number): number;
+  piano_set_body_space(ctx: number, bodyId: number, perspective: number, lid: number): number;
   piano_staging_ptr(ctx: number, lenF32: number): number;
   piano_staging_offset_ptr(ctx: number, offF32: number, lenF32: number): number;
   piano_stage_space_chunk(
@@ -87,7 +120,17 @@ export interface PianoWasmExports extends WebAssembly.Exports {
     chunkLen: number,
     totalLen: number,
   ): number;
+  piano_stage_body_space_chunk(
+    ctx: number,
+    bodyId: number,
+    perspective: number,
+    lid: number,
+    blobOff: number,
+    chunkLen: number,
+    totalLen: number,
+  ): number;
   piano_commit_space(ctx: number, perspective: number, lid: number): number;
+  piano_commit_body_space(ctx: number, bodyId: number, perspective: number, lid: number): number;
   piano_is_space_crossfading(ctx: number): number;
   piano_apply_space_blob(ctx: number, perspective: number, lid: number, lenF32: number): number;
   piano_apply_voicing_blob(
@@ -110,6 +153,7 @@ export interface PianoPrepWasmExports extends WebAssembly.Exports {
   piano_prep_init(sampleRate: number): number;
   piano_prep_destroy(prep: number): void;
   piano_prep_space(prep: number, perspective: number, lid: number): number;
+  piano_prep_space_for_body(prep: number, bodyId: number, perspective: number, lid: number): number;
   piano_prep_voicing(
     prep: number,
     hammerHardness: number,
@@ -136,7 +180,8 @@ export type WorkletInboundMessage =
       stringLengthScale: number;
       a4FreqHz: number;
     }
-  | { type: 'setSpace'; perspective: ListenerPerspective; lidState: LidState }
+  | { type: 'setSpace'; bodyId?: BodyId; perspective: ListenerPerspective; lidState: LidState }
+  | { type: 'setReverb'; decayS: number; mix: number }
   | { type: 'destroy' };
 
 export type PrepInboundMessage =
@@ -147,7 +192,7 @@ export type PrepInboundMessage =
       sampleRate: number;
       workletPort: MessagePort;
     }
-  | { type: 'prepSpace'; perspective: ListenerPerspective; lidState: LidState; seq: number }
+  | { type: 'prepSpace'; bodyId: BodyId; perspective: ListenerPerspective; lidState: LidState; seq: number }
   | {
       type: 'prepVoicing';
       hammerHardness: number;
@@ -162,6 +207,7 @@ export type PrepInboundMessage =
 export type PrepToWorkletMessage =
   | {
       type: 'spaceBlob';
+      bodyId: BodyId;
       perspective: ListenerPerspective;
       lidState: LidState;
       seq: number;
