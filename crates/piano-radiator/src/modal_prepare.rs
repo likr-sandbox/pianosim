@@ -7,13 +7,25 @@ use alloc::vec::Vec;
 use piano_simd::F32x4;
 use piano_spec::{BodyPreset, PRESET_RADIATOR_ZONES};
 
-use crate::math::{clamp_f64, exp_f64, ln_f64, max_f64, sin_cos_f64, sqrt_f64, PI};
+use crate::math::{clamp_f64, exp_f64, ln_f64, max_f64, powf_f64, sin_cos_f64, sqrt_f64, PI};
 use crate::mic_perspectives::ZonePathPair;
 use crate::modal_synth::{path_index, NUM_IR_PATHS, TILE};
 use crate::subrate_upsample::{DECIM, PAD_LEFT};
 
 /// Global scalar gain applied after `2 * zeta` Q-factor modal-sum normalization.
-pub(crate) const MODAL_BODY_BLEND: f64 = 2.0;
+pub(crate) const MODAL_BODY_BLEND: f64 = 2.6;
+const RAD_TILT_REF_HZ: f64 = 160.0;
+const RAD_TILT_MIN_HZ: f64 = 48.0;
+const RAD_TILT_EXP: f64 = 0.90;
+
+/// Sample-rate-invariant radiation admittance tilt targeting `-3..-4 dB/oct`
+/// downward modal spectral slope without `< 90 Hz` bass sag.
+#[inline]
+pub(crate) fn rad_tilt_gain(freq: f64) -> f64 {
+    let f_eff = max_f64(freq, RAD_TILT_MIN_HZ);
+    let r = f_eff / RAD_TILT_REF_HZ;
+    powf_f64(1.0 + r * r, -0.5 * RAD_TILT_EXP)
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct PreparedMode {
@@ -69,7 +81,8 @@ pub(crate) fn prepare_modes_split(
 
         let omega = 2.0 * PI * freq;
         let sqrt_1mz2 = sqrt_f64(max_f64(1.0e-8, 1.0 - zeta * zeta));
-        let amp = (MODAL_BODY_BLEND * 2.0 * zeta * ts * omega / sqrt_1mz2) * nyq_scale;
+        let tilt = rad_tilt_gain(freq);
+        let amp = (MODAL_BODY_BLEND * 2.0 * zeta * ts * omega / sqrt_1mz2) * nyq_scale * tilt;
 
         let mut weights = [0.0_f32; NUM_IR_PATHS];
         let mut max_w = 0.0_f64;

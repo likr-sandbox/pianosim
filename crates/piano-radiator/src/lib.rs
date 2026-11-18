@@ -17,8 +17,10 @@ mod modal_prepare;
 mod modal_synth;
 mod nupols_tier;
 mod partitioned_fft;
+mod pole_cancel_filter;
 mod space_blob;
 mod subrate_upsample;
+mod velvet_tail;
 
 #[cfg(test)]
 mod fdn_tests;
@@ -28,6 +30,8 @@ mod limiter_tests;
 mod multi_body_tests;
 #[cfg(test)]
 mod nupols_tests;
+#[cfg(test)]
+mod spectral_tests;
 #[cfg(test)]
 mod tests;
 
