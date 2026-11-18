@@ -5,6 +5,7 @@ use core::f64::consts::{PI, TAU};
 
 use piano_simd::{AdaaPowerLut, AdaaState};
 
+use crate::agraffe_delay::AgraffeDelayLine;
 use crate::felt_stulov::{FeltSharedCoeffs, FeltState, KeyFeltSpec};
 use crate::k_method::{
     compute_lambda_for_p, solve_coupled_substep_lerp, BorinKLut, CoupledSubstepInput,
@@ -90,6 +91,8 @@ pub struct HammerOversampleState {
     pub delta_prev_m: f32,
     pub prev_sub_forces: [f32; OVERSAMPLE_FACTOR],
     pub tail_samples_left: u8,
+    pub last_u_norm: f32,
+    pub last_host_force_n: f32,
 }
 
 impl Default for HammerOversampleState {
@@ -100,6 +103,8 @@ impl Default for HammerOversampleState {
             delta_prev_m: HAMMER_LET_OFF_Y0_M,
             prev_sub_forces: [0.0; OVERSAMPLE_FACTOR],
             tail_samples_left: 0,
+            last_u_norm: 0.0,
+            last_host_force_n: 0.0,
         }
     }
 }
@@ -112,6 +117,8 @@ impl HammerOversampleState {
         self.delta_prev_m = HAMMER_LET_OFF_Y0_M;
         self.prev_sub_forces = [0.0; OVERSAMPLE_FACTOR];
         self.tail_samples_left = 0;
+        self.last_u_norm = 0.0;
+        self.last_host_force_n = 0.0;
     }
 
     /// Launches a new strike at `v_h0` (`m/s`), resetting ADAA phase tracking
@@ -122,6 +129,8 @@ impl HammerOversampleState {
         self.adaa_state.reset();
         self.delta_prev_m = HAMMER_LET_OFF_Y0_M;
         self.tail_samples_left = 0;
+        self.last_u_norm = 0.0;
+        self.last_host_force_n = 0.0;
     }
 
     /// Returns `true` if hammer physics OR polyphase decimation tail is active.
@@ -153,7 +162,55 @@ impl HammerOversampleState {
         v_str_mps: f32,
         r_port_strike: f32,
     ) -> f32 {
+        self.step_host_sample_with_agraffe(
+            shank_params,
+            felt_spec,
+            felt_coeffs,
+            felt_state,
+            adaa_lo,
+            adaa_hi,
+            borin_lo,
+            borin_hi,
+            p_t,
+            fir,
+            memory_enabled,
+            una_corda_mod,
+            y_str_m,
+            v_str_mps,
+            r_port_strike,
+            None,
+            1.0,
+        )
+    }
+
+    /// Executes 8 oversampled substeps (`384 kHz` @ `48 kHz`, `768 kHz` @ `96 kHz`)
+    /// with optional short-string agraffe reflection feedback and returns the
+    /// decimated host-rate strike force (`N`) onto the string.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    pub fn step_host_sample_with_agraffe(
+        &mut self,
+        shank_params: &ShankParams,
+        felt_spec: &KeyFeltSpec,
+        felt_coeffs: &FeltSharedCoeffs,
+        felt_state: &mut FeltState,
+        adaa_lo: &AdaaPowerLut,
+        adaa_hi: &AdaaPowerLut,
+        borin_lo: &BorinKLut,
+        borin_hi: &BorinKLut,
+        p_t: f32,
+        fir: &DecimationFir16,
+        memory_enabled: bool,
+        una_corda_mod: (f32, f32),
+        y_str_m: f32,
+        v_str_mps: f32,
+        r_port_strike: f32,
+        mut agraffe: Option<&mut AgraffeDelayLine>,
+        uc_choir_scale: f32,
+    ) -> f32 {
         if !self.is_active() {
+            self.last_u_norm = 0.0;
+            self.last_host_force_n = 0.0;
             return 0.0;
         }
 
@@ -184,7 +241,7 @@ impl HammerOversampleState {
             let (f_base_n, eps_base) = felt_state.effective_params(felt_spec, memory_enabled);
             let f_scale_eff_n = f_base_n * una_corda_mod.0;
             let eps_eff = if una_corda_mod.1 > 0.0 {
-                (eps_base + 4.2 * una_corda_mod.1).min(0.80)
+                (eps_base + 2.0 * una_corda_mod.1).min(0.68)
             } else {
                 eps_base
             };
@@ -199,10 +256,16 @@ impl HammerOversampleState {
 
             let mut y_s_loc = safe_y;
             let mut v_s_loc = safe_v;
+            let mut u_norm_peak = 0.0_f32;
 
             for slot in &mut sub_forces {
                 let pred = self.shank.predict_free(shank_params);
-                let y_s_free = y_s_loc + v_s_loc * dt_sub;
+                let (y_agg, v_agg) = if let Some(ref mut agg) = agraffe {
+                    agg.step_substep_before(dt_sub, uc_choir_scale)
+                } else {
+                    (0.0, 0.0)
+                };
+                let y_s_free = y_s_loc + (v_s_loc + v_agg) * dt_sub + y_agg;
                 let p_end_m = pred.y_h_free - y_s_free;
                 let k_loop_end = pred.k_ham + k_str_end;
 
@@ -227,14 +290,19 @@ impl HammerOversampleState {
                 );
 
                 self.shank.apply_force(shank_params, pred, out.force_n);
+                if let Some(ref mut agg) = agraffe {
+                    agg.push_force(out.force_n);
+                }
                 let v_s_next = v_s_loc + r_sub * out.force_n;
                 y_s_loc += 0.5 * (v_s_loc + v_s_next) * dt_sub;
                 v_s_loc = v_s_next;
-                self.delta_prev_m = self.shank.y_h() - y_s_loc;
+                self.delta_prev_m = self.shank.y_h() - (y_s_loc + y_agg);
                 felt_state.accumulate_substep_compaction(felt_spec, out.u_norm_mid, memory_enabled);
+                u_norm_peak = u_norm_peak.max(out.u_norm_mid);
                 *slot = out.force_n;
             }
 
+            self.last_u_norm = u_norm_peak.clamp(0.0, 1.0);
             if memory_enabled && felt_state.z_mem > 0.0 {
                 felt_state.z_mem *= felt_coeffs.a_mem_host;
             }
@@ -243,11 +311,13 @@ impl HammerOversampleState {
             }
         } else {
             self.tail_samples_left = self.tail_samples_left.saturating_sub(1);
+            self.last_u_norm *= 0.5;
         }
 
         let f_fir = fir
             .process_8(&mut self.prev_sub_forces, &sub_forces)
             .max(0.0);
+        self.last_host_force_n = f_fir;
         let _ = (dt_host, safe_v);
         f_fir
     }
@@ -287,8 +357,10 @@ mod tests {
     #[test]
     fn rapid_restrike_launch_preserves_fir_history_while_reset_clears_it() {
         let fir = DecimationFir16::new();
-        let mut st = HammerOversampleState::default();
-        st.prev_sub_forces = [2.5; OVERSAMPLE_FACTOR];
+        let mut st = HammerOversampleState {
+            prev_sub_forces: [2.5; OVERSAMPLE_FACTOR],
+            ..Default::default()
+        };
         st.launch(1.8);
         assert_eq!(st.prev_sub_forces, [2.5; OVERSAMPLE_FACTOR]);
 

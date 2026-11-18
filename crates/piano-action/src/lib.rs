@@ -9,8 +9,11 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use piano_spec::{PedalKind, VoicingSpec, NUM_KEYS};
+use piano_spec::{
+    build_scale_design, PedalKind, StringPhysicalParams, VoicingSpec, CHOIR_LAYOUTS, NUM_KEYS,
+};
 
+pub mod agraffe_delay;
 pub mod damper_pad;
 pub mod felt_stulov;
 pub mod k_method;
@@ -30,6 +33,7 @@ mod tests_escapement;
 #[cfg(test)]
 mod tests_hammer;
 
+use agraffe_delay::AgraffeDelayLine;
 use damper_pad::DamperPadBank;
 use felt_stulov::{FeltSharedCoeffs, FeltState, KeyFeltSpec};
 use keybed::KeybedBank;
@@ -44,18 +48,26 @@ struct KeyActionSlot {
     felt_spec: KeyFeltSpec,
     felt_state: FeltState,
     hammer: HammerOversampleState,
+    agraffe: AgraffeDelayLine,
 }
 
 impl KeyActionSlot {
-    fn new(key_idx: usize, sample_rate: f64, voicing: &VoicingSpec) -> Self {
+    fn new(
+        key_idx: usize,
+        sample_rate: f64,
+        voicing: &VoicingSpec,
+        specs: &[StringPhysicalParams; NUM_KEYS],
+    ) -> Self {
         let shank_params = ShankParams::for_key(key_idx, sample_rate);
         let felt_spec = KeyFeltSpec::for_key(key_idx, sample_rate, voicing);
+        let agraffe = AgraffeDelayLine::new(key_idx, sample_rate, voicing, specs);
 
         Self {
             shank_params,
             felt_spec,
             felt_state: FeltState::default(),
             hammer: HammerOversampleState::default(),
+            agraffe,
         }
     }
 }
@@ -91,9 +103,10 @@ impl ActionBank {
         };
         let sr_f64 = f64::from(sr);
 
+        let specs = build_scale_design(voicing);
         let mut keys = Vec::with_capacity(NUM_KEYS);
         for k in 0..NUM_KEYS {
-            keys.push(KeyActionSlot::new(k, sr_f64, voicing));
+            keys.push(KeyActionSlot::new(k, sr_f64, voicing, &specs));
         }
 
         Self {
@@ -126,6 +139,7 @@ impl ActionBank {
         for slot in self.keys.iter_mut() {
             slot.hammer.reset();
             slot.felt_state.reset();
+            slot.agraffe.reset();
         }
     }
 
@@ -162,6 +176,7 @@ impl ActionBank {
         if !self.memory_enabled {
             slot.felt_state.reset();
         }
+        slot.agraffe.reset();
         slot.hammer.launch(velocity_from_u16(velocity_u16));
     }
 
@@ -288,12 +303,16 @@ impl ActionBank {
         r_port_strike: f32,
     ) -> f32 {
         let uc_mod = self.pedals.una_corda_felt_mod(key_idx);
+        let w = self.pedals.strike_weights(key_idx);
         let Some(slot) = self.keys.get_mut(key_idx) else {
             return 0.0;
         };
+        let w_sum = (w[0] + w[1] + w[2]).max(1.0);
+        let n_str = f32::from(CHOIR_LAYOUTS[key_idx].strings_per_key.max(1));
+        let uc_choir_scale = n_str / w_sum;
         let (p_lo, p_hi, p_t) = self.p_grid.lookup(slot.felt_spec.exponent_p);
         let (adaa_lo, adaa_hi, borin_lo, borin_hi) = self.p_grid.luts_for(p_lo, p_hi);
-        slot.hammer.step_host_sample(
+        slot.hammer.step_host_sample_with_agraffe(
             &slot.shank_params,
             &slot.felt_spec,
             &self.felt_coeffs,
@@ -309,7 +328,41 @@ impl ActionBank {
             y_str_m,
             v_str_mps,
             r_port_strike,
+            Some(&mut slot.agraffe),
+            uc_choir_scale,
         )
+    }
+
+    /// Overrides `key_idx`'s `8x` agraffe round-trip delay and wave admittance.
+    #[inline]
+    pub fn set_agraffe_delay_samples(
+        &mut self,
+        key_idx: usize,
+        delay_substeps: f32,
+        wave_admittance: f32,
+    ) {
+        if let Some(slot) = self.keys.get_mut(key_idx) {
+            slot.agraffe
+                .set_delay_params(delay_substeps, wave_admittance);
+        }
+    }
+
+    /// Returns the most recent peak normalized felt compression (`[0.0, 1.0]`) for `key_idx`.
+    #[must_use]
+    #[inline]
+    pub fn hammer_compression_norm(&self, key_idx: usize) -> f32 {
+        self.keys
+            .get(key_idx)
+            .map_or(0.0, |slot| slot.hammer.last_u_norm)
+    }
+
+    /// Returns `(last_host_force_n, prev_sub_forces)` from the most recent strike step of `key_idx`.
+    #[must_use]
+    #[inline]
+    pub fn last_hammer_forces(&self, key_idx: usize) -> (f32, [f32; 8]) {
+        self.keys.get(key_idx).map_or((0.0, [0.0; 8]), |slot| {
+            (slot.hammer.last_host_force_n, slot.hammer.prev_sub_forces)
+        })
     }
 
     /// Steps one host sample of the unilateral hysteretic damper pad for `(key_idx, slot_idx)`
@@ -420,32 +473,16 @@ impl ActionBank {
     pub fn update_voicing_in_place(&mut self, voicing: &VoicingSpec) {
         let sr = f64::from(self.sample_rate);
         self.hammer_voicing = voicing.sanitized();
+        let specs = build_scale_design(&self.hammer_voicing);
         self.key_hardness_applied
             .fill(self.hammer_voicing.hammer_hardness);
         for (key_idx, slot) in self.keys.iter_mut().enumerate() {
             slot.felt_spec
                 .update_voicing_in_place(key_idx, sr, &self.hammer_voicing);
+            slot.agraffe
+                .update_voicing(key_idx, sr, &self.hammer_voicing, &specs);
         }
         self.damper_pad
             .update_voicing_in_place(&self.hammer_voicing);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_shank_flex_enabled(&mut self, key_idx: usize, enabled: bool) {
-        if let Some(slot) = self.keys.get_mut(key_idx) {
-            slot.hammer.shank.flex_enabled = enabled;
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn felt_memory(&self, key_idx: usize) -> f32 {
-        self.keys
-            .get(key_idx)
-            .map_or(0.0, |slot| slot.felt_state.z_mem)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn lut_table_bytes(&self) -> usize {
-        self.p_grid.table_bytes()
     }
 }

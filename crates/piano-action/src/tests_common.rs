@@ -8,6 +8,24 @@ use piano_spec::{
 use crate::math::{exp_f64, sin_cos_f64};
 use crate::ActionBank;
 
+impl ActionBank {
+    pub(crate) fn set_shank_flex_enabled(&mut self, key_idx: usize, enabled: bool) {
+        if let Some(slot) = self.keys.get_mut(key_idx) {
+            slot.hammer.shank.flex_enabled = enabled;
+        }
+    }
+
+    pub(crate) fn felt_memory(&self, key_idx: usize) -> f32 {
+        self.keys
+            .get(key_idx)
+            .map_or(0.0, |slot| slot.felt_state.z_mem)
+    }
+
+    pub(crate) fn lut_table_bytes(&self) -> usize {
+        self.p_grid.table_bytes()
+    }
+}
+
 const TEST_MODES: usize = 24;
 
 struct CoupledMode {
