@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use piano_spec::NUM_KEYS;
-use piano_spec::{LidState, ListenerPerspective, SampleEvent, VoicingSpec};
+use piano_spec::{LidState, ListenerPerspective, SampleEvent, Temperament, VoicingSpec};
 
 use crate::engine_core::{AudioTap, EngineCore};
 use crate::event_queue::{is_sorted_by_offset, EventQueue};
@@ -90,7 +90,7 @@ impl PianoEngine {
             .set_target(hammer_hardness, unison_detune, stretch, length_scale);
     }
 
-    /// Sets target voicing parameters including `A4` concert pitch (`[415, 466]` Hz) with 20 ms smoothing.
+    /// Sets target voicing parameters including `A4` concert pitch (`[392.0, 466.2]` Hz) with 20 ms smoothing.
     pub fn set_voicing_with_a4(
         &mut self,
         hammer_hardness: f32,
@@ -108,9 +108,49 @@ impl PianoEngine {
         );
     }
 
-    /// Sets target `A4` concert pitch (`[415, 466]` Hz) with 20 ms exponential smoothing.
+    /// Sets all global voicing parameters including `concert_pitch_hz` (`[392.0, 466.2]` Hz),
+    /// classical `temperament`, and deterministic aging `condition` (`[0.0, 1.0]`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_voicing_full(
+        &mut self,
+        hammer_hardness: f32,
+        unison_detune: f32,
+        stretch: f32,
+        length_scale: f32,
+        concert_pitch_hz: f32,
+        temperament: Temperament,
+        condition: f32,
+    ) {
+        self.voicing_smoother.set_target_full(
+            hammer_hardness,
+            unison_detune,
+            stretch,
+            length_scale,
+            concert_pitch_hz,
+            temperament,
+            condition,
+        );
+    }
+
+    /// Sets target `A4` concert pitch (`[392.0, 466.2]` Hz) with 20 ms exponential smoothing.
     pub fn set_a4_freq_hz(&mut self, a4_freq_hz: f32) {
         self.voicing_smoother.set_a4_target(a4_freq_hz);
+    }
+
+    /// Alias for [`Self::set_a4_freq_hz`] (`[392.0, 466.2]` Hz).
+    pub fn set_concert_pitch_hz(&mut self, concert_pitch_hz: f32) {
+        self.voicing_smoother
+            .set_concert_pitch_target(concert_pitch_hz);
+    }
+
+    /// Sets the active classical 12-tone [`Temperament`] for Stage 2/3 tuning.
+    pub fn set_temperament(&mut self, temperament: Temperament) {
+        self.voicing_smoother.set_temperament(temperament);
+    }
+
+    /// Sets target deterministic aging `condition` (`[0.0, 1.0]`) with 20 ms exponential smoothing.
+    pub fn set_condition(&mut self, condition: f32) {
+        self.voicing_smoother.set_condition_target(condition);
     }
 
     /// Updates only hammer hardness smoothly (`< 50 us`), leaving string tuning untouched.
@@ -135,11 +175,13 @@ impl PianoEngine {
             .set_port_resistances(self.core.bank.bridge_port_resistances());
         v.hammer_hardness = self.voicing_smoother.current_hammer_hardness();
         self.core.action.update_voicing_in_place(&v);
-        self.voicing_smoother.set_tuning_applied_with_a4(
+        self.voicing_smoother.set_tuning_applied_full(
             v.unison_detune_scale,
             v.stretch_amount,
             v.string_length_scale,
             v.a4_freq_hz,
+            v.temperament,
+            v.condition,
         );
         true
     }

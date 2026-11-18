@@ -66,4 +66,20 @@ fn voicing_dirty_mask_isolates_hammer_from_tuning_and_a4() {
     sm.set_target(0.85, 1.25, 1.0, 1.0);
     let (_, d_u) = sm.step_block_with_dirty(128, 48_000.0).expect("dirty");
     assert_ne!(d_u & DIRTY_TUNING, 0);
+
+    // Temperament change triggers DIRTY_TUNING immediately and returns to idle next block.
+    let mut sm_temp = VoicingSmoother::new();
+    sm_temp.set_temperament(Temperament::KirnbergerIII);
+    let (spec_t, d_t) = sm_temp.step_block_with_dirty(128, 48_000.0).expect("dirty");
+    assert_eq!(d_t, DIRTY_TUNING);
+    assert_eq!(spec_t.temperament, Temperament::KirnbergerIII);
+    assert!(!sm_temp.is_active());
+    assert!(sm_temp.step_block_with_dirty(128, 48_000.0).is_none());
+
+    // Condition change triggers both DIRTY_TUNING and DIRTY_HAMMER and clamps [0.0, 1.0].
+    let mut sm_cond = VoicingSmoother::new();
+    sm_cond.set_condition_target(2.5);
+    let (spec_c, d_c) = sm_cond.step_block_with_dirty(128, 48_000.0).expect("dirty");
+    assert_eq!(d_c, DIRTY_TUNING | DIRTY_HAMMER);
+    assert!(spec_c.condition > 0.0 && spec_c.condition <= 1.0);
 }

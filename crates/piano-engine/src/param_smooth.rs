@@ -1,12 +1,13 @@
 //! Parameter smoothing and spatial crossfade transitions for real-time engine control.
 
 use piano_spec::voicing::{
-    A4_FREQ_DEFAULT, A4_FREQ_MAX, A4_FREQ_MIN, HAMMER_HARDNESS_DEFAULT, HAMMER_HARDNESS_MAX,
-    HAMMER_HARDNESS_MIN, STRETCH_AMOUNT_DEFAULT, STRETCH_AMOUNT_MAX, STRETCH_AMOUNT_MIN,
-    STRING_LENGTH_SCALE_DEFAULT, STRING_LENGTH_SCALE_MAX, STRING_LENGTH_SCALE_MIN,
-    UNISON_DETUNE_SCALE_DEFAULT, UNISON_DETUNE_SCALE_MAX, UNISON_DETUNE_SCALE_MIN,
+    A4_FREQ_DEFAULT, A4_FREQ_MAX, A4_FREQ_MIN, CONDITION_DEFAULT, CONDITION_MAX, CONDITION_MIN,
+    HAMMER_HARDNESS_DEFAULT, HAMMER_HARDNESS_MAX, HAMMER_HARDNESS_MIN, STRETCH_AMOUNT_DEFAULT,
+    STRETCH_AMOUNT_MAX, STRETCH_AMOUNT_MIN, STRING_LENGTH_SCALE_DEFAULT, STRING_LENGTH_SCALE_MAX,
+    STRING_LENGTH_SCALE_MIN, UNISON_DETUNE_SCALE_DEFAULT, UNISON_DETUNE_SCALE_MAX,
+    UNISON_DETUNE_SCALE_MIN,
 };
-use piano_spec::VoicingSpec;
+use piano_spec::{Temperament, VoicingSpec};
 
 pub use crate::space_guard::{
     apply_raised_cosine_crossfade, raised_cosine_weights, IntoLidState, IntoListenerPerspective,
@@ -20,10 +21,10 @@ pub const VOICING_SETTLE_TOL: f32 = 1.0e-4;
 
 /// Voicing dirty flag: hammer hardness / action felt parameters changed.
 pub const DIRTY_HAMMER: u8 = 1;
-/// Voicing dirty flag: string tuning / unison / length scale / concert pitch changed.
+/// Voicing dirty flag: string tuning / unison / length scale / concert pitch / temperament / condition changed.
 pub const DIRTY_TUNING: u8 = 2;
 
-const NUM_VOICING_PARAMS: usize = 5;
+const NUM_VOICING_PARAMS: usize = 6;
 
 const DEFAULTS: [f32; NUM_VOICING_PARAMS] = [
     HAMMER_HARDNESS_DEFAULT,
@@ -31,6 +32,7 @@ const DEFAULTS: [f32; NUM_VOICING_PARAMS] = [
     STRETCH_AMOUNT_DEFAULT,
     STRING_LENGTH_SCALE_DEFAULT,
     A4_FREQ_DEFAULT,
+    CONDITION_DEFAULT,
 ];
 const MINS: [f32; NUM_VOICING_PARAMS] = [
     HAMMER_HARDNESS_MIN,
@@ -38,6 +40,7 @@ const MINS: [f32; NUM_VOICING_PARAMS] = [
     STRETCH_AMOUNT_MIN,
     STRING_LENGTH_SCALE_MIN,
     A4_FREQ_MIN,
+    CONDITION_MIN,
 ];
 const MAXS: [f32; NUM_VOICING_PARAMS] = [
     HAMMER_HARDNESS_MAX,
@@ -45,6 +48,7 @@ const MAXS: [f32; NUM_VOICING_PARAMS] = [
     STRETCH_AMOUNT_MAX,
     STRING_LENGTH_SCALE_MAX,
     A4_FREQ_MAX,
+    CONDITION_MAX,
 ];
 
 #[inline]
@@ -62,14 +66,16 @@ pub enum SmoothCurve {
     Linear,
 }
 
-/// Global 5-parameter voicing smoother (`hammer`, `unison`, `stretch`, `length`, `a4_freq_hz`)
-/// with O(1) idle detection.
+/// Global 7-parameter voicing smoother (`hammer`, `unison`, `stretch`, `length`,
+/// `concert_pitch_hz`, `temperament`, `condition`) with O(1) idle detection.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoicingSmoother {
     curve: SmoothCurve,
     active: bool,
     current: [f32; NUM_VOICING_PARAMS],
     target: [f32; NUM_VOICING_PARAMS],
+    temperament: Temperament,
+    applied_temperament: Temperament,
 }
 
 impl Default for VoicingSmoother {
@@ -86,18 +92,22 @@ impl VoicingSmoother {
             active: false,
             current: DEFAULTS,
             target: DEFAULTS,
+            temperament: Temperament::Equal,
+            applied_temperament: Temperament::Equal,
         }
     }
 
     #[must_use]
     pub fn new_with_voicing(spec: &VoicingSpec) -> Self {
         let mut s = Self::new();
-        s.set_immediate_with_a4(
+        s.set_immediate_full(
             spec.effective_global_hammer_hardness(),
             spec.effective_unison_detune_scale(),
             spec.effective_stretch_amount(),
             spec.effective_string_length_scale(),
             spec.effective_a4_freq_hz(),
+            spec.effective_temperament(),
+            spec.effective_condition(),
         );
         s
     }
@@ -124,7 +134,29 @@ impl VoicingSmoother {
         length: f32,
         a4_freq_hz: f32,
     ) {
-        let vals = [hammer, unison, stretch, length, a4_freq_hz];
+        self.set_target_full(
+            hammer,
+            unison,
+            stretch,
+            length,
+            a4_freq_hz,
+            self.temperament,
+            self.target[5],
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_target_full(
+        &mut self,
+        hammer: f32,
+        unison: f32,
+        stretch: f32,
+        length: f32,
+        concert_pitch_hz: f32,
+        temperament: Temperament,
+        condition: f32,
+    ) {
+        let vals = [hammer, unison, stretch, length, concert_pitch_hz, condition];
         let mut any_diff = false;
         for i in 0..NUM_VOICING_PARAMS {
             let t = if !vals[i].is_finite() {
@@ -139,16 +171,43 @@ impl VoicingSmoother {
                 self.current[i] = t;
             }
         }
+        self.temperament = temperament;
+        if self.temperament != self.applied_temperament {
+            any_diff = true;
+        }
         self.active = any_diff;
     }
 
     pub fn set_a4_target(&mut self, a4_freq_hz: f32) {
-        self.set_target_with_a4(
+        self.set_target_full(
             self.target[0],
             self.target[1],
             self.target[2],
             self.target[3],
             a4_freq_hz,
+            self.temperament,
+            self.target[5],
+        );
+    }
+
+    pub fn set_concert_pitch_target(&mut self, concert_pitch_hz: f32) {
+        self.set_a4_target(concert_pitch_hz);
+    }
+
+    pub fn set_temperament(&mut self, temperament: Temperament) {
+        self.temperament = temperament;
+        self.active = self.current != self.target || self.temperament != self.applied_temperament;
+    }
+
+    pub fn set_condition_target(&mut self, condition: f32) {
+        self.set_target_full(
+            self.target[0],
+            self.target[1],
+            self.target[2],
+            self.target[3],
+            self.target[4],
+            self.temperament,
+            condition,
         );
     }
 
@@ -164,8 +223,39 @@ impl VoicingSmoother {
         length: f32,
         a4_freq_hz: f32,
     ) {
-        self.set_target_with_a4(hammer, unison, stretch, length, a4_freq_hz);
+        self.set_immediate_full(
+            hammer,
+            unison,
+            stretch,
+            length,
+            a4_freq_hz,
+            self.temperament,
+            self.target[5],
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_immediate_full(
+        &mut self,
+        hammer: f32,
+        unison: f32,
+        stretch: f32,
+        length: f32,
+        concert_pitch_hz: f32,
+        temperament: Temperament,
+        condition: f32,
+    ) {
+        self.set_target_full(
+            hammer,
+            unison,
+            stretch,
+            length,
+            concert_pitch_hz,
+            temperament,
+            condition,
+        );
         self.current = self.target;
+        self.applied_temperament = self.temperament;
         self.active = false;
     }
 
@@ -209,9 +299,6 @@ impl VoicingSmoother {
                 self.current[i] = self.target[i];
             }
         }
-        if self.current == self.target {
-            self.active = false;
-        }
         let mut dirty = 0u8;
         if self.current[0] != prev[0] {
             dirty |= DIRTY_HAMMER;
@@ -223,6 +310,16 @@ impl VoicingSmoother {
         {
             dirty |= DIRTY_TUNING;
         }
+        if self.current[5] != prev[5] {
+            dirty |= DIRTY_TUNING | DIRTY_HAMMER;
+        }
+        if self.temperament != self.applied_temperament {
+            dirty |= DIRTY_TUNING;
+            self.applied_temperament = self.temperament;
+        }
+        if self.current == self.target && self.temperament == self.applied_temperament {
+            self.active = false;
+        }
         if dirty == 0 {
             return None;
         }
@@ -232,6 +329,8 @@ impl VoicingSmoother {
         spec.stretch_amount = self.current[2];
         spec.string_length_scale = self.current[3];
         spec.a4_freq_hz = self.current[4];
+        spec.temperament = self.temperament;
+        spec.condition = self.current[5];
         Some((spec, dirty))
     }
 
@@ -246,7 +345,26 @@ impl VoicingSmoother {
         length: f32,
         a4_freq_hz: f32,
     ) {
-        let vals = [unison, stretch, length, a4_freq_hz];
+        self.set_tuning_applied_full(
+            unison,
+            stretch,
+            length,
+            a4_freq_hz,
+            self.temperament,
+            self.current[5],
+        );
+    }
+
+    pub fn set_tuning_applied_full(
+        &mut self,
+        unison: f32,
+        stretch: f32,
+        length: f32,
+        concert_pitch_hz: f32,
+        temperament: Temperament,
+        condition: f32,
+    ) {
+        let vals = [unison, stretch, length, concert_pitch_hz, condition];
         for idx in 1..NUM_VOICING_PARAMS {
             let v = vals[idx - 1];
             let c = if v.is_finite() {
@@ -257,6 +375,8 @@ impl VoicingSmoother {
             self.current[idx] = c;
             self.target[idx] = c;
         }
+        self.temperament = temperament;
+        self.applied_temperament = temperament;
         self.active = self.current[0] != self.target[0];
     }
 
@@ -284,6 +404,21 @@ impl VoicingSmoother {
     #[must_use]
     pub const fn current_a4_freq_hz(&self) -> f32 {
         self.current[4]
+    }
+    #[inline]
+    #[must_use]
+    pub const fn current_concert_pitch_hz(&self) -> f32 {
+        self.current[4]
+    }
+    #[inline]
+    #[must_use]
+    pub const fn current_temperament(&self) -> Temperament {
+        self.temperament
+    }
+    #[inline]
+    #[must_use]
+    pub const fn current_condition(&self) -> f32 {
+        self.current[5]
     }
 }
 
