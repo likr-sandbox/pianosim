@@ -4,6 +4,7 @@ pub mod exports;
 pub mod prep_ipc;
 pub mod ring_ipc;
 pub mod wave3_exports;
+pub mod wave4_exports;
 
 pub use exports::{
     piano_all_notes_off, piano_apply_space_blob, piano_apply_voicing_blob, piano_commit_space,
@@ -19,9 +20,16 @@ pub use wave3_exports::{
     piano_commit_body_space, piano_prep_space_for_body, piano_set_body_space, piano_set_reverb,
     piano_stage_body_space_chunk,
 };
+pub use wave4_exports::{
+    piano_apply_voicing_blob_ex, piano_prep_voicing_ex, piano_set_concert_pitch,
+    piano_set_condition, piano_set_temperament, piano_set_voicing_full,
+};
 
 #[cfg(test)]
 mod wave3_tests;
+
+#[cfg(test)]
+mod wave4_tests;
 
 #[cfg(test)]
 mod tests {

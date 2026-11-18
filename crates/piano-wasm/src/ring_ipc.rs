@@ -18,12 +18,12 @@ struct AlignedTelemetry([f32; TELEMETRY_LEN]);
 
 /// Self-contained Wasm audio-thread context allocated once at `piano_init`.
 pub struct WasmContext {
-    engine: PianoEngine,
+    pub(crate) engine: PianoEngine,
     events: EventQueue,
     out_l: AlignedBlock,
     out_r: AlignedBlock,
     telemetry: AlignedTelemetry,
-    staging: Vec<f32>,
+    pub(crate) staging: Vec<f32>,
 }
 
 impl WasmContext {

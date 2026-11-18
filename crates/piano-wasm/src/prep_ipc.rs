@@ -2,7 +2,7 @@
 //! avoiding real-time audio buffer allocations.
 
 use piano_engine::{embedded_body_bytes, BodyArchetype, SpacePrepContext, VoicingPrepContext};
-use piano_spec::{LidState, ListenerPerspective, VoicingSpec};
+use piano_spec::{LidState, ListenerPerspective, Temperament, VoicingSpec};
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum LastKind {
@@ -70,7 +70,7 @@ impl PrepContext {
         self.prepare_space(perspective, lid)
     }
 
-    /// Precomputes Stage 2/3 tuning tables and returns `f32` element count.
+    /// Precomputes Stage 2/3 tuning tables and returns `f32` element count (`Equal`, `condition = 0.0`).
     pub fn prepare_voicing(
         &mut self,
         hammer_hardness: f32,
@@ -79,12 +79,37 @@ impl PrepContext {
         length_scale: f32,
         a4_freq_hz: f32,
     ) -> usize {
-        let spec = VoicingSpec::from_globals_with_a4(
+        self.prepare_voicing_full(
             hammer_hardness,
             unison_detune,
             stretch,
             length_scale,
             a4_freq_hz,
+            Temperament::Equal,
+            0.0,
+        )
+    }
+
+    /// Precomputes Stage 2/3 tuning tables including concert pitch, temperament, and aging `condition`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_voicing_full(
+        &mut self,
+        hammer_hardness: f32,
+        unison_detune: f32,
+        stretch: f32,
+        length_scale: f32,
+        concert_pitch_hz: f32,
+        temperament: Temperament,
+        condition: f32,
+    ) -> usize {
+        let spec = VoicingSpec::from_globals_full(
+            hammer_hardness,
+            unison_detune,
+            stretch,
+            length_scale,
+            concert_pitch_hz,
+            temperament,
+            condition,
         );
         let len = self.voicing.prepare_voicing(&spec).len();
         self.last = LastKind::Voicing;
