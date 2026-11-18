@@ -256,3 +256,142 @@ fn stulov_12hz_ribattuto_memory_evolves_persists_across_note_off_and_clears_on_r
     bank_mem.reset();
     assert_eq!(bank_mem.felt_memory(48), 0.0);
 }
+
+#[test]
+fn agraffe_delay_induces_multi_peak_reflections_at_48khz_and_96khz() {
+    use piano_spec::{build_scale_design, key_tuned_f0_hz, CHOIR_LAYOUTS};
+
+    let voicing = VoicingSpec::default();
+    let specs = build_scale_design(&voicing);
+
+    for &(key_idx, label) in &[(39_usize, "C4"), (63_usize, "C6")] {
+        let f0 = key_tuned_f0_hz(key_idx, &specs, &voicing);
+        let tau_agg_ms = 1000.0 * crate::agraffe_delay::hammer_beta_for_key(key_idx) / f0;
+
+        for &sr in &[48_000.0_f32, 96_000.0] {
+            let mut bank = ActionBank::new(sr, &voicing);
+            assert_eq!(bank.hammer_compression_norm(key_idx), 0.0);
+            assert_eq!(bank.last_hammer_forces(key_idx), (0.0, [0.0; 8]));
+            assert_eq!(bank.last_hammer_forces(99), (0.0, [0.0; 8]));
+
+            let mut s = TestModalString::new(key_idx, f64::from(sr), &voicing);
+            bank.note_on(key_idx, 48_000);
+
+            let n_host = if sr > 60_000.0 { 1024 } else { 512 };
+            let mut sub_f = Vec::with_capacity(n_host * 8);
+            let mut max_u = 0.0_f32;
+            for _ in 0..n_host {
+                let (y, v) = s.strike_port();
+                let f = bank.step_hammer_sample(key_idx, y, v, s.r_port_strike);
+                let (last_host, subs) = bank.last_hammer_forces(key_idx);
+                assert_eq!(last_host, f);
+                assert!(subs.iter().all(|&x| x.is_finite() && x >= 0.0));
+                sub_f.extend_from_slice(&subs);
+                max_u = max_u.max(bank.hammer_compression_norm(key_idx));
+                s.step_forces(f, 0.0);
+            }
+            assert!(max_u > 0.05 && max_u <= 1.0, "{label}@{sr}: max_u={max_u}");
+            assert_eq!(bank.hammer_compression_norm(key_idx), 0.0);
+
+            let pk = sub_f.iter().copied().fold(0.0_f32, f32::max);
+            assert!(pk > 5.0, "{label}@{sr}: peak={pk}");
+            let sr_sub = f64::from(sr) * 8.0;
+            let min_sep = ((0.6 * tau_agg_ms * 1.0e-3) * sr_sub).max(4.0) as usize;
+            let mut peaks = Vec::new();
+            for i in 2..sub_f.len().saturating_sub(2) {
+                if sub_f[i] > 0.15 * pk
+                    && sub_f[i] >= sub_f[i - 1]
+                    && sub_f[i] >= sub_f[i + 1]
+                    && sub_f[i] > sub_f[i - 2]
+                    && sub_f[i] > sub_f[i + 2]
+                    && peaks.last().is_none_or(|&p: &usize| i - p >= min_sep)
+                {
+                    peaks.push(i);
+                }
+            }
+            assert!(
+                peaks.len() >= 2,
+                "{label}@{sr}: expected >=2 agraffe peaks (tau_agg={tau_agg_ms:.3}ms), got {:?}",
+                peaks
+            );
+            let dt_ms = 1000.0 * ((peaks[1] - peaks[0]) as f64) / sr_sub;
+            assert!(
+                dt_ms >= 0.55 * tau_agg_ms && dt_ms <= 2.2 * tau_agg_ms,
+                "{label}@{sr}: inter-peak {dt_ms:.3}ms vs tau_agg={tau_agg_ms:.3}ms"
+            );
+        }
+    }
+
+    // Verify agraffe delay creates genuine multi-peak ripples on a non-reflecting resistive port.
+    for &sr in &[48_000.0_f32, 96_000.0] {
+        let k = 63_usize;
+        let f0 = key_tuned_f0_hz(k, &specs, &voicing);
+        let n_str = f64::from(CHOIR_LAYOUTS[k].strings_per_key.max(1));
+        let m_str = specs[k].linear_density_kg_m * specs[k].speaking_length_m;
+        let z_choir = n_str * 2.0 * f0 * m_str;
+        let r_port = (1.0 / (2.0 * z_choir)) as f32;
+
+        let run_resistive = |enable_agg: bool| -> Vec<f32> {
+            let mut bank = ActionBank::new(sr, &voicing);
+            if !enable_agg {
+                bank.set_agraffe_delay_samples(k, 1.0, 0.0);
+            }
+            bank.note_on(k, 48_000);
+            let mut y_s = 0.0_f32;
+            let dt = 1.0 / sr;
+            let n_host = if sr > 60_000.0 { 256 } else { 128 };
+            let mut out = Vec::with_capacity(n_host * 8);
+            for _ in 0..n_host {
+                let f = bank.step_hammer_sample(k, y_s, 0.0, r_port);
+                y_s += f * r_port * dt;
+                out.extend_from_slice(&bank.last_hammer_forces(k).1);
+            }
+            out
+        };
+
+        let s_on = run_resistive(true);
+        let s_off = run_resistive(false);
+        let max_diff = s_on
+            .iter()
+            .zip(s_off.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff > 1.0,
+            "C6@{sr}: expected agraffe reflection delta > 1.0 N on resistive port, got {max_diff}"
+        );
+    }
+}
+
+#[test]
+fn a0_at_a4_392hz_and_96khz_never_overflows_agraffe_buffer() {
+    let mut low_voicing = VoicingSpec {
+        a4_freq_hz: piano_spec::A4_FREQ_MIN_HZ as f32,
+        stretch_amount: 2.0,
+        ..VoicingSpec::default()
+    };
+    low_voicing.note_offsets[0].pitch_cents = -100.0;
+
+    let mut bank = ActionBank::new(96_000.0, &low_voicing);
+    let mut s = TestModalString::new(0, 96_000.0, &low_voicing);
+    bank.note_on(0, 65_535);
+
+    let mut peak = 0.0_f32;
+    for _ in 0..1_200 {
+        let (y, v) = s.strike_port();
+        let f = bank.step_hammer_sample(0, y, v, s.r_port_strike);
+        assert!(f.is_finite() && f >= 0.0);
+        peak = peak.max(f);
+        s.step_forces(f, 0.0);
+    }
+    assert!(peak > 5.0, "A0 peak={peak}");
+
+    let high_voicing = VoicingSpec {
+        a4_freq_hz: piano_spec::A4_FREQ_MAX_HZ as f32,
+        ..VoicingSpec::default()
+    };
+    bank.update_voicing_in_place(&high_voicing);
+    bank.update_voicing_in_place(&low_voicing);
+    bank.reset();
+    assert_eq!(bank.last_hammer_forces(0), (0.0, [0.0; 8]));
+}

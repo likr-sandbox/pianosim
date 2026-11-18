@@ -1,17 +1,17 @@
 //! Nonlinear Stulov wool-felt contact model with two-timescale viscoelastic
-//! relaxation (`tau_fast ~ 35 us` intra-strike, `tau_mem ~ 130 ms` compaction memory).
+//! relaxation (`tau_fast ~ 50 us` intra-strike, `tau_mem ~ 130 ms` compaction memory).
 
 use piano_spec::{VoicingSpec, NUM_KEYS};
 
 use crate::math::{exp_f64, pow_nonneg_f64, pow_usize_f32};
 use crate::shank_timoshenko::ShankParams;
 
-/// Fast intra-strike Stulov wool relaxation time constant (`35 us`).
-pub const TAU_FAST_S: f64 = 35.0e-6;
+/// Fast intra-strike Stulov wool relaxation time constant (`50 us`).
+pub const TAU_FAST_S: f64 = 50.0e-6;
 /// Slow wool-compaction memory time constant (`130 ms`).
 pub const TAU_MEM_S: f64 = 130.0e-3;
 /// Nominal fast Stulov relaxation fraction `epsilon`.
-pub const EPS_FAST_BASE: f32 = 0.28;
+pub const EPS_FAST_BASE: f32 = 0.34;
 
 const MF_REF_SPEED_MPS: f64 = 1.826;
 const TAU_COMPACT_S: f64 = 5.0e-3;
@@ -70,7 +70,7 @@ fn compute_key_felt_spec(
     let x = (k as f64) / ((NUM_KEYS - 1) as f64);
     let h = f64::from(voicing.effective_hammer_hardness(k));
 
-    let p_base = 2.45 + 0.65 * x;
+    let p_base = 2.70 + 0.50 * x;
     let exponent_p =
         fixed_exponent_p.unwrap_or_else(|| (p_base + (h - 0.5) * 0.50).clamp(2.2, 3.5));
 
@@ -86,7 +86,7 @@ fn compute_key_felt_spec(
         / (2.0 * pow_nonneg_f64(delta_mf, exponent_p + 1.0));
     // Calibrate for Stulov hysteresis (~1 - 0.5 * eps) & voicing hardness.
     let voicing_stiff = exp_f64((h - 0.5) * 1.40);
-    let k0_si = k0_nominal * 1.12 * voicing_stiff;
+    let k0_si = k0_nominal * 1.16 * voicing_stiff;
 
     // Normalize LUT domain so fff strikes sit cleanly inside u in [0, 1].
     let delta_mf_eff = if fixed_exponent_p.is_some() && (h - 0.5).abs() >= 1.0e-12 {
