@@ -13,6 +13,8 @@ pub mod ribs_rim;
 pub mod types;
 
 #[cfg(test)]
+mod multi_body_parity;
+#[cfg(test)]
 mod multi_body_tests;
 #[cfg(test)]
 mod tests;

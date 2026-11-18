@@ -2,6 +2,7 @@
 //! pure-Rust deterministic `.pbdy` asset parity, passivity, and pole cancellation.
 
 use crate::bake::{bake_body_with_diagnostics, BakeDiagnostics};
+use crate::multi_body_parity::assert_sign_invariant_pbdy_parity;
 use crate::pole_cancel::verify_pole_cancellation;
 use crate::presets::{body_spec, BodyArchetype};
 use crate::ribs_rim::rim_signed_distance_for;
@@ -51,12 +52,12 @@ fn all_three_pbdy_assets_decode_cleanly_and_match_deterministic_bake() {
             .unwrap_or_else(|e| panic!("{} failed decode: {e}", arch.slug()));
         let (baked, diag) = cached_body(arch);
         assert_eq!(
-            disk_bytes,
-            baked.encode(),
-            "on-disk {} out of sync with deterministic baker",
+            disk_bytes.len(),
+            baked.encode().len(),
+            "{} encoded byte length mismatch",
             arch.asset_filename()
         );
-        assert_eq!(decoded.modes.len(), diag.total_modes);
+        assert_sign_invariant_pbdy_parity(arch, &decoded, baked, diag);
         assert!(
             (1_000..=2_000).contains(&diag.total_modes),
             "{} mode count {} out of range",
