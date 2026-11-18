@@ -1,5 +1,6 @@
 //! Zero-allocation 4-stage real-time piano synthesizer engine.
 
+pub(crate) mod diag;
 pub(crate) mod drivers;
 pub mod engine;
 pub(crate) mod engine_core;

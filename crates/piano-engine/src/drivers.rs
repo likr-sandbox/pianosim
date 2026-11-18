@@ -21,6 +21,11 @@ impl KeyActionDriver for ActionDriver<'_> {
     }
 
     #[inline]
+    fn hammer_compression_norm(&self, key_idx: usize) -> f32 {
+        self.action.hammer_compression_norm(key_idx)
+    }
+
+    #[inline]
     fn damper_clearance_m(&self, key_idx: usize) -> f32 {
         self.action.damper_clearance_m(key_idx)
     }

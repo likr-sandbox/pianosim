@@ -232,9 +232,7 @@ fn render_note_stereo(
     fixed_end: bool,
 ) -> (Vec<f32>, Vec<f32>) {
     let mut engine = PianoEngine::new(SR);
-    // WAVE2 HOOK: uncomment once `PianoEngine::set_bridge_fixed_end(bool)` lands in `piano-engine`:
-    // engine.set_bridge_fixed_end(fixed_end);
-    let _ = fixed_end;
+    engine.set_bridge_fixed_end(fixed_end);
 
     let total = (secs * SR64).round() as usize;
     let mut out_l = vec![0.0_f32; total];
@@ -275,35 +273,49 @@ pub fn cmd_diag_bridge(args: &[String]) -> Result<(), String> {
     let vel_mf = u7_to_u16(64);
     println!("diag-bridge [sr={SR_U32}, vel_mf={vel_mf}, duration=3.8s]");
     let mut c2_wdf_buf: Option<Vec<f32>> = None;
+    let mut c2_fixed_buf: Option<Vec<f32>> = None;
     let mut c4_dry_wdf_buf: Option<Vec<f32>> = None;
     let mut c4_sus_wdf_buf: Option<Vec<f32>> = None;
+    let mut c4_dry_fixed_buf: Option<Vec<f32>> = None;
+    let mut c4_sus_fixed_buf: Option<Vec<f32>> = None;
 
     for (slug, midi) in &opts.keys {
         let (wl, wr) = render_note_stereo(*midi, vel_mf, 0, 3.8, false);
+        let (fl, fr) = render_note_stereo(*midi, vel_mf, 0, 3.8, true);
         if let Some(ref dir) = opts.out_dir {
             write_stereo_f32_wav(&dir.join(format!("{slug}_wdf.wav")), SR_U32, &wl, &wr)?;
+            write_stereo_f32_wav(&dir.join(format!("{slug}_fixed.wav")), SR_U32, &fl, &fr)?;
         }
         let wdf_mono = mono_mix(&wl, &wr);
+        let fixed_mono = mono_mix(&fl, &fr);
         let ts = analyze_two_stage_decay(&wdf_mono, SR64);
+        let ts_fix = analyze_two_stage_decay(&fixed_mono, SR64);
         println!(
-            "  {} (midi={midi}) WDF: prompt={:.2} dB/s, late={:.2} dB/s, ratio={:.2}x (>= 2.0x), break_level={:.2} dB (target 10..15 dB)",
+            "  {} (midi={midi}) WDF: prompt={:.2} dB/s, late={:.2} dB/s, ratio={:.2}x (>= 2.0x), break_level={:.2} dB (target 10..15 dB) | Fixed: ratio={:.2}x",
             slug.to_ascii_uppercase(),
             ts.prompt_slope_db_per_s,
             ts.late_slope_db_per_s,
             ts.ratio,
-            ts.break_level_db
+            ts.break_level_db,
+            ts_fix.ratio
         );
 
         if *midi == 36 {
             c2_wdf_buf = Some(wdf_mono);
+            c2_fixed_buf = Some(fixed_mono);
         } else if *midi == 60 {
             let (sl, sr_buf) = render_note_stereo(60, vel_mf, u16::MAX, 3.8, false);
+            let (sfl, sfr_buf) = render_note_stereo(60, vel_mf, u16::MAX, 3.8, true);
             if let Some(ref dir) = opts.out_dir {
                 write_stereo_f32_wav(&dir.join("c4_sus_wdf.wav"), SR_U32, &sl, &sr_buf)?;
+                write_stereo_f32_wav(&dir.join("c4_sus_fixed.wav"), SR_U32, &sfl, &sfr_buf)?;
             }
             let sus_mono = mono_mix(&sl, &sr_buf);
+            let sus_fixed_mono = mono_mix(&sfl, &sfr_buf);
             c4_dry_wdf_buf = Some(wdf_mono);
             c4_sus_wdf_buf = Some(sus_mono);
+            c4_dry_fixed_buf = Some(fixed_mono);
+            c4_sus_fixed_buf = Some(sus_fixed_mono);
         }
     }
 
@@ -312,7 +324,15 @@ pub fn cmd_diag_bridge(args: &[String]) -> Result<(), String> {
         c4_dry_wdf_buf.as_deref(),
         c4_sus_wdf_buf.as_deref(),
     ) {
-        let report = compare_fixed_vs_wdf(c2_w, None, c4_d, c4_s, None, None, SR64);
+        let report = compare_fixed_vs_wdf(
+            c2_w,
+            c2_fixed_buf.as_deref(),
+            c4_d,
+            c4_s,
+            c4_dry_fixed_buf.as_deref(),
+            c4_sus_fixed_buf.as_deref(),
+            SR64,
+        );
         println!(
             "  {} vs {} WDF summary: C2 ratio={:.2}x, C4 ratio={:.2}x, C4 Lehtonen sympathetic={:+.2} dB (target +6.0..+14.0 dB)",
             report.c2.label,
@@ -332,9 +352,6 @@ pub fn cmd_diag_bridge(args: &[String]) -> Result<(), String> {
             );
         }
     }
-    println!(
-        "  Fixed-End comparison: [PENDING Wave 2 hook `engine.set_bridge_fixed_end(true)` in `diag/bridge.rs`]"
-    );
     Ok(())
 }
 

@@ -401,8 +401,10 @@ fn wave2_ii5_peel_off_keybed_release_and_oversample_launch_continuity() {
     );
 
     // 3. HammerOversampleState::launch preserves prev_sub_forces FIR history across rapid re-strike.
-    let mut st = HammerOversampleState::default();
-    st.prev_sub_forces = [0.25; 8];
+    let mut st = HammerOversampleState {
+        prev_sub_forces: [0.25; 8],
+        ..Default::default()
+    };
     st.launch(2.0);
     assert_eq!(st.prev_sub_forces, [0.25; 8]);
     assert!(st.is_active());

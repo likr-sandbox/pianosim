@@ -339,9 +339,7 @@ pub fn cmd_diag_hammer(args: &[String]) -> Result<(), String> {
     for n in 0..total_samples {
         let cur = if n == 0 { &ev[..] } else { &[] };
         engine.render_block(cur, &mut l, &mut r);
-        // WAVE2 HOOK: replace placeholder `(0.0, [0.0; 8])` once `PianoEngine::last_hammer_forces(midi)` lands:
-        // let (f_host_n, sub_forces) = engine.last_hammer_forces(opts.midi);
-        let (f_host_n, sub_forces) = (0.0_f32, [0.0_f32; SUB_STEPS]);
+        let (f_host_n, sub_forces) = engine.last_hammer_forces(opts.midi);
         if f_host_n > 0.0 || sub_forces.iter().any(|&x| x > 0.0) {
             any_nonzero = true;
         }
