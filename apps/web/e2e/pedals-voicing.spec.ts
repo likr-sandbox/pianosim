@@ -76,6 +76,23 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     const note1 = page.locator('[data-midi="60"]'); // C4 (261.6 Hz)
     const note2 = page.locator('[data-midi="67"]'); // G4 (392.0 Hz)
 
+    // Step 0: Measure unlatched C4 baseline release decay (damper closes immediately)
+    await note1.dispatchEvent('pointerdown', { buttons: 1 });
+    await page.waitForTimeout(300);
+    const unlatchedHeld = await sampleDestinationAudio(page);
+    expect(unlatchedHeld.rms).toBeGreaterThan(0.002);
+
+    await note1.dispatchEvent('pointerup', { buttons: 0 });
+    await page.waitForTimeout(300);
+    const unlatchedReleased = await sampleDestinationAudio(page);
+    expect(unlatchedReleased.nonFiniteCount).toBe(0);
+    expect(unlatchedReleased.rms).toBeLessThan(unlatchedHeld.rms * 0.05);
+
+    await page.getByTestId('panic-btn').click();
+    await expect
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .toBeLessThan(0.0005);
+
     // Step 1: Strike and hold Note 1
     await note1.dispatchEvent('pointerdown', { buttons: 1 });
     await page.waitForTimeout(300);
@@ -86,15 +103,22 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     await page.getByTestId('pedal-sostenuto').click();
     expect(await page.getByTestId('pedal-sostenuto').getAttribute('aria-pressed')).toBe('true');
 
-    // Step 3: Release Note 1 - must continue sustaining due to mechanical latch
+    // Step 3: Release Note 1 - must sustain far above unlatched closed-damper baseline
     await note1.dispatchEvent('pointerup', { buttons: 0 });
     await page.waitForTimeout(300);
     const note1Latched = await sampleDestinationAudio(page);
-    expect(note1Latched.rms).toBeGreaterThan(note1Held.rms * 0.3);
+    expect(note1Latched.nonFiniteCount).toBe(0);
+    expect(note1Latched.rms).toBeGreaterThan(0.002);
+    expect(note1Latched.rms).toBeGreaterThan(unlatchedReleased.rms * 10);
+    const latchedRetention = note1Latched.rms / note1Held.rms;
+    const unlatchedRetention = unlatchedReleased.rms / unlatchedHeld.rms;
+    expect(latchedRetention).toBeGreaterThan(unlatchedRetention * 10);
 
     // Step 4: Play Note 2 staccato (struck AFTER sostenuto engaged)
     await note2.dispatchEvent('pointerdown', { buttons: 1 });
     await page.waitForTimeout(150);
+    const note2Held = await sampleDestinationAudio(page);
+    expect(note2Held.rms).toBeGreaterThan(note1Latched.rms);
     await note2.dispatchEvent('pointerup', { buttons: 0 });
     await page.waitForTimeout(400); // Allow Note 2 to decay
 
@@ -102,6 +126,8 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     const sustainedState = await sampleDestinationAudio(page);
     expect(sustainedState.nonFiniteCount).toBe(0);
     expect(sustainedState.rms).toBeGreaterThan(0.001);
+    expect(sustainedState.rms).toBeGreaterThan(unlatchedReleased.rms * 5);
+    expect(sustainedState.rms).toBeLessThan(note2Held.rms * 0.65);
     expect(sustainedState.peakFreqHz).toBeGreaterThanOrEqual(255);
     expect(sustainedState.peakFreqHz).toBeLessThanOrEqual(268); // Peak is Note 1 (C4), not G4
 

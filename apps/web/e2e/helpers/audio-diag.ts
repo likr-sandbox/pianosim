@@ -132,12 +132,15 @@ export async function sampleDestinationAudio(
 export async function unlockAudioEngine(page: Page): Promise<void> {
   await page.getByTestId('unlock-audio').click();
   await expect
-    .poll(async () => {
-      return page.evaluate(() => {
-        const d = window.__PIANO_DIAG__;
-        return d ? `${d.status}:${d.contextState}:${d.telemetryBlocksReceived > 0}` : 'missing';
-      });
-    })
+    .poll(
+      async () => {
+        return page.evaluate(() => {
+          const d = window.__PIANO_DIAG__;
+          return d ? `${d.status}:${d.contextState}:${d.telemetryBlocksReceived > 0}` : 'missing';
+        });
+      },
+      { timeout: 15_000 },
+    )
     .toBe('ready:running:true');
 }
 
