@@ -238,11 +238,17 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await page.keyboard.up('KeyA');
     await expectAudioDecay(page, c4.rms);
 
-    // Transpose down with KeyZ: KeyA becomes C3 (130 Hz).
+    // Transpose down with KeyZ: KeyA becomes C3 (130.8 Hz fundamental, 2nd partial 261.6 Hz).
+    // Probe the 100..200 Hz band (analogous to C8) because finite hammer width (beta ~ 1/8)
+    // and Zone 2 calibration make C3's 2nd partial louder than its 1st partial.
     await page.keyboard.press('KeyZ');
     await page.keyboard.down('KeyA');
+    await expect(page.locator('[data-midi="48"]')).toHaveClass(/is-active/);
     await page.waitForTimeout(420);
-    const c3 = await sampleDestinationAudio(page);
+    const c3 = await sampleDestinationAudio(page, { minFreq: 100, maxFreq: 200 });
+    const c3RmsDb = 20 * Math.log10(Math.max(c3.rms, 1e-12));
+    expect(c3.nonFiniteCount).toBe(0);
+    expect(c3RmsDb).toBeGreaterThan(-45);
     expect(c3.peakFreqHz).toBeGreaterThanOrEqual(125);
     expect(c3.peakFreqHz).toBeLessThanOrEqual(136);
     await page.keyboard.up('KeyA');
