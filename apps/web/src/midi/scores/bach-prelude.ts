@@ -1,7 +1,7 @@
-/** Procedural Bach Prelude in C Major (BWV 846) — 16 measures, 32 seconds. */
+/** Procedural Bach Prelude in C Major (BWV 846) — 16 measures, humanized phrasing & half-pedaling. */
 
 import type { MidiPlaybackEvent, ParsedSmf } from '../smf-parser';
-import { sortEvents } from './types';
+import { addCc, addNote, addRolledChord, sortEvents } from './types';
 
 export function createBachPrelude(): ParsedSmf {
   const chords: number[][] = [
@@ -24,36 +24,52 @@ export function createBachPrelude(): ParsedSmf {
   ];
 
   const events: MidiPlaybackEvent[] = [];
-  const noteDuration = 0.125; // 16th note at 120 BPM = 125 ms
+  const noteDuration = 0.125; // Nominal 16th note at 120 BPM = 125 ms
   const pattern = [0, 1, 2, 3, 4, 2, 3, 4, 0, 1, 2, 3, 4, 2, 3, 4];
   let time = 0.0;
-  let tick = 0;
-  const tickStep = 120; // 480 ticks/quarter => 120 ticks/16th
 
-  for (const chord of chords) {
-    for (const step of pattern) {
+  for (let m = 0; m < chords.length; m++) {
+    const chord = chords[m];
+    const phraseArch = Math.sin((m / (chords.length - 1)) * Math.PI); // gentle dynamic swell
+    const halfPedalDepth = m === chords.length - 1 ? 78 : 42 + Math.round(phraseArch * 16);
+
+    // Subtle harpsichord-to-piano half-pedal bloom per harmony, lifted cleanly at measure change
+    addCc(events, time + 0.015, 64, halfPedalDepth);
+
+    // Sustain bass anchor gently on first note of each figure
+    addNote(events, time, noteDuration * 7.2, chord[0], 78 + Math.round(phraseArch * 6), 34);
+
+    for (let idx = 0; idx < pattern.length; idx++) {
+      const step = pattern[idx];
       const midiKey = chord[step];
-      const velocity = step === 0 ? 80 : step === 1 ? 74 : 68;
-      events.push({
-        type: 'noteOn',
-        timeSeconds: time,
-        tick,
-        channel: 0,
-        midiKey,
-        velocity,
-      });
-      events.push({
-        type: 'noteOff',
-        timeSeconds: time + 0.12,
-        tick: tick + 115,
-        channel: 0,
-        midiKey,
-        velocity: 64,
-      });
+      // Micro-rubato wave across 16th-note figure (0 at beat 0)
+      const microOffset = idx === 0 ? 0 : Math.sin((idx / pattern.length) * Math.PI) * 0.004;
+      // Emphasize upper melodic voice (step 4) and bass (step 0) over inner accompaniment (1, 2)
+      let vel = 58;
+      if (step === 4) {
+        vel = 80 + Math.round(phraseArch * 8);
+      } else if (step === 3) {
+        vel = 72 + Math.round(phraseArch * 5);
+      } else if (step === 0) {
+        vel = 76 + Math.round(phraseArch * 4);
+      } else {
+        vel = 56 + (idx % 2 === 0 ? 4 : 0);
+      }
+      if (idx > 0) {
+        addNote(events, time + microOffset, 0.122, midiKey, vel, 48);
+      }
       time += noteDuration;
-      tick += tickStep;
     }
+
+    // Half-pedal release breath before harmonic shift
+    addCc(events, time - 0.04, 64, 0);
   }
+
+  // Final rolled C major cadence chord with warm pedal wash
+  addCc(events, time + 0.01, 64, 88);
+  addRolledChord(events, time + 0.02, 1.8, [36, 48, 52, 55, 60, 64], 76, 0.018, 10, 28);
+  time += 2.0;
+  addCc(events, time, 64, 0);
 
   sortEvents(events);
 
@@ -61,7 +77,7 @@ export function createBachPrelude(): ParsedSmf {
     format: 0,
     trackCount: 1,
     division: 480,
-    durationSeconds: time + 1.0,
+    durationSeconds: time + 0.8,
     events,
   };
 }
