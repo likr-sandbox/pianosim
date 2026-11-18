@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import {
+  captureStrikeAttack,
   expectAudioDecay,
   sampleDestinationAudio,
   setSlider,
@@ -114,31 +115,22 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
   test('Una Corda pedal: strike weight attenuation and high-frequency softening', async ({
     page,
   }) => {
-    const c5Key = page.locator('[data-midi="72"]');
+    // Capture onset-aligned 85 ms attack windows via lossless f32 AudioWorklet recording
+    // to eliminate wall-clock phase jitter against trichord prompt decay.
+    const normalC5 = await captureStrikeAttack(page, 72, 200, false);
+    const unaC5 = await captureStrikeAttack(page, 72, 200, true);
+    const normalA0 = await captureStrikeAttack(page, 21, 20, false);
+    const unaA0 = await captureStrikeAttack(page, 21, 20, true);
 
-    // Baseline: strike without Una Corda
-    await c5Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(200);
-    const normal = await sampleDestinationAudio(page, 200);
-    await c5Key.dispatchEvent('pointerup', { buttons: 0 });
-    await expectAudioDecay(page, normal.rms, 0.05, 4000);
-    await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
+    expect(unaC5.nonFiniteCount).toBe(0);
+    expect(unaC5.attackPeak).toBeLessThan(normalC5.attackPeak * 0.8);
+    expect(unaC5.attackRms).toBeLessThan(normalC5.attackRms * 0.85);
+    expect(unaC5.spectralCentroidHz).toBeLessThan(normalC5.spectralCentroidHz * 0.92);
 
-    // Strike with Una Corda engaged
-    await page.getByTestId('pedal-una-corda').click();
-    expect(await page.getByTestId('pedal-una-corda').getAttribute('aria-pressed')).toBe('true');
-
-    await c5Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(200);
-    const unaCorda = await sampleDestinationAudio(page, 200);
-    await c5Key.dispatchEvent('pointerup', { buttons: 0 });
-    await page.waitForTimeout(300);
-
-    // Verify strike weight reduction (lower RMS) and felt softening (lower spectral centroid)
-    expect(unaCorda.rms).toBeLessThan(normal.rms);
-    expect(unaCorda.spectralCentroidHz).toBeLessThan(normal.spectralCentroidHz);
-    expect(unaCorda.nonFiniteCount).toBe(0);
+    expect(unaA0.nonFiniteCount).toBe(0);
+    expect(unaA0.attackPeak).toBeLessThan(normalA0.attackPeak * 0.92);
+    expect(unaA0.attackRms).toBeLessThan(normalA0.attackRms);
+    expect(unaA0.spectralCentroidHz).toBeLessThan(normalA0.spectralCentroidHz * 0.88);
 
     await page.getByTestId('pedal-una-corda').click(); // Disengage
   });

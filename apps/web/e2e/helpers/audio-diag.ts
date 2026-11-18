@@ -1,4 +1,12 @@
+import fs from 'node:fs';
 import { expect, type Page } from '@playwright/test';
+
+export interface StrikeAttackStats {
+  readonly attackRms: number;
+  readonly attackPeak: number;
+  readonly spectralCentroidHz: number;
+  readonly nonFiniteCount: number;
+}
 
 export interface AudioSampleStats {
   readonly sampleRate: number;
@@ -177,4 +185,93 @@ export async function setSlider(page: Page, testId: string, val: number): Promis
     range.dispatchEvent(new Event('input', { bubbles: true }));
     range.dispatchEvent(new Event('change', { bubbles: true }));
   }, val);
+}
+
+/** Captures an onset-aligned 85 ms attack window via the live f32 AudioWorklet WAV recorder. */
+export async function captureStrikeAttack(
+  page: Page,
+  midi: number,
+  minFreqHz: number,
+  unaCorda: boolean,
+): Promise<StrikeAttackStats> {
+  await page.getByTestId('panic-btn').click();
+  if (unaCorda) {
+    await page.getByTestId('pedal-una-corda').click();
+    expect(await page.getByTestId('pedal-una-corda').getAttribute('aria-pressed')).toBe('true');
+  }
+  await expect
+    .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+    .toBeLessThan(0.0005);
+
+  await page.getByTestId('record-format').selectOption('f32');
+  await page.getByTestId('record-start').click();
+  await expect(page.getByTestId('record-stop')).toBeEnabled();
+
+  const key = page.locator(`[data-midi="${midi}"]`);
+  await key.dispatchEvent('pointerdown', { buttons: 1 });
+  await page.waitForTimeout(200);
+  await key.dispatchEvent('pointerup', { buttons: 0 });
+  await page.getByTestId('record-stop').click();
+  await expect(page.getByTestId('record-status')).toContainText('Ready', { timeout: 3000 });
+
+  const [dl] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByTestId('record-export').click(),
+  ]);
+  const path = await dl.path();
+  if (!path) throw new Error('Missing WAV download path');
+  const buf = fs.readFileSync(path);
+  expect(buf.subarray(0, 4).toString('ascii')).toBe('RIFF');
+  const sr = buf.readUInt32LE(24);
+  const frames = buf.readUInt32LE(40) >>> 3;
+  const mono = new Float32Array(frames);
+  let nonFiniteCount = 0;
+  let t0 = -1;
+  for (let i = 0; i < frames; i++) {
+    const l = buf.readFloatLE(44 + i * 8);
+    const r = buf.readFloatLE(48 + i * 8);
+    if (!Number.isFinite(l) || !Number.isFinite(r)) {
+      nonFiniteCount++;
+      continue;
+    }
+    mono[i] = 0.5 * (l + r);
+    if (t0 < 0 && Math.max(Math.abs(l), Math.abs(r)) > 0.002) {
+      t0 = Math.max(0, i - 16);
+    }
+  }
+  expect(t0).toBeGreaterThanOrEqual(0);
+  expect(frames - t0).toBeGreaterThanOrEqual(4096);
+
+  let sumSq = 0;
+  let attackPeak = 0;
+  for (let i = t0; i < t0 + 4096; i++) {
+    sumSq += mono[i] * mono[i];
+    attackPeak = Math.max(attackPeak, Math.abs(mono[i]));
+  }
+  const n = 2048;
+  const binW = sr / n;
+  let totLin = 0;
+  let wFreq = 0;
+  const maxBin = Math.min(n / 2 - 1, Math.ceil(12000 / binW));
+  for (let k = Math.max(1, Math.floor(minFreqHz / binW)); k <= maxBin; k++) {
+    let re = 0;
+    let im = 0;
+    const step = (2 * Math.PI * k) / n;
+    for (let i = 0; i < n; i++) {
+      const x = mono[t0 + i] * 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
+      re += x * Math.cos(step * i);
+      im -= x * Math.sin(step * i);
+    }
+    const lin = Math.hypot(re, im) / (n * 0.25);
+    if (lin > 1e-5) {
+      wFreq += k * binW * lin;
+      totLin += lin;
+    }
+  }
+  return {
+    attackRms: Math.sqrt(sumSq / 4096),
+    attackPeak,
+    spectralCentroidHz: totLin > 0 ? wFreq / totLin : 0,
+    nonFiniteCount,
+  };
 }
