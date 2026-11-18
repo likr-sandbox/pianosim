@@ -424,3 +424,46 @@ fn fixed_end_mode_reflects_inverted_waves_without_coupling_or_state_buildup() {
     bridge.set_fixed_end(false);
     assert!(!bridge.is_fixed_end());
 }
+
+#[test]
+fn calibrated_mobility_hits_literature_range_against_string_impedance() {
+    let specs = piano_spec::build_scale_design(&piano_spec::VoicingSpec::default());
+    let bridge = BridgeBank::new(48_000.0);
+    let poles = bridge.reduced_poles();
+    let y_inf = bridge.ssm().y_inf();
+    let weights = bridge.zone_weights();
+
+    // Check Re{Y_bridge(f0)} and dimensionless Z0 * Re{Y_bridge(f0)} across bass/mid/treble keys.
+    for &k in &[0_usize, 15, 27, 39, 48, 63, 75, 87] {
+        let p = specs[k];
+        let z0 = 2.0 * p.f0_et_hz * p.linear_density_kg_m * p.speaking_length_m;
+        let s_idx = usize::from(CHOIR_LAYOUTS[k].first_string_idx);
+        let (z0_idx, w0, z1_idx, w1) = weights[s_idx];
+        let omega = TAU * p.f0_et_hz;
+
+        let eval_zone_re_y = |z: usize| -> f64 {
+            let mut re_y = f64::from(y_inf[z]);
+            for pole in poles {
+                let w_m = TAU * f64::from(pole.freq_hz);
+                let mass = f64::from(pole.modal_mass_kg);
+                let g = f64::from(pole.zone_gains[z]);
+                let re_d = mass * (w_m * w_m - omega * omega);
+                let im_d = mass * 2.0 * f64::from(pole.zeta) * w_m * omega;
+                re_y += (g * g * omega * im_d) / (re_d * re_d + im_d * im_d);
+            }
+            re_y
+        };
+        let re_y = f64::from(w0) * eval_zone_re_y(usize::from(z0_idx))
+            + f64::from(w1) * eval_zone_re_y(usize::from(z1_idx));
+        let coupling_ratio = z0 * re_y;
+
+        assert!(
+            (1.0e-4..=1.2e-2).contains(&re_y),
+            "key {k} Re{{Y_bridge}} = {re_y:.3e} outside literature range"
+        );
+        assert!(
+            (5.0e-4..=3.0e-2).contains(&coupling_ratio),
+            "key {k} Z0*Re{{Y_bridge}} = {coupling_ratio:.3e} outside coupling target"
+        );
+    }
+}

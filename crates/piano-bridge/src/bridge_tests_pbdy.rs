@@ -22,7 +22,7 @@ fn default_preset_poles(ssm: &AdmittanceSsm) -> [PresetReducedPole; NUM_REDUCED_
 
 pub(super) fn custom_upright_like_preset() -> BodyPreset {
     let y_inf = [
-        0.000_21, 0.000_19, 0.000_16, 0.000_14, 0.000_26, 0.000_18, 0.000_24, 0.000_29,
+        0.000_30, 0.000_29, 0.000_34, 0.000_40, 0.000_45, 0.000_47, 0.000_52, 0.000_56,
     ];
     let freqs = [
         72.0_f32, 118.0, 175.0, 256.0, 342.0, 468.0, 610.0, 815.0, 1_040.0, 1_290.0,
@@ -30,7 +30,7 @@ pub(super) fn custom_upright_like_preset() -> BodyPreset {
     let zetas = [
         0.048_f32, 0.036, 0.028, 0.024, 0.021, 0.018, 0.022, 0.020, 0.019, 0.017,
     ];
-    let masses = [2.8_f32, 2.0, 1.1, 0.72, 0.54, 0.44, 0.85, 1.75, 2.3, 2.9];
+    let masses = [2.8_f32, 2.0, 1.1, 0.65, 0.48, 0.38, 0.40, 0.54, 0.68, 0.82];
     let reduced_poles = core::array::from_fn(|m| PresetReducedPole {
         freq_hz: freqs[m],
         zeta: zetas[m],
