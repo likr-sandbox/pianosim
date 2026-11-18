@@ -1,6 +1,9 @@
 # Rust & Wasm build artifacts
 target/
 
+# Generated native demo audio
+/demos/
+
 # Node / Web dependencies and build outputs
 node_modules/
 .pnpm-store/
