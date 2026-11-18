@@ -137,7 +137,7 @@ impl BridgeBank {
             .set_port_resistances(&self.r0, &self.zone_weights, self.duplex.port_resistances());
     }
 
-    /// Retunes Stage 3 treble duplex wire-segment resonances in place for `a4_freq_hz` (`[415, 466]` Hz).
+    /// Retunes Stage 3 treble duplex wire-segment resonances in place for `a4_freq_hz` (`[392.0, 466.2]` Hz).
     pub fn set_a4_freq_hz(&mut self, a4_freq_hz: f32) {
         let prev_r = *self.duplex.port_resistances();
         self.duplex.retune_a4(a4_freq_hz);

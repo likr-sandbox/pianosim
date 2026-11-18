@@ -131,6 +131,8 @@ fn tuning_matches(a: &VoicingSpec, b: &VoicingSpec) -> bool {
     if a.a4_freq_hz != b.a4_freq_hz
         || a.stretch_amount != b.stretch_amount
         || a.string_length_scale != b.string_length_scale
+        || a.temperament != b.temperament
+        || a.condition != b.condition
     {
         return false;
     }
@@ -232,8 +234,9 @@ impl DuplexBank {
     }
 
     /// Retunes all 64 non-speaking duplex wire-segment resonances in place for `voicing`
-    /// (`a4_freq_hz`, Railsback `stretch_amount`, `string_length_scale`, and per-note `pitch_cents`)
-    /// with zero heap allocations. No-op when tuning fields are unchanged.
+    /// (`a4_freq_hz`, `temperament`, `condition`, Railsback `stretch_amount`,
+    /// `string_length_scale`, and per-note `pitch_cents`) with zero heap allocations.
+    /// No-op when tuning fields are unchanged.
     pub fn retune_voicing(&mut self, voicing: &VoicingSpec) {
         let v = voicing.sanitized();
         if self.tuning_initialized && tuning_matches(&v, &self.voicing) {
@@ -254,8 +257,14 @@ impl DuplexBank {
                 let mode_idx = vec_idx * 4 + lane;
                 let (key_u8, mult_u8, detune) = DUPLEX_MODE_LAYOUT[mode_idx];
                 let k = usize::from(key_u8).min(NUM_KEYS - 1);
-                let cents =
+                let base_cents =
                     stretch_table[k] * stretch_scale + f64::from(v.effective_pitch_cents(k));
+                let temp_cents = v.temperament.cent_offset_for_key(k);
+                let cents = if temp_cents == 0.0 {
+                    base_cents
+                } else {
+                    temp_cents + base_cents
+                };
                 let f0_tuned = if cents == 0.0 {
                     specs[k].f0_et_hz
                 } else {
@@ -281,7 +290,7 @@ impl DuplexBank {
     }
 
     /// Retunes all 64 non-speaking duplex wire-segment resonances in place for `a4_freq_hz`
-    /// (`[415.0, 466.0]` Hz) with zero heap allocations. No-op when `a4_freq_hz` is unchanged.
+    /// (`[392.0, 466.2]` Hz) with zero heap allocations. No-op when `a4_freq_hz` is unchanged.
     pub fn retune_a4(&mut self, a4_freq_hz: f32) {
         let mut next = self.voicing.clone();
         next.a4_freq_hz = a4_freq_hz;

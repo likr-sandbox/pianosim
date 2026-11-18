@@ -1,6 +1,8 @@
 use core::f64::consts::TAU;
 
-use piano_spec::{build_scale_design, key_tuned_f0_hz, VoicingSpec, CHOIR_LAYOUTS, TOTAL_STRINGS};
+use piano_spec::{
+    build_scale_design, key_tuned_f0_hz, Temperament, VoicingSpec, CHOIR_LAYOUTS, TOTAL_STRINGS,
+};
 
 use crate::duplex::NUM_DUPLEX_MODES;
 use crate::tests::wdf_absorbed_power_w;
@@ -35,9 +37,46 @@ fn duplex_retune_a4_scales_mode_frequencies_and_clamps_bounds() {
     assert!((f_442 / base_f0 - 442.0 / 440.0).abs() < 5e-4);
 
     bank.retune_a4(300.0);
-    assert_eq!(bank.a4_freq_hz(), 415.0);
+    assert_eq!(bank.a4_freq_hz(), 392.0);
+    let f_392 = bank.mode_freq_hz(0);
+    let v_392 = VoicingSpec::from_globals_with_a4(0.5, 1.0, 1.0, 1.0, 392.0);
+    let specs_392 = build_scale_design(&v_392);
+    let tuned_27_392 = key_tuned_f0_hz(27, &specs_392, &v_392);
+    assert!((f64::from(f_392 / base_f0) - tuned_27_392 / tuned_27_440).abs() < 1e-5);
+
+    bank.retune_a4(500.0);
+    assert_eq!(bank.a4_freq_hz(), 466.2);
     bank.retune_a4(f32::NAN);
     assert_eq!(bank.a4_freq_hz(), 440.0);
+    assert_eq!(bank.mode_freq_hz(0), base_f0);
+}
+
+#[test]
+fn duplex_retune_voicing_syncs_temperament_and_condition_with_default_parity() {
+    let base = DuplexBank::new(48_000.0);
+    let mut bank = DuplexBank::new(48_000.0);
+
+    // Non-Equal temperament shifts modes anchored to non-A pitch classes (mode 0 anchored to key 27 = C3).
+    let werck = VoicingSpec::default().with_temperament(Temperament::WerckmeisterIII);
+    bank.retune_voicing(&werck);
+    let f_werck_0 = bank.mode_freq_hz(0);
+    let expected_cents = Temperament::WerckmeisterIII.cent_offset_for_key(27);
+    let measured_cents = 1200.0 * f64::from(f_werck_0 / base.mode_freq_hz(0)).log2();
+    assert!(
+        (measured_cents - expected_cents).abs() < 0.05,
+        "Werckmeister III duplex shift mismatch: got {measured_cents:.4}, expected {expected_cents:.4}"
+    );
+
+    // Condition > 0.0 perturbs duplex modes deterministically via effective_pitch_cents.
+    let aged = VoicingSpec::default().with_condition(1.0);
+    bank.retune_voicing(&aged);
+    assert_ne!(bank.mode_freq_hz(0), base.mode_freq_hz(0));
+
+    // Restoring default Equal + 440.0 + condition=0.0 yields bit-exact mode frequencies.
+    bank.retune_voicing(&VoicingSpec::default());
+    for m in 0..NUM_DUPLEX_MODES {
+        assert_eq!(bank.mode_freq_hz(m), base.mode_freq_hz(m));
+    }
 }
 
 #[test]
