@@ -19,6 +19,7 @@ const SKIP_DIR_NAMES: &[&str] = &[
     "blob-report",
 ];
 const FORBIDDEN_PATTERNS: &[&str] = &["agpl", "openpiano"];
+const E2E_FORBIDDEN_PATTERNS: &[&str] = &["waitForTimeout"];
 
 /// Summary metrics reported by `check_repo`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -56,8 +57,10 @@ pub fn check_repo(root: &Path) -> Result<CheckSummary, String> {
         let rel = rel_unix_path(root, &abs_path);
         let is_line_target = has_extension(&abs_path, CHECKED_EXTENSIONS);
         let is_clean_target = is_clean_room_target(&rel, &abs_path);
+        let is_e2e_target =
+            rel.starts_with("apps/web/e2e/") && has_extension(&abs_path, &["ts", "js"]);
 
-        if !is_line_target && !is_clean_target {
+        if !is_line_target && !is_clean_target && !is_e2e_target {
             continue;
         }
 
@@ -84,6 +87,16 @@ pub fn check_repo(root: &Path) -> Result<CheckSummary, String> {
             for &pat in FORBIDDEN_PATTERNS {
                 if lower.contains(pat) {
                     violations.push(format!("{rel}: contains forbidden pattern '{pat}'"));
+                }
+            }
+        }
+
+        if is_e2e_target {
+            for &pat in E2E_FORBIDDEN_PATTERNS {
+                if content.contains(pat) {
+                    violations.push(format!(
+                        "{rel}: contains forbidden E2E wall-clock sleep '{pat}'"
+                    ));
                 }
             }
         }
@@ -201,6 +214,23 @@ mod tests {
         .unwrap();
         let err = check_repo(&dir).expect_err("forbidden mention must fail");
         assert!(err.contains("forbidden pattern"));
+
+        fs::remove_file(dir.join("crates/demo/src/bad.rs")).unwrap();
+        fs::create_dir_all(dir.join("apps/web/e2e")).unwrap();
+        fs::write(
+            dir.join("apps/web/e2e/flaky.spec.ts"),
+            "await page.waitForTimeout(100);\n",
+        )
+        .unwrap();
+        let err = check_repo(&dir).expect_err("waitForTimeout in e2e must fail");
+        assert!(err.contains("forbidden E2E wall-clock sleep"));
+
+        fs::write(
+            dir.join("apps/web/e2e/flaky.spec.ts"),
+            "await waitAudioBlocks(page, 64);\n",
+        )
+        .unwrap();
+        check_repo(&dir).expect("deterministic waitAudioBlocks in e2e passes");
 
         let _ = fs::remove_dir_all(&dir);
     }
