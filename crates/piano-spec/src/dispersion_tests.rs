@@ -85,7 +85,7 @@ fn unison_detune_and_polarization_respect_scale_and_determinism() {
     let d0 = unison_detune_cents(A4_KEY_IDX, 0, 3, &nominal);
     let d1 = unison_detune_cents(A4_KEY_IDX, 1, 3, &nominal);
     let d2 = unison_detune_cents(A4_KEY_IDX, 2, 3, &nominal);
-    assert!(d0 < -0.35 && d1.abs() < 0.20 && d2 > 0.35);
+    assert!(d0 < -0.22 && d1.abs() < 0.20 && d2 > 0.22);
     assert_eq!(d0, unison_detune_cents(A4_KEY_IDX, 0, 3, &nominal));
 
     let pv = polarization_offset_cents(A4_KEY_IDX, 1, Polarization::Vertical, &nominal);
@@ -93,10 +93,33 @@ fn unison_detune_and_polarization_respect_scale_and_determinism() {
     assert_eq!(pv, 0.0);
     assert!((0.15..=0.30).contains(&(ph - pv)));
 
-    // C4 (key_idx=39) and A4 (key_idx=48) retain full nominal choir spread.
+    // C4 (key_idx=39) and A4 (key_idx=48) retain nominal 0.2..0.5 cents choir spread.
     let c4_0 = unison_detune_cents(39, 0, 3, &nominal);
     let c4_2 = unison_detune_cents(39, 2, 3, &nominal);
-    assert!(c4_0 < -0.45 && c4_2 > 0.45);
+    assert!(c4_0 < -0.22 && c4_2 > 0.22);
+}
+
+#[test]
+fn bridge_pin_couplings_provide_basal_asymmetry_and_unit_norm() {
+    for (k, layout) in CHOIR_LAYOUTS.iter().enumerate() {
+        let n = layout.strings_per_key;
+        let mut couplings = [(0.0_f64, 0.0_f64); 3];
+        for (s, slot) in couplings.iter_mut().enumerate().take(n as usize) {
+            let theta = bridge_pin_angle_rad(k, s, n);
+            assert!((0.10..=0.28).contains(&theta), "k={k} s={s} theta={theta}");
+            let (cv, ch) = bridge_pin_couplings(k, s, n);
+            assert!(((cv * cv + ch * ch) - 1.0).abs() < 1e-12);
+            assert!(cv > 0.9 && ch > 0.09);
+            *slot = (cv, ch);
+        }
+        if n == 2 {
+            assert!((couplings[0].1 - couplings[1].1).abs() > 0.02);
+        } else if n == 3 {
+            assert!((couplings[0].1 - couplings[1].1).abs() > 0.01);
+            assert!((couplings[1].1 - couplings[2].1).abs() > 0.004);
+            assert!((couplings[0].1 - couplings[2].1).abs() > 0.04);
+        }
+    }
 }
 
 #[test]
@@ -198,12 +221,12 @@ fn equal_440_condition_zero_is_bit_exact_and_condition_adds_deterministic_detune
     let b = VoicingSpec::from_globals_full(0.5, 1.0, 1.0, 1.0, 440.0, Temperament::Equal, 0.0);
     let specs_a = build_scale_design(&a);
     let specs_b = build_scale_design(&b);
-    for k in 0..NUM_KEYS {
+    for (k, layout) in CHOIR_LAYOUTS.iter().enumerate() {
         assert_eq!(
             key_tuned_f0_hz(k, &specs_a, &a).to_bits(),
             key_tuned_f0_hz(k, &specs_b, &b).to_bits()
         );
-        for s in 0..usize::from(CHOIR_LAYOUTS[k].strings_per_key) {
+        for s in 0..usize::from(layout.strings_per_key) {
             for pol in [Polarization::Vertical, Polarization::Horizontal] {
                 assert_eq!(
                     effective_string_f0_hz(k, s, pol, &specs_a, &a).to_bits(),

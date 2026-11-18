@@ -127,6 +127,13 @@ pub const fn key_choir(key_idx: usize) -> Option<ChoirLayout> {
     }
 }
 
+/// Normalized hammer strike ratio `beta(k) = x_strike / L(k)` across `A0..=C8`.
+#[must_use]
+pub fn hammer_beta(key_idx: usize) -> f64 {
+    let x = (key_idx.min(NUM_KEYS - 1) as f64) / ((NUM_KEYS - 1) as f64);
+    0.138 - 0.043 * x
+}
+
 /// Computes the 12-tone equal temperament fundamental frequency in Hz (`A4 = 440.0`).
 ///
 /// Returns `0.0` if `key_idx >= NUM_KEYS`.

@@ -13,10 +13,11 @@ pub mod temperament;
 pub mod voicing;
 
 pub use dispersion::{
-    analyze_bank_mode_counts, count_longitudinal_partials, count_transverse_partials,
-    effective_string_f0_hz, key_tuned_f0_hz, pad_to_simd4, partial_frequency_hz,
-    polarization_offset_cents, railsback_stretch_cents, railsback_stretch_cents_table,
-    scaled_railsback_stretch_cents, splitmix64, unison_detune_cents, BankModeCounts, Polarization,
+    analyze_bank_mode_counts, bridge_pin_angle_rad, bridge_pin_couplings,
+    count_longitudinal_partials, count_transverse_partials, effective_string_f0_hz,
+    key_tuned_f0_hz, pad_to_simd4, partial_frequency_hz, polarization_offset_cents,
+    railsback_stretch_cents, railsback_stretch_cents_table, scaled_railsback_stretch_cents,
+    splitmix64, unison_detune_cents, BankModeCounts, Polarization, BRIDGE_PIN_BASE_ANGLE_RAD,
     LONGITUDINAL_MAX_KEY_IDX, MAX_AUDIBLE_FREQ_HZ, MAX_LONGITUDINAL_PARTIALS_PER_STRING,
     MAX_TRANSVERSE_PARTIALS_PER_STRING,
 };
@@ -27,8 +28,8 @@ pub use preset_codec::{
     PRESET_REDUCED_POLES, PRESET_VERSION,
 };
 pub use scale_design::{
-    build_scale_design, equal_temperament_hz, equal_temperament_hz_with_a4, key_choir, key_to_midi,
-    midi_to_key, string_params_for_key, ChoirLayout, StringPhysicalParams, A4_FREQ_HZ,
+    build_scale_design, equal_temperament_hz, equal_temperament_hz_with_a4, hammer_beta, key_choir,
+    key_to_midi, midi_to_key, string_params_for_key, ChoirLayout, StringPhysicalParams, A4_FREQ_HZ,
     A4_FREQ_MAX_HZ, A4_FREQ_MIN_HZ, CHOIR_LAYOUTS, DAMPED_KEYS, MIDI_A0, MIDI_C8, NUM_KEYS,
     STEEL_DENSITY_KG_M3, STEEL_YOUNGS_MODULUS_PA, TOTAL_STRINGS,
 };

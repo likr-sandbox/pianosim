@@ -181,8 +181,8 @@ const C5_KEY_IDX: usize = 51;
 ///
 /// - Monochords (`strings_per_key <= 1`): strictly `0.0`.
 /// - Bichords (`2`): symmetric spread around `0.0` with organic jitter.
-/// - Trichords (`3`): characteristic `[-d, 0, +d]` triad (`d ~ 0.55..1.10 cents` up to `C5`,
-///   smoothly tapering above `C5` down to `0.25x` at `C8` so high-treble beating stays `< 0.9 Hz`)
+/// - Trichords (`3`): characteristic `[-d, 0, +d]` triad (`d ~ 0.36..0.50 cents` up to `C5`,
+///   smoothly tapering above `C5` down to `~0.42x` at `C8` so high-treble beating stays `< 0.9 Hz`)
 ///   plus fine organic SplitMix64 jitter, scaled by `voicing.unison_detune_scale`.
 ///
 /// Returns exact `0.0` whenever `voicing.effective_unison_detune_scale() == 0.0`.
@@ -208,15 +208,15 @@ pub fn unison_detune_cents(
             .wrapping_add(1)
             .wrapping_mul(0xd6e8_feb8_6659_fd93));
 
-    // Nominal spread d in [0.55, 1.10) cents up to C5, smoothly tapering by 2^(-2/3 * octaves)
-    // above C5 down to 0.25x at C8 (~0.25 cents) to prevent harsh 3..13 Hz high-treble beating.
+    // Nominal spread d in [0.36, 0.50) cents up to C5, smoothly tapering by 2^(-0.42 * octaves)
+    // above C5 down to ~0.42x at C8 (~0.20 cents) to keep high-treble beating < 0.9 Hz.
     let treble_taper = if key_idx > C5_KEY_IDX {
         let octaves_above_c5 = ((key_idx - C5_KEY_IDX) as f64) / 12.0;
-        exp2_f64(-2.0 * octaves_above_c5 / 3.0)
+        exp2_f64(-0.42 * octaves_above_c5)
     } else {
         1.0
     };
-    let d = 0.55 + 0.55 * hash_to_unit(key_seed);
+    let d = 0.36 + 0.14 * hash_to_unit(key_seed);
     let base_offset = match (strings_per_key, string_in_choir) {
         (2, 0) => -0.55 * d,
         (2, 1) => 0.55 * d,
@@ -225,7 +225,7 @@ pub fn unison_detune_cents(
         (3, 2) => d,
         _ => 0.0,
     };
-    let jitter = 0.14 * hash_to_signed_unit(str_seed);
+    let jitter = 0.10 * hash_to_signed_unit(str_seed);
     let cond = f64::from(voicing.effective_condition());
     let cond_drift = if cond == 0.0 {
         0.0
@@ -233,6 +233,46 @@ pub fn unison_detune_cents(
         1.8 * cond * hash_to_signed_unit(str_seed ^ 0x434f_4e44_554e_4953)
     };
     (base_offset + jitter + cond_drift) * treble_taper * scale
+}
+
+/// Nominal vertical-to-horizontal bridge-pin inclination angle (`atan(0.18)` in radians).
+pub const BRIDGE_PIN_BASE_ANGLE_RAD: f64 = 0.178_092_938_231_197_6;
+
+/// Deterministic structural bridge-pin V/H coupling angle `theta_pin(k, s)` in radians,
+/// independent of `VoicingSpec::condition` and `unison_detune_scale`.
+#[must_use]
+pub fn bridge_pin_angle_rad(key_idx: usize, string_in_choir: usize, strings_per_key: u8) -> f64 {
+    let k = key_idx.min(NUM_KEYS - 1);
+    let n_str = strings_per_key.clamp(1, 3);
+    let s = string_in_choir.min((n_str as usize) - 1);
+    let spread = match (n_str, s) {
+        (2, 0) => -0.032,
+        (2, 1) => 0.032,
+        (3, 0) => -0.045,
+        (3, 1) => 0.004,
+        (3, 2) => 0.045,
+        _ => 0.0,
+    };
+    let seed = (k as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (s as u64)
+            .wrapping_add(1)
+            .wrapping_mul(0xbf58_476d_1ce4_e5b9)
+        ^ 0x5049_4e5f_414e_474c;
+    let jitter = 0.018 * hash_to_signed_unit(seed);
+    (BRIDGE_PIN_BASE_ANGLE_RAD + spread + jitter).clamp(0.10, 0.28)
+}
+
+/// Returns normalized `(c_vert, c_horiz) = (cos(theta_pin), sin(theta_pin))` bridge-pin
+/// coupling projections for string `(key_idx, string_in_choir)`.
+#[must_use]
+pub fn bridge_pin_couplings(
+    key_idx: usize,
+    string_in_choir: usize,
+    strings_per_key: u8,
+) -> (f64, f64) {
+    let theta = bridge_pin_angle_rad(key_idx, string_in_choir, strings_per_key);
+    let (sin_t, cos_t) = crate::math::sin_cos_f64(theta);
+    (cos_t, sin_t)
 }
 
 /// Deterministic frequency offset (in cents) arising from bridge boundary
