@@ -324,6 +324,25 @@ impl PianoEngine {
         self.core.bridge.set_duplex_gain(gain);
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_bridge_quiescent(&self) -> bool {
+        self.core.bridge.is_quiescent()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn excite_bridge_subnormal_for_test(&mut self) {
+        let mut a = [0.0_f32; piano_spec::TOTAL_STRINGS];
+        a[140] = 1.0e-14;
+        let mut b = [0.0_f32; piano_spec::TOTAL_STRINGS];
+        let mut z = [0.0_f32; piano_bridge::NUM_BRIDGE_ZONES];
+        let _ = self.core.bridge.step_bridge_sample(
+            &a,
+            &[0.0; piano_bridge::NUM_BRIDGE_ZONES],
+            &mut b,
+            &mut z,
+        );
+    }
+
     /// Processes sample-accurate `events` and renders Stage 4 acoustic sound into `out_l`/`out_r`
     /// with zero heap allocations.
     pub fn render_block(&mut self, events: &[SampleEvent], out_l: &mut [f32], out_r: &mut [f32]) {

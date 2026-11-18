@@ -34,6 +34,9 @@ mod m6_tests;
 mod m6_acoustic_tests;
 
 #[cfg(test)]
+mod wave2_tests;
+
+#[cfg(test)]
 mod tests {
     use core::f64::consts::TAU;
 
