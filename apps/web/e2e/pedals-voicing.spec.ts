@@ -208,56 +208,68 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
   test('Space panel: lid and perspective reconfigurations execute clickless crossfades', async ({
     page,
   }) => {
-    const a4Key = page.locator('[data-midi="69"]');
-    await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
+    const e5Key = page.locator('[data-midi="76"]'); // E5 (659 Hz): strong HF harmonics across lid LP/shelf
+    const waitBlocks = async (delta: number) => {
+      const b0 = await page.evaluate(() => window.__PIANO_DIAG__?.telemetry.blockCount ?? 0);
+      await expect
+        .poll(async () => {
+          const s = await sampleDestinationAudio(page);
+          expect(s.nonFiniteCount).toBe(0);
+          expect(s.peak).toBeLessThanOrEqual(1.0);
+          return page.evaluate(() => window.__PIANO_DIAG__?.telemetry.blockCount ?? 0);
+        }, { timeout: 6000 })
+        .toBeGreaterThanOrEqual(b0 + delta);
+    };
+    const restrikeE5 = async () => {
+      await e5Key.dispatchEvent('pointerup', { buttons: 0 });
+      await e5Key.dispatchEvent('pointerdown', { buttons: 1 });
+      await waitBlocks(48); // ~128 ms rendered audio post-attack
+      return sampleDestinationAudio(page);
+    };
+
     await setSlider(page, 'sustain-slider', 1.0);
-    await page.waitForTimeout(250);
+    await e5Key.dispatchEvent('pointerdown', { buttons: 1 });
+    await waitBlocks(48);
+    const initialOpen = await sampleDestinationAudio(page);
+    expect(initialOpen.rms).toBeGreaterThan(0.002);
 
-    // Switch to Closed lid while A4 is sounding, allow PrepWorker + BlobStreamer (~300ms) + 8ms crossfade to settle
+    // Closed lid: wait >=192 audio blocks (~512ms) for PrepWorker + BlobStreamer (108 chunks) + 8ms crossfade
     await page.getByTestId('lid-closed').click();
-    await page.waitForTimeout(450);
-    const closedCrossfade = await sampleDestinationAudio(page);
-    expect(closedCrossfade.nonFiniteCount).toBe(0);
-    expect(closedCrossfade.peak).toBeLessThanOrEqual(1.0);
+    await waitBlocks(192);
+    let closedLid = initialOpen;
+    await expect.poll(async () => {
+      closedLid = await restrikeE5();
+      return (
+        closedLid.rms > 0.002 &&
+        closedLid.spectralCentroidHz < initialOpen.spectralCentroidHz * 0.9 &&
+        closedLid.highFreqRatio < initialOpen.highFreqRatio * 0.25
+      );
+    }, { timeout: 6000, intervals: [100] }).toBe(true);
 
-    // Measure settled Closed lid spectrum at consistent post-attack time
-    await a4Key.dispatchEvent('pointerup', { buttons: 0 });
-    await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(150);
-    const closedLid = await sampleDestinationAudio(page);
-    expect(closedLid.nonFiniteCount).toBe(0);
-    expect(closedLid.peak).toBeLessThanOrEqual(1.0);
-
-    // Switch back to Open lid while A4 is sounding and verify clickless crossfade + restored HF energy
+    // Open lid: verify clickless crossfade + restored HF energy & brightness
     await page.getByTestId('lid-open').click();
-    await page.waitForTimeout(450);
-    const openCrossfade = await sampleDestinationAudio(page);
-    expect(openCrossfade.nonFiniteCount).toBe(0);
-    expect(openCrossfade.peak).toBeLessThanOrEqual(1.0);
+    await waitBlocks(192);
+    let openLid = closedLid;
+    await expect.poll(async () => {
+      openLid = await restrikeE5();
+      return (
+        openLid.rms > 0.002 &&
+        openLid.highFreqRatio > closedLid.highFreqRatio * 10 &&
+        openLid.spectralCentroidHz > closedLid.spectralCentroidHz * 1.15
+      );
+    }, { timeout: 6000, intervals: [100] }).toBe(true);
+    expect(openLid.highFreqRatio).toBeGreaterThan(0);
 
-    await a4Key.dispatchEvent('pointerup', { buttons: 0 });
-    await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(150);
-    const openLid = await sampleDestinationAudio(page);
-    expect(openLid.highFreqRatio).toBeGreaterThan(closedLid.highFreqRatio);
-
-    // Switch through listening perspectives
-    const perspectives = [
-      'perspective-close',
-      'perspective-hall',
-      'perspective-binaural',
-      'perspective-player',
-    ];
-    for (const p of perspectives) {
+    for (const p of ['perspective-close', 'perspective-hall', 'perspective-binaural', 'perspective-player']) {
       await page.getByTestId(p).click();
-      await page.waitForTimeout(120);
+      await waitBlocks(48);
       const stats = await sampleDestinationAudio(page);
       expect(stats.nonFiniteCount).toBe(0);
       expect(stats.peak).toBeLessThanOrEqual(1.0);
       expect(stats.rms).toBeGreaterThan(0.001);
     }
 
-    await a4Key.dispatchEvent('pointerup', { buttons: 0 });
+    await e5Key.dispatchEvent('pointerup', { buttons: 0 });
     await setSlider(page, 'sustain-slider', 0.0);
   });
 
