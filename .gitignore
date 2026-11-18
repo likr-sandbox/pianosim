@@ -39,3 +39,5 @@ Thumbs.db
 !.agents/AGENTS.md
 !.agents/rules/
 !.agents/rules/**
+!.agents/skills/
+!.agents/skills/**
