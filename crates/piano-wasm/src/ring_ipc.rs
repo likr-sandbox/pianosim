@@ -1,6 +1,8 @@
 //! Linear-memory zero-allocation IPC context for `AudioWorkletGlobalScope`.
 
-use piano_engine::{space_blob_len_for_sample_rate, voicing_blob_len, EventQueue, PianoEngine};
+use piano_engine::{
+    space_blob_len_for_sample_rate, voicing_blob_len, BodyArchetype, EventQueue, PianoEngine,
+};
 use piano_spec::{EventKind, LidState, ListenerPerspective, PedalKind, SampleEvent, VoicingSpec};
 
 /// Maximum audio frames rendered per `piano_render` call.
@@ -110,6 +112,79 @@ impl WasmContext {
     #[inline]
     pub fn set_space(&mut self, perspective: ListenerPerspective, lid: LidState) {
         self.engine.set_space(perspective, lid);
+    }
+
+    /// Sets hall reverb decay `[0.0..=3.2 s]` and wet mix `[0.0..=1.0]`.
+    #[inline]
+    pub fn set_reverb(&mut self, decay_s: f32, mix: f32) {
+        self.engine.set_reverb(decay_s, mix);
+    }
+
+    /// Returns active `(reverb_decay_s, reverb_mix)`.
+    #[inline]
+    #[must_use]
+    pub const fn reverb_params(&self) -> (f32, f32) {
+        self.engine.reverb_params()
+    }
+
+    /// Returns the active [`BodyArchetype`].
+    #[inline]
+    #[must_use]
+    pub const fn body_archetype(&self) -> BodyArchetype {
+        self.engine.body_archetype()
+    }
+
+    /// Synchronously switches `(body, perspective, lid)` across Stage 3 and Stage 4.
+    #[inline]
+    pub fn set_body_space(
+        &mut self,
+        body: BodyArchetype,
+        perspective: ListenerPerspective,
+        lid: LidState,
+    ) -> bool {
+        self.engine.set_body_space(body, perspective, lid)
+    }
+
+    /// Streams one slice from `staging[0..chunk_len]` into the standby spatial radiator for `body`.
+    pub fn stage_body_space_chunk(
+        &mut self,
+        body: BodyArchetype,
+        perspective: ListenerPerspective,
+        lid: LidState,
+        blob_off: usize,
+        chunk_len: usize,
+        total_len: usize,
+    ) -> bool {
+        let Some(chunk_end) = blob_off.checked_add(chunk_len) else {
+            return false;
+        };
+        if chunk_len == 0
+            || chunk_len > self.staging.len()
+            || total_len == 0
+            || chunk_end > total_len
+        {
+            return false;
+        }
+        self.engine.stage_precomputed_body_space_chunk(
+            body,
+            perspective,
+            lid,
+            blob_off,
+            &self.staging[..chunk_len],
+            total_len,
+        )
+    }
+
+    /// Commits the streamed standby spatial radiator for `(body, perspective, lid)`.
+    #[inline]
+    pub fn commit_body_space(
+        &mut self,
+        body: BodyArchetype,
+        perspective: ListenerPerspective,
+        lid: LidState,
+    ) -> bool {
+        self.engine
+            .commit_precomputed_body_space(body, perspective, lid)
     }
 
     /// Updates only hammer hardness smoothly (`< 50 us`), avoiding string table rebuild.

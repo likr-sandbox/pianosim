@@ -1,7 +1,7 @@
 //! Off-thread Prep Web Worker context (`SpacePrepContext` + `VoicingPrepContext`)
 //! avoiding real-time audio buffer allocations.
 
-use piano_engine::{SpacePrepContext, VoicingPrepContext};
+use piano_engine::{embedded_body_bytes, BodyArchetype, SpacePrepContext, VoicingPrepContext};
 use piano_spec::{LidState, ListenerPerspective, VoicingSpec};
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -15,6 +15,7 @@ enum LastKind {
 pub struct PrepContext {
     space: SpacePrepContext,
     voicing: VoicingPrepContext,
+    body_archetype: BodyArchetype,
     last: LastKind,
 }
 
@@ -30,15 +31,43 @@ impl PrepContext {
         Self {
             space: SpacePrepContext::new_concert_grand(f64::from(sr)),
             voicing: VoicingPrepContext::new(sr),
+            body_archetype: BodyArchetype::ConcertGrand,
             last: LastKind::None,
         }
     }
 
-    /// Precomputes Stage 4 spatial FIR + NUPOLS spectra and returns `f32` element count.
+    /// Returns the currently loaded [`BodyArchetype`] in this prep context.
+    #[must_use]
+    #[inline]
+    pub const fn body_archetype(&self) -> BodyArchetype {
+        self.body_archetype
+    }
+
+    /// Precomputes Stage 4 spatial FIR + NUPOLS spectra for the active body and returns `f32` element count.
     pub fn prepare_space(&mut self, perspective: ListenerPerspective, lid: LidState) -> usize {
         let len = self.space.prepare_space(perspective, lid).len();
         self.last = LastKind::Space;
         len
+    }
+
+    /// Updates the loaded body archetype if needed and precomputes Stage 4 spatial FIR + NUPOLS spectra.
+    pub fn prepare_space_for_body(
+        &mut self,
+        body: BodyArchetype,
+        perspective: ListenerPerspective,
+        lid: LidState,
+    ) -> usize {
+        if self.body_archetype != body {
+            if self
+                .space
+                .set_body_preset_bytes(embedded_body_bytes(body))
+                .is_err()
+            {
+                return 0;
+            }
+            self.body_archetype = body;
+        }
+        self.prepare_space(perspective, lid)
     }
 
     /// Precomputes Stage 2/3 tuning tables and returns `f32` element count.
