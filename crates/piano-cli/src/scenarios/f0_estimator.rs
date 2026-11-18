@@ -116,13 +116,12 @@ fn symmetrize_and_ridge<const N: usize>(m: &mut [[f64; N]; N]) {
     }
 }
 
-/// Short-window fundamental estimator using harmonic-subspace orthogonalization.
+/// Short-window fundamental estimator using joint harmonic-subspace weighted least squares.
 ///
-/// Step 1 estimates `(f_hat, b_hat)` via `{1, 1..=6}` dispersion-aware weighted least squares.
-/// Step 2 projects out `Z = {1, partials 2..=6}` via Schur complement so `f_1` is isolated
-/// without 2nd-harmonic leakage, DC bias, or inharmonicity pull.
+/// Evaluates `{1, 1..=6}` dispersion-aware weighted least-squares explained energy across
+/// candidate `(f_1, B)` pairs and refines `f_1` directly on the joint objective (avoiding
+/// collinearity bias from holding higher partials fixed across short `~1.1`-cycle windows).
 fn measure_f0_short_window_hz(mono: &[f32], f_nominal_hz: f64, sr: f64) -> f64 {
-    const NZ: usize = 11; // DC + {2..=6} partials
     let n = mono.len();
     let denom = (n - 1).max(1) as f64;
     let weights: Vec<f64> = (0..n)
@@ -142,7 +141,7 @@ fn measure_f0_short_window_hz(mono: &[f32], f_nominal_hz: f64, sr: f64) -> f64 {
     let mut f_hat = best_hat;
     let mut b_hat = 0.00025_f64;
     for &b_try in &[0.0, 0.00015, 0.00033, 0.0006, 0.0010, 0.0016] {
-        for sub in -8..=8 {
+        for sub in -12..=12 {
             let f_try = best_hat * 2.0_f64.powf((sub as f64 * 0.5) / 1200.0);
             let e = harmonic_ls_energy(mono, &weights, f_try, b_try, sr);
             if e > best_e {
@@ -153,100 +152,20 @@ fn measure_f0_short_window_hz(mono: &[f32], f_nominal_hz: f64, sr: f64) -> f64 {
         }
     }
 
-    let inv_root1 = 1.0 / (1.0 + b_hat).sqrt();
-    let mut z_cols = vec![[0.0_f64; NZ]; n];
-    let mut g_zz = [[0.0_f64; NZ]; NZ];
-    let mut rhs_z = [0.0_f64; NZ];
-    for (i, (&x, &w)) in mono.iter().zip(weights.iter()).enumerate() {
-        let t = (i as f64) / sr;
-        let mut row = [0.0_f64; NZ];
-        row[0] = 1.0;
-        for h in 2..=6 {
-            let hf = h as f64;
-            let fh = hf * f_hat * (1.0 + b_hat * hf * hf).sqrt() * inv_root1;
-            let ang = TAU * fh * t;
-            row[1 + 2 * (h - 2)] = ang.cos();
-            row[2 + 2 * (h - 2)] = ang.sin();
-        }
-        z_cols[i] = row;
-        let wx = w * f64::from(x);
-        for p in 0..NZ {
-            rhs_z[p] += row[p] * wx;
-            let wr = w * row[p];
-            for q in p..NZ {
-                g_zz[p][q] += wr * row[q];
-            }
-        }
-    }
-    symmetrize_and_ridge(&mut g_zz);
-    let coef_z = solve_linear(g_zz, rhs_z).unwrap_or([0.0; NZ]);
-    let res: Vec<f64> = mono
-        .iter()
-        .enumerate()
-        .map(|(i, &x)| {
-            let z_fit: f64 = z_cols[i]
-                .iter()
-                .zip(coef_z.iter())
-                .map(|(&z, &c)| z * c)
-                .sum();
-            f64::from(x) - z_fit
-        })
-        .collect();
-
-    let score_f1 = |f_try: f64| -> f64 {
-        let w_rad = TAU * f_try / sr;
-        let (dc, ds) = (w_rad.cos(), w_rad.sin());
-        let (mut c, mut s) = (1.0_f64, 0.0_f64);
-        let (mut pc, mut ps) = (0.0_f64, 0.0_f64);
-        let (mut cc, mut ss, mut cs) = (0.0_f64, 0.0_f64, 0.0_f64);
-        let mut qc = [0.0_f64; NZ];
-        let mut qs = [0.0_f64; NZ];
-        for i in 0..n {
-            let wi = weights[i];
-            let wc = wi * c;
-            let ws = wi * s;
-            pc += wc * res[i];
-            ps += ws * res[i];
-            cc += wc * c;
-            ss += ws * s;
-            cs += wc * s;
-            let zr = &z_cols[i];
-            for p in 0..NZ {
-                qc[p] += wc * zr[p];
-                qs[p] += ws * zr[p];
-            }
-            let nc = c * dc - s * ds;
-            s = s * dc + c * ds;
-            c = nc;
-        }
-        let Some(iqc) = solve_linear(g_zz, qc) else {
-            return 0.0;
-        };
-        let Some(iqs) = solve_linear(g_zz, qs) else {
-            return 0.0;
-        };
-        let gcc = (cc - qc.iter().zip(iqc.iter()).map(|(a, b)| a * b).sum::<f64>()).max(1.0e-12);
-        let gss = (ss - qs.iter().zip(iqs.iter()).map(|(a, b)| a * b).sum::<f64>()).max(1.0e-12);
-        let gcs = cs - qc.iter().zip(iqs.iter()).map(|(a, b)| a * b).sum::<f64>();
-        let det = (gcc * gss - gcs * gcs).max(1.0e-18);
-        ((gss * pc * pc - 2.0 * gcs * pc * ps + gcc * ps * ps) / det).max(1.0e-30)
-    };
-
-    let mut best_f = f_nominal_hz;
-    let mut best_p = 0.0_f64;
-    for step in -200..=200 {
-        let f_try = f_nominal_hz * 2.0_f64.powf((step as f64 * 0.5) / 1200.0);
-        let p = score_f1(f_try);
-        if p > best_p {
-            best_p = p;
+    let dc = 0.25_f64;
+    let mut best_f = f_hat;
+    for sub in -8..=8 {
+        let f_try = f_hat * 2.0_f64.powf((sub as f64 * dc) / 1200.0);
+        let e = harmonic_ls_energy(mono, &weights, f_try, b_hat, sr);
+        if e > best_e {
+            best_e = e;
             best_f = f_try;
         }
     }
-    let dc = 0.5_f64;
     let r = 2.0_f64.powf(dc / 1200.0);
-    let p_lo = score_f1(best_f / r);
-    let p_mid = score_f1(best_f);
-    let p_hi = score_f1(best_f * r);
+    let p_lo = harmonic_ls_energy(mono, &weights, best_f / r, b_hat, sr);
+    let p_mid = best_e;
+    let p_hi = harmonic_ls_energy(mono, &weights, best_f * r, b_hat, sr);
     let denom_q = p_lo - 2.0 * p_mid + p_hi;
     let shift = if denom_q < 0.0 {
         (0.5 * (p_lo - p_hi) / denom_q).clamp(-1.0, 1.0) * dc
@@ -292,13 +211,20 @@ pub fn measure_f0_hz(mono: &[f32], f_nominal_hz: f64, sr: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scenarios::spectral_utils::mono_mix;
+    use piano_engine::PianoEngine;
+    use piano_spec::{
+        build_scale_design, key_tuned_f0_hz, midi_to_key, partial_frequency_hz, EventKind,
+        SampleEvent, VoicingSpec,
+    };
 
-    fn synth_inharmonic_piano_tone(
+    fn synth_inharmonic_piano_tone_with_phase(
         f1_hz: f64,
         b_inharm: f64,
         sr: f64,
         len: usize,
         dc: f64,
+        phase0: f64,
         amps: &[f64],
     ) -> Vec<f32> {
         let f0 = f1_hz / (1.0 + b_inharm).sqrt();
@@ -309,12 +235,50 @@ mod tests {
                 for (idx, &a) in amps.iter().enumerate() {
                     let h = (idx + 1) as f64;
                     let fh = h * f0 * (1.0 + b_inharm * h * h).sqrt();
-                    let phase = (idx as f64) * 0.63;
+                    let phase = phase0 + (idx as f64) * 0.63;
                     v += a * (TAU * fh * t + phase).sin();
                 }
                 v as f32
             })
             .collect()
+    }
+
+    fn synth_inharmonic_piano_tone(
+        f1_hz: f64,
+        b_inharm: f64,
+        sr: f64,
+        len: usize,
+        dc: f64,
+        amps: &[f64],
+    ) -> Vec<f32> {
+        synth_inharmonic_piano_tone_with_phase(f1_hz, b_inharm, sr, len, dc, 0.0, amps)
+    }
+
+    fn render_note(
+        midi_key: u8,
+        nonlinear: bool,
+        total_frames: usize,
+        velocity_u16: u16,
+    ) -> Vec<f32> {
+        let mut engine = PianoEngine::new(48_000.0);
+        engine.set_nonlinear_coupling(nonlinear, nonlinear);
+        let mut out_l = vec![0.0_f32; total_frames];
+        let mut out_r = vec![0.0_f32; total_frames];
+        let ev = [SampleEvent {
+            sample_offset: 0,
+            kind: EventKind::NoteOn {
+                midi_key,
+                velocity_u16,
+            },
+        }];
+        let mut pos = 0;
+        while pos < total_frames {
+            let n = (total_frames - pos).min(128);
+            let cur = if pos == 0 { &ev[..] } else { &[] };
+            engine.render_block_bridge(cur, &mut out_l[pos..pos + n], &mut out_r[pos..pos + n]);
+            pos += n;
+        }
+        mono_mix(&out_l, &out_r)
     }
 
     #[test]
@@ -339,29 +303,153 @@ mod tests {
     }
 
     #[test]
+    fn measure_f0_short_window_a0_phase_and_freq_sweep_invariant() {
+        let sr = 48_000.0_f64;
+        let n_40ms = (0.040 * sr).round() as usize;
+        for &f1_true in &[27.30, 27.62, 27.85, 28.10] {
+            for &phase0 in &[0.0, 1.1, 2.3, 4.1] {
+                let sig = synth_inharmonic_piano_tone_with_phase(
+                    f1_true,
+                    0.00033,
+                    sr,
+                    n_40ms,
+                    0.05,
+                    phase0,
+                    &[0.10, 0.85, 0.45, 0.25],
+                );
+                let f_est = measure_f0_hz(&sig, 27.5, sr);
+                let err_cents = (1200.0 * (f_est / f1_true).log2()).abs();
+                assert!(
+                    err_cents < 1.0,
+                    "A0 8.5x 2nd-harm phase sweep failed at f1={f1_true}, ph={phase0}: est={f_est:.4} Hz ({err_cents:.3} cents)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn measure_f0_short_window_a0_20x_2nd_harmonic_phase_sweep() {
+        let sr = 48_000.0_f64;
+        let n_40ms = (0.040 * sr).round() as usize;
+        for &f1_true in &[27.30, 27.62, 27.85, 28.10] {
+            for &phase0 in &[0.0, 1.1, 2.3, 4.1] {
+                let sig = synth_inharmonic_piano_tone_with_phase(
+                    f1_true,
+                    0.00033,
+                    sr,
+                    n_40ms,
+                    0.20,
+                    phase0,
+                    &[0.05, 1.00, 0.70, 0.40],
+                );
+                let f_est = measure_f0_hz(&sig, 27.5, sr);
+                let err_cents = (1200.0 * (f_est / f1_true).log2()).abs();
+                assert!(
+                    err_cents < 1.5,
+                    "A0 20x 2nd-harm phase sweep failed at f1={f1_true}, ph={phase0}: est={f_est:.4} Hz ({err_cents:.3} cents)"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn measure_f0_c2_short_and_long_windows_accurate_with_strong_harmonics() {
         let sr = 48_000.0_f64;
         let f1_true = 65.72; // +8.3 cents above C2 (65.406 Hz)
         let n_40ms = (0.040 * sr).round() as usize;
         let n_long = 16_384_usize;
 
-        let sig_short =
-            synth_inharmonic_piano_tone(f1_true, 0.00018, sr, n_40ms, 0.02, &[0.25, 0.80, 0.40]);
-        let sig_long =
-            synth_inharmonic_piano_tone(f1_true, 0.00018, sr, n_long, 0.02, &[0.25, 0.80, 0.40]);
+        for &phase0 in &[0.0, 1.1, 2.3, 4.1] {
+            let sig_short = synth_inharmonic_piano_tone_with_phase(
+                f1_true,
+                0.00018,
+                sr,
+                n_40ms,
+                0.02,
+                phase0,
+                &[0.25, 0.80, 0.40],
+            );
+            let sig_long = synth_inharmonic_piano_tone_with_phase(
+                f1_true,
+                0.00018,
+                sr,
+                n_long,
+                0.02,
+                phase0,
+                &[0.25, 0.80, 0.40],
+            );
 
-        let est_short = measure_f0_hz(&sig_short, 65.406, sr);
-        let est_long = measure_f0_hz(&sig_long, 65.406, sr);
-        let err_short = (1200.0 * (est_short / f1_true).log2()).abs();
-        let err_long = (1200.0 * (est_long / f1_true).log2()).abs();
+            let est_short = measure_f0_hz(&sig_short, 65.406, sr);
+            let est_long = measure_f0_hz(&sig_long, 65.406, sr);
+            let err_short = (1200.0 * (est_short / f1_true).log2()).abs();
+            let err_long = (1200.0 * (est_long / f1_true).log2()).abs();
 
+            assert!(
+                err_short < 0.5,
+                "C2 40ms ph={phase0} error {err_short:.3} cents (est={est_short:.4})"
+            );
+            assert!(
+                err_long < 0.5,
+                "C2 341ms ph={phase0} error {err_long:.3} cents (est={est_long:.4})"
+            );
+        }
+    }
+
+    #[test]
+    fn measure_f0_real_a0_and_c2_linear_no_phantom_chirp_and_nonlinear_authentic_chirp() {
+        let sr = 48_000.0_f64;
+        let voicing = VoicingSpec::default();
+        let specs = build_scale_design(&voicing);
+
+        // A0 (27.127 Hz): >= 2.2 cycles (~81 ms = 3893 samples) spans > 2 bridge reflections.
+        let key_a0 = midi_to_key(21).expect("A0");
+        let f_nom_a0 = partial_frequency_hz(
+            key_tuned_f0_hz(key_a0, &specs, &voicing),
+            specs[key_a0].inharmonicity_b,
+            1,
+        );
+        let n_a0_early = ((2.2 / f_nom_a0) * sr).round() as usize;
+        let a0_lin = render_note(21, false, 49_152, u16::MAX);
+        let a0_nl = render_note(21, true, 49_152, u16::MAX);
+        let a0_lin_early = measure_f0_hz(&a0_lin[240..240 + n_a0_early], f_nom_a0, sr);
+        let a0_lin_late = measure_f0_hz(&a0_lin[32_768..49_152], f_nom_a0, sr);
+        let a0_lin_chirp = 1200.0 * (a0_lin_early / a0_lin_late).log2();
+        let a0_nl_early = measure_f0_hz(&a0_nl[240..240 + n_a0_early], f_nom_a0, sr);
+        let a0_nl_late = measure_f0_hz(&a0_nl[32_768..49_152], f_nom_a0, sr);
+        let a0_nl_chirp = 1200.0 * (a0_nl_early / a0_nl_late).log2();
         assert!(
-            err_short < 0.15,
-            "C2 40ms error {err_short:.3} cents (est={est_short:.4})"
+            a0_lin_chirp.abs() < 2.0,
+            "Linear A0 ({n_a0_early} smp) showed phantom chirp: {a0_lin_chirp:+.2}c (early={a0_lin_early:.3}, late={a0_lin_late:.3})"
         );
         assert!(
-            err_long < 0.10,
-            "C2 341ms error {err_long:.3} cents (est={est_long:.4})"
+            a0_nl_chirp > 2.0,
+            "Nonlinear ff A0 ({n_a0_early} smp) missing authentic strike chirp: {a0_nl_chirp:+.2}c"
+        );
+
+        // C2 (64.96 Hz): 40 ms (1920 samples = 2.60 cycles).
+        let key_c2 = midi_to_key(36).expect("C2");
+        let f_nom_c2 = partial_frequency_hz(
+            key_tuned_f0_hz(key_c2, &specs, &voicing),
+            specs[key_c2].inharmonicity_b,
+            1,
+        );
+        let c2_lin = render_note(36, false, 49_152, u16::MAX);
+        let c2_nl = render_note(36, true, 49_152, u16::MAX);
+        let c2_lin_w1 = measure_f0_hz(&c2_lin[240..2160], f_nom_c2, sr);
+        let c2_lin_w2 = measure_f0_hz(&c2_lin[2400..4320], f_nom_c2, sr);
+        let c2_lin_late = measure_f0_hz(&c2_lin[32_768..49_152], f_nom_c2, sr);
+        let c2_lin_c1 = 1200.0 * (c2_lin_w1 / c2_lin_late).log2();
+        let c2_lin_c2 = 1200.0 * (c2_lin_w2 / c2_lin_late).log2();
+        let c2_nl_w1 = measure_f0_hz(&c2_nl[240..2160], f_nom_c2, sr);
+        let c2_nl_late = measure_f0_hz(&c2_nl[32_768..49_152], f_nom_c2, sr);
+        let c2_nl_chirp = 1200.0 * (c2_nl_w1 / c2_nl_late).log2();
+        assert!(
+            c2_lin_c1.abs() < 2.0 && c2_lin_c2.abs() < 2.0,
+            "Linear C2 40ms showed phantom chirp: w1={c2_lin_c1:+.2}c, w2={c2_lin_c2:+.2}c"
+        );
+        assert!(
+            c2_nl_chirp > 2.0,
+            "Nonlinear ff C2 40ms missing authentic strike chirp: {c2_nl_chirp:+.2}c"
         );
     }
 }

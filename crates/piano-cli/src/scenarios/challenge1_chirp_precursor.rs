@@ -120,9 +120,11 @@ pub fn verify_challenge1() -> Result<Challenge1Report, String> {
             render_timeline(&mut eng, 17_152, &[note_on(test_key, 6_000)])
         };
 
-        // Early window: first 40 ms (1920 samples) or early post-contact
-        let early_len = (0.040 * SR64).round() as usize;
-        let early_start = (0.005 * SR64).round() as usize; // 5 ms to 45 ms
+        // Early window: >= 40 ms and >= 2.2 fundamental cycles so bass strikes span multiple
+        // bridge reflections rather than truncating to a single pre-period pulse.
+        let early_start = (0.005 * SR64).round() as usize; // 5 ms post-strike
+        let early_len = (((2.2 / f_nom) * SR64).max(0.040 * SR64).round() as usize)
+            .min(mono_pp.len().saturating_sub(early_start));
         let f_early = measure_f0_hz(&mono_ff[early_start..early_start + early_len], f_nom, SR64);
         let f_late = measure_f0_hz(&mono_ff[32_768..49_152], f_nom, SR64);
         let f_pp = measure_f0_hz(&mono_pp[early_start..early_start + early_len], f_nom, SR64);
