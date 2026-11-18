@@ -1,5 +1,11 @@
 import {
+  A4_FREQ_DEFAULT,
+  A4_FREQ_MAX,
+  A4_FREQ_MIN,
   BODY_CONCERT_GRAND,
+  CONDITION_DEFAULT,
+  CONDITION_MAX,
+  CONDITION_MIN,
   REVERB_DECAY_DEFAULT,
   REVERB_DECAY_MAX,
   REVERB_DECAY_MIN,
@@ -12,6 +18,7 @@ import {
   type WorkletOutboundMessage,
 } from './abi';
 import { BlobStreamer, warmPrepInstallers } from './blob-streamer';
+import { WorkletRecorderPool } from './worklet-recorder';
 
 declare abstract class AudioWorkletProcessor {
   readonly port: MessagePort;
@@ -38,12 +45,14 @@ const ACTIVE12_WARMUP_KEYS = [21, 28, 36, 43, 48, 55, 60, 64, 67, 76, 88, 100];
 
 const REQUIRED_EXPORTS: ReadonlyArray<keyof PianoWasmExports> = [
   'memory', 'piano_init', 'piano_destroy', 'piano_note_on', 'piano_note_off', 'piano_pedal',
-  'piano_all_notes_off', 'piano_set_voicing', 'piano_set_hammer_hardness', 'piano_set_space',
+  'piano_all_notes_off', 'piano_set_voicing', 'piano_set_voicing_full',
+  'piano_set_concert_pitch', 'piano_set_temperament', 'piano_set_condition',
+  'piano_set_hammer_hardness', 'piano_set_space',
   'piano_set_reverb', 'piano_set_body_space', 'piano_staging_ptr', 'piano_staging_offset_ptr',
   'piano_stage_space_chunk', 'piano_stage_body_space_chunk', 'piano_commit_space',
   'piano_commit_body_space', 'piano_is_space_crossfading', 'piano_apply_space_blob',
-  'piano_apply_voicing_blob', 'piano_render', 'piano_out_l_ptr', 'piano_out_r_ptr',
-  'piano_telemetry_ptr',
+  'piano_apply_voicing_blob', 'piano_apply_voicing_blob_ex', 'piano_render',
+  'piano_out_l_ptr', 'piano_out_r_ptr', 'piano_telemetry_ptr',
 ];
 
 const clamp = (v: number, lo: number, hi: number, fallback: number): number =>
@@ -82,6 +91,17 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
   private destroyed = false;
   private prepPort: MessagePort | null = null;
   private readonly blobStreamer = new BlobStreamer();
+  private readonly recorder = new WorkletRecorderPool();
+  private readonly postTransferable = (
+    msg: WorkletOutboundMessage,
+    transfer?: Transferable[],
+  ): void => {
+    if (transfer && transfer.length > 0) {
+      this.port.postMessage(msg, transfer);
+    } else {
+      this.port.postMessage(msg);
+    }
+  };
   private readonly syncMemForBlob = (): Float32Array =>
     this.syncMemoryView(this.cachedChunk || 128);
   private pending: WorkletInboundMessage[] = [];
@@ -201,6 +221,11 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       exports.piano_set_hammer_hardness(ctx, 0.65);
       for (let i = 0; i < 32; i++) exports.piano_render(ctx, 128);
       exports.piano_set_hammer_hardness(ctx, 0.5);
+      exports.piano_set_temperament(ctx, 1);
+      exports.piano_set_condition(ctx, 0.25);
+      exports.piano_set_concert_pitch(ctx, 415.0);
+      for (let i = 0; i < 4; i++) exports.piano_render(ctx, 128);
+      exports.piano_set_voicing_full(ctx, 0.5, 1.0, 1.0, 1.0, 440.0, 0, 0.0);
       exports.piano_pedal(ctx, 0, 0, 0);
       exports.piano_all_notes_off(ctx);
       for (let i = 0; i < 16; i++) exports.piano_render(ctx, 128);
@@ -265,14 +290,37 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
         exports.piano_set_hammer_hardness(ctx, clamp(msg.hammerHardness, 0.0, 1.0, 0.5));
         break;
       case 'setVoicing':
-        exports.piano_set_voicing(
+        exports.piano_set_voicing_full(
           ctx,
           clamp(msg.hammerHardness, 0.0, 1.0, 0.5),
           clamp(msg.unisonDetune, 0.0, 4.0, 1.0),
           clamp(msg.stretchTuning, 0.0, 2.0, 1.0),
           clamp(msg.stringLengthScale, 0.5, 2.0, 1.0),
-          clamp(msg.a4FreqHz, 415.0, 466.0, 440.0),
+          clamp(msg.a4FreqHz, A4_FREQ_MIN, A4_FREQ_MAX, A4_FREQ_DEFAULT),
+          (msg.temperamentId >>> 0) & 0x3,
+          clamp(msg.condition, CONDITION_MIN, CONDITION_MAX, CONDITION_DEFAULT),
         );
+        break;
+      case 'setConcertPitch':
+        exports.piano_set_concert_pitch(
+          ctx,
+          clamp(msg.concertPitchHz, A4_FREQ_MIN, A4_FREQ_MAX, A4_FREQ_DEFAULT),
+        );
+        break;
+      case 'setTemperament':
+        exports.piano_set_temperament(ctx, (msg.temperamentId >>> 0) & 0x3);
+        break;
+      case 'setCondition':
+        exports.piano_set_condition(
+          ctx,
+          clamp(msg.condition, CONDITION_MIN, CONDITION_MAX, CONDITION_DEFAULT),
+        );
+        break;
+      case 'setRecording':
+        this.recorder.setActive(msg.active, this.postTransferable);
+        break;
+      case 'recReturn':
+        this.recorder.recycleBuffer(msg.samples);
         break;
       case 'setSpace': {
         const bodyId = (msg.bodyId ?? BODY_CONCERT_GRAND) >>> 0;
@@ -301,6 +349,7 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
         this.outRView = null;
         this.cachedChunk = 0;
         this.blobStreamer.reset();
+        this.recorder.reset();
         if (this.prepPort) {
           this.prepPort.close();
           this.prepPort = null;
@@ -344,6 +393,9 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       offset += chunk;
     }
     const dtUs = Math.max(0, (nowMs() - t0) * 1000.0);
+    if (this.recorder.isActive()) {
+      this.recorder.captureBlock(outL, outR, totalFrames, this.postTransferable);
+    }
     const d1BudgetUs = (totalFrames / sampleRate) * 700_000.0;
     if (hasPerf() ? dtUs > d1BudgetUs : dtUs > (totalFrames / sampleRate) * 1_000_000.0) {
       this.totalOverruns += 1;

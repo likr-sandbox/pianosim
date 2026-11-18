@@ -6,6 +6,7 @@ import {
   BODY_CONCERT_GRAND,
   BODY_UPRIGHT_STUDIO,
   BODY_VINTAGE_SALOON,
+  CONDITION_DEFAULT,
   LID_CLOSED,
   LID_HALF,
   LID_OPEN,
@@ -13,9 +14,11 @@ import {
   PERSPECTIVE_PLAYER,
   REVERB_DECAY_DEFAULT,
   REVERB_MIX_DEFAULT,
+  TEMPERAMENT_EQUAL,
   type BodyId,
   type LidState,
   type ListenerPerspective,
+  type TemperamentId,
 } from '../audio/abi';
 
 export interface ParameterPreset {
@@ -28,6 +31,8 @@ export interface ParameterPreset {
     readonly stretchTuning: number;
     readonly stringLengthScale: number;
     readonly a4FreqHz: number;
+    readonly temperamentId: TemperamentId;
+    readonly condition: number;
   };
   readonly space: {
     readonly bodyId: BodyId;
@@ -49,6 +54,8 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
       stretchTuning: 1.00,
       stringLengthScale: 1.00,
       a4FreqHz: 440.0,
+      temperamentId: TEMPERAMENT_EQUAL,
+      condition: CONDITION_DEFAULT,
     },
     space: {
       bodyId: BODY_CONCERT_GRAND,
@@ -68,6 +75,8 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
       stretchTuning: 0.70,
       stringLengthScale: 0.75,
       a4FreqHz: 440.0,
+      temperamentId: TEMPERAMENT_EQUAL,
+      condition: CONDITION_DEFAULT,
     },
     space: {
       bodyId: BODY_UPRIGHT_STUDIO,
@@ -87,6 +96,8 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
       stretchTuning: 1.30,
       stringLengthScale: 1.15,
       a4FreqHz: 442.0,
+      temperamentId: TEMPERAMENT_EQUAL,
+      condition: CONDITION_DEFAULT,
     },
     space: {
       bodyId: BODY_CONCERT_GRAND,
@@ -106,6 +117,8 @@ export const PIANO_PRESETS: ReadonlyArray<ParameterPreset> = [
       stretchTuning: 0.20,
       stringLengthScale: 0.65,
       a4FreqHz: 435.0,
+      temperamentId: TEMPERAMENT_EQUAL,
+      condition: 0.25,
     },
     space: {
       bodyId: BODY_VINTAGE_SALOON,

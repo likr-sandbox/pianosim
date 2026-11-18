@@ -1,6 +1,7 @@
 import {
   A4_FREQ_DEFAULT,
   BODY_CONCERT_GRAND,
+  CONDITION_DEFAULT,
   HAMMER_HARDNESS_DEFAULT,
   LID_OPEN,
   PERSPECTIVE_PLAYER,
@@ -12,16 +13,21 @@ import {
   REVERB_MIX_MIN,
   STRING_SCALE_DEFAULT,
   STRETCH_TUNING_DEFAULT,
+  TEMPERAMENT_EQUAL,
   UNISON_DETUNE_DEFAULT,
+  WEB_AUDIO_SAMPLE_RATE,
   type BodyId,
   type LidState,
   type ListenerPerspective,
   type PedalKind,
   type PrepInboundMessage,
+  type TemperamentId,
+  type WavFormat,
   type WorkletInboundMessage,
 } from './abi';
 import { bootstrapAudioPipeline } from './pipeline-bootstrap';
 import { TelemetryClient } from './telemetry-client';
+import { WavRecorder } from './wav-recorder';
 
 const MAX_PENDING_BEFORE_READY = 256;
 
@@ -45,10 +51,17 @@ export class WasmAudioHost {
     stretch: STRETCH_TUNING_DEFAULT,
     scale: STRING_SCALE_DEFAULT,
     a4: A4_FREQ_DEFAULT,
+    temperamentId: TEMPERAMENT_EQUAL as TemperamentId,
+    condition: CONDITION_DEFAULT,
   };
   private voicingSeq = 0;
   private voicingInFlight = false;
   private pendingVoicingReq: Extract<PrepInboundMessage, { type: 'prepVoicing' }> | null = null;
+
+  private readonly wavRecorder = new WavRecorder();
+  private stopRecordingResolver: (() => void) | null = null;
+  private recUpdateListener: ((frames: number, durationSec: number, recording: boolean) => void) | null =
+    null;
 
   private lastSpace: { body: BodyId; persp: ListenerPerspective; lid: LidState } = {
     body: BODY_CONCERT_GRAND,
@@ -141,6 +154,8 @@ export class WasmAudioHost {
     stretchTuning: number,
     stringLengthScale: number,
     a4FreqHz = A4_FREQ_DEFAULT,
+    temperamentId: TemperamentId = TEMPERAMENT_EQUAL,
+    condition = CONDITION_DEFAULT,
   ): void {
     this.enqueueOrRun(() => {
       if (hammerHardness !== this.lastHammer) {
@@ -151,8 +166,10 @@ export class WasmAudioHost {
         unisonDetune !== this.lastTuning.unison ||
         stretchTuning !== this.lastTuning.stretch ||
         stringLengthScale !== this.lastTuning.scale ||
-        a4FreqHz !== this.lastTuning.a4;
-      if (!tuningChanged || !this.prepWorker) {
+        a4FreqHz !== this.lastTuning.a4 ||
+        temperamentId !== this.lastTuning.temperamentId ||
+        condition !== this.lastTuning.condition;
+      if (!tuningChanged) {
         return;
       }
       this.lastTuning = {
@@ -160,7 +177,22 @@ export class WasmAudioHost {
         stretch: stretchTuning,
         scale: stringLengthScale,
         a4: a4FreqHz,
+        temperamentId,
+        condition,
       };
+      if (!this.prepWorker) {
+        this.postToWorklet({
+          type: 'setVoicing',
+          hammerHardness,
+          unisonDetune,
+          stretchTuning,
+          stringLengthScale,
+          a4FreqHz,
+          temperamentId,
+          condition,
+        });
+        return;
+      }
       const req: Extract<PrepInboundMessage, { type: 'prepVoicing' }> = {
         type: 'prepVoicing',
         hammerHardness,
@@ -168,6 +200,8 @@ export class WasmAudioHost {
         stretchTuning,
         stringLengthScale,
         a4FreqHz,
+        temperamentId,
+        condition,
         seq: ++this.voicingSeq,
       };
       if (this.voicingInFlight) {
@@ -177,6 +211,69 @@ export class WasmAudioHost {
         this.prepWorker.postMessage(req);
       }
     });
+  }
+
+  onRecordingUpdate(
+    cb: ((frames: number, durationSec: number, recording: boolean) => void) | null,
+  ): void {
+    this.recUpdateListener = cb;
+  }
+
+  startRecording(): void {
+    const sr = this.audioContext?.sampleRate ?? WEB_AUDIO_SAMPLE_RATE;
+    this.wavRecorder.start(sr);
+    this.enqueueOrRun(() => {
+      this.postToWorklet({ type: 'setRecording', active: true });
+    });
+    this.notifyRecUpdate();
+  }
+
+  stopRecording(): Promise<void> {
+    if (!this.wavRecorder.isRecording()) {
+      return Promise.resolve();
+    }
+    this.wavRecorder.stop();
+    if (!this.pipelineReady || !this.workletNode) {
+      this.notifyRecUpdate();
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        this.stopRecordingResolver = null;
+        this.notifyRecUpdate();
+        resolve();
+      };
+      this.stopRecordingResolver = finish;
+      this.postToWorklet({ type: 'setRecording', active: false });
+      window.setTimeout(finish, 250);
+    });
+  }
+
+  isRecording(): boolean {
+    return this.wavRecorder.isRecording();
+  }
+
+  getRecordingFrameCount(): number {
+    return this.wavRecorder.getFrameCount();
+  }
+
+  getRecordingDurationSeconds(): number {
+    return this.wavRecorder.getDurationSeconds();
+  }
+
+  exportWavBlob(format: WavFormat): Blob | null {
+    return this.wavRecorder.createBlob(format);
+  }
+
+  private notifyRecUpdate(): void {
+    this.recUpdateListener?.(
+      this.wavRecorder.getFrameCount(),
+      this.wavRecorder.getDurationSeconds(),
+      this.wavRecorder.isRecording(),
+    );
   }
 
   setSpace(
@@ -238,6 +335,9 @@ export class WasmAudioHost {
     this.pendingSpaceReq = null;
     this.voicingInFlight = false;
     this.spaceInFlight = false;
+    this.stopRecordingResolver?.();
+    this.stopRecordingResolver = null;
+    this.wavRecorder.clear();
     if (this.prepWorker) {
       this.prepWorker.postMessage({ type: 'destroy' } satisfies PrepInboundMessage);
       this.prepWorker.terminate();
@@ -287,6 +387,20 @@ export class WasmAudioHost {
           } else {
             this.voicingInFlight = false;
           }
+        },
+        onRecChunk: (samples, frames) => {
+          const view = new Float32Array(samples, 0, frames * 2);
+          this.wavRecorder.pushInterleavedChunk(view);
+          if (this.workletNode) {
+            this.workletNode.port.postMessage(
+              { type: 'recReturn', samples } satisfies WorkletInboundMessage,
+              [samples],
+            );
+          }
+          this.notifyRecUpdate();
+        },
+        onRecStopped: () => {
+          this.stopRecordingResolver?.();
         },
       });
       this.audioContext = handles.audioContext;

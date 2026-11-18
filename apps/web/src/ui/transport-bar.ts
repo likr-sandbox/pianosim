@@ -24,6 +24,7 @@ export class TransportBar {
   private tempoValEl!: HTMLElement;
   private fileInput!: HTMLInputElement;
   private deviceSelect!: HTMLSelectElement;
+  private recorderSlot!: HTMLElement;
 
   private readonly cleanupHandlers: Array<() => void> = [];
 
@@ -59,6 +60,10 @@ export class TransportBar {
       this.deviceSelect.appendChild(opt);
     }
     this.deviceSelect.value = currentVal;
+  }
+
+  getRecorderMount(): HTMLElement {
+    return this.recorderSlot;
   }
 
   destroy(): void {
@@ -128,6 +133,8 @@ export class TransportBar {
               <option value="">All MIDI Inputs</option>
             </select>
           </div>
+
+          <div id="recorder-mount" class="transport-group recorder-group"></div>
         </div>
 
         <div class="transport-row seek-row">
@@ -157,6 +164,7 @@ export class TransportBar {
     this.tempoValEl = this.container.querySelector('#val-tempo')!;
     this.fileInput = this.container.querySelector('#input-midi-file')!;
     this.deviceSelect = this.container.querySelector('#midi-device-select')!;
+    this.recorderSlot = this.container.querySelector('#recorder-mount')!;
   }
 
   private bindEvents(): void {

@@ -1,13 +1,19 @@
-/** Voicing parameter control panel for hammer hardness, unison detuning, stretch tuning, string scaling, and concert pitch (A4). */
+/** Voicing parameter control panel: concert pitch (A4), temperament, condition macro, and physical voicing sliders. */
 
 import {
   A4_FREQ_DEFAULT,
   A4_FREQ_MAX,
   A4_FREQ_MIN,
   A4_FREQ_STEP,
+  CONDITION_DEFAULT,
+  CONDITION_MAX,
+  CONDITION_MIN,
+  TEMPERAMENT_EQUAL,
+  TEMPERAMENT_OPTIONS,
+  type TemperamentId,
 } from '../audio/abi';
 
-export const A4_QUICK_PRESETS = [415, 432, 440, 442] as const;
+export const A4_QUICK_PRESETS = [392, 415, 432, 440, 442] as const;
 
 export interface VoicingState {
   hammerHardness: number;
@@ -15,16 +21,27 @@ export interface VoicingState {
   stretchTuning: number;
   stringLengthScale: number;
   a4FreqHz: number;
+  temperamentId: TemperamentId;
+  condition: number;
 }
 
 export type VoicingChangeCallback = (state: VoicingState) => void;
 
 function sanitizeA4Hz(raw: number): number {
-  if (!Number.isFinite(raw)) {
-    return A4_FREQ_DEFAULT;
-  }
+  if (!Number.isFinite(raw)) return A4_FREQ_DEFAULT;
   const clamped = Math.max(A4_FREQ_MIN, Math.min(A4_FREQ_MAX, raw));
   return Math.round(clamped * 10) / 10;
+}
+
+function sanitizeCondition(raw: number): number {
+  if (!Number.isFinite(raw)) return CONDITION_DEFAULT;
+  return Math.max(CONDITION_MIN, Math.min(CONDITION_MAX, raw));
+}
+
+function sanitizeTemperamentId(raw: number): TemperamentId {
+  const id = Math.trunc(raw);
+  if (id === 1 || id === 2 || id === 3) return id;
+  return TEMPERAMENT_EQUAL;
 }
 
 export class VoicingPanel {
@@ -38,13 +55,18 @@ export class VoicingPanel {
   private a4Slider!: HTMLInputElement;
   private a4NumberInput!: HTMLInputElement;
   private a4ChipBtns: HTMLButtonElement[] = [];
+  private temperamentSelect!: HTMLSelectElement;
+  private conditionSlider!: HTMLInputElement;
 
   private hammerValEl!: HTMLElement;
   private unisonValEl!: HTMLElement;
   private stretchValEl!: HTMLElement;
   private lengthValEl!: HTMLElement;
+  private conditionValEl!: HTMLElement;
 
   private a4FreqHz = A4_FREQ_DEFAULT;
+  private temperamentId: TemperamentId = TEMPERAMENT_EQUAL;
+  private condition = CONDITION_DEFAULT;
   private readonly cleanupHandlers: Array<() => void> = [];
 
   constructor(container: HTMLElement, onChange: VoicingChangeCallback) {
@@ -61,6 +83,8 @@ export class VoicingPanel {
       stretchTuning: parseFloat(this.stretchSlider.value),
       stringLengthScale: parseFloat(this.lengthSlider.value),
       a4FreqHz: this.a4FreqHz,
+      temperamentId: this.temperamentId,
+      condition: this.condition,
     };
   }
 
@@ -83,6 +107,13 @@ export class VoicingPanel {
     }
     if (state.a4FreqHz !== undefined) {
       this.applyA4Display(sanitizeA4Hz(state.a4FreqHz));
+    }
+    if (state.temperamentId !== undefined) {
+      this.temperamentId = sanitizeTemperamentId(state.temperamentId);
+      this.temperamentSelect.value = String(this.temperamentId);
+    }
+    if (state.condition !== undefined) {
+      this.applyConditionDisplay(sanitizeCondition(state.condition));
     }
   }
 
@@ -109,6 +140,13 @@ export class VoicingPanel {
     }
   }
 
+  private applyConditionDisplay(cond: number): void {
+    this.condition = cond;
+    const pct = Math.round(cond * 100);
+    this.conditionSlider.value = String(pct);
+    this.conditionValEl.textContent = `${pct}%`;
+  }
+
   private render(): void {
     const chipsHtml = A4_QUICK_PRESETS.map((hz) => {
       const active = hz === A4_FREQ_DEFAULT;
@@ -120,6 +158,10 @@ export class VoicingPanel {
         aria-pressed="${active}"
       >${hz} Hz</button>`;
     }).join('');
+
+    const temperamentOptionsHtml = TEMPERAMENT_OPTIONS.map(
+      (opt) => `<option value="${opt.id}">${opt.label}</option>`,
+    ).join('');
 
     this.container.innerHTML = `
       <section class="voicing-panel" aria-label="Physical Voicing Parameters">
@@ -156,6 +198,32 @@ export class VoicingPanel {
               ${chipsHtml}
             </div>
           </div>
+
+          <label class="control-row" for="select-temperament">
+            <span class="control-label">Temperament</span>
+            <select
+              id="select-temperament"
+              data-testid="voicing-temperament"
+              class="select-temperament"
+              aria-label="Classical Temperament"
+            >
+              ${temperamentOptionsHtml}
+            </select>
+          </label>
+
+          <label class="control-row" for="slider-condition">
+            <span class="control-label">Condition (Aging)</span>
+            <input
+              id="slider-condition"
+              data-testid="voicing-condition"
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value="0"
+            />
+            <span id="val-voicing-condition" class="val-mono">0%</span>
+          </label>
 
           <label class="control-row" for="slider-hammer-hardness">
             <span class="control-label">Hammer Hardness</span>
@@ -223,11 +291,14 @@ export class VoicingPanel {
     this.a4Slider = this.container.querySelector('#slider-a4-freq')!;
     this.a4NumberInput = this.container.querySelector('#input-a4-freq')!;
     this.a4ChipBtns = Array.from(this.container.querySelectorAll<HTMLButtonElement>('.btn-a4-chip'));
+    this.temperamentSelect = this.container.querySelector('#select-temperament')!;
+    this.conditionSlider = this.container.querySelector('#slider-condition')!;
 
     this.hammerValEl = this.container.querySelector('#val-voicing-hammer')!;
     this.unisonValEl = this.container.querySelector('#val-voicing-unison')!;
     this.stretchValEl = this.container.querySelector('#val-voicing-stretch')!;
     this.lengthValEl = this.container.querySelector('#val-voicing-length')!;
+    this.conditionValEl = this.container.querySelector('#val-voicing-condition')!;
   }
 
   private bindEvents(): void {
@@ -266,6 +337,18 @@ export class VoicingPanel {
       }
     };
 
+    const onTemperamentChange = () => {
+      this.temperamentId = sanitizeTemperamentId(Number(this.temperamentSelect.value));
+      this.onChange(this.getState());
+    };
+
+    const onConditionInput = () => {
+      const pct = parseInt(this.conditionSlider.value, 10);
+      const cond = sanitizeCondition(Number.isFinite(pct) ? pct / 100 : 0);
+      this.applyConditionDisplay(cond);
+      this.onChange(this.getState());
+    };
+
     this.hammerSlider.addEventListener('input', onSliderInput);
     this.unisonSlider.addEventListener('input', onSliderInput);
     this.stretchSlider.addEventListener('input', onSliderInput);
@@ -274,6 +357,8 @@ export class VoicingPanel {
     this.a4NumberInput.addEventListener('input', onA4NumberInput);
     this.a4NumberInput.addEventListener('change', onA4NumberCommit);
     this.a4NumberInput.addEventListener('blur', onA4NumberCommit);
+    this.temperamentSelect.addEventListener('change', onTemperamentChange);
+    this.conditionSlider.addEventListener('input', onConditionInput);
 
     for (const btn of this.a4ChipBtns) {
       const onChipClick = () => {
@@ -294,6 +379,8 @@ export class VoicingPanel {
       this.a4NumberInput.removeEventListener('input', onA4NumberInput);
       this.a4NumberInput.removeEventListener('change', onA4NumberCommit);
       this.a4NumberInput.removeEventListener('blur', onA4NumberCommit);
+      this.temperamentSelect.removeEventListener('change', onTemperamentChange);
+      this.conditionSlider.removeEventListener('input', onConditionInput);
     });
   }
 }

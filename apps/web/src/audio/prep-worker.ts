@@ -15,6 +15,7 @@ const REQUIRED_PREP_EXPORTS: ReadonlyArray<keyof PianoPrepWasmExports> = [
   'piano_prep_space',
   'piano_prep_space_for_body',
   'piano_prep_voicing',
+  'piano_prep_voicing_ex',
   'piano_prep_out_ptr',
 ];
 
@@ -129,13 +130,15 @@ self.onmessage = (event: MessageEvent<PrepInboundMessage>) => {
         return;
       }
       const len =
-        exportsRef.piano_prep_voicing(
+        exportsRef.piano_prep_voicing_ex(
           prepPtr,
           msg.hammerHardness,
           msg.unisonDetune,
           msg.stretchTuning,
           msg.stringLengthScale,
           msg.a4FreqHz,
+          msg.temperamentId >>> 0,
+          msg.condition,
         ) >>> 0;
       const buf = copyPreparedSlice(len);
       if (buf) {
@@ -146,6 +149,8 @@ self.onmessage = (event: MessageEvent<PrepInboundMessage>) => {
           stretchTuning: msg.stretchTuning,
           stringLengthScale: msg.stringLengthScale,
           a4FreqHz: msg.a4FreqHz,
+          temperamentId: msg.temperamentId,
+          condition: msg.condition,
           seq: msg.seq,
           blob: buf,
         };

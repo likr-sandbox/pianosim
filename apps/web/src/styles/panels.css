@@ -104,7 +104,9 @@
 }
 
 .select-demo,
-.select-device {
+.select-device,
+.select-temperament,
+.select-record-format {
   background: #1b2130;
   color: var(--text);
   border: 1px solid var(--panel-border);
@@ -112,6 +114,31 @@
   padding: 8px 12px;
   font-size: 13px;
   cursor: pointer;
+}
+
+.recorder-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-record {
+  background: #3a1a22;
+  color: #fda4af;
+  border: 1px solid #881337;
+}
+
+.btn-record.is-recording {
+  background: #be123c;
+  color: #fff1f2;
+  border-color: #f43f5e;
+}
+
+.record-status {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 72px;
 }
 
 .file-input {

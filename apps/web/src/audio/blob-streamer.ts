@@ -20,6 +20,8 @@ interface PendingVoicingBlob {
   stretch: number;
   scale: number;
   a4: number;
+  temperament: number;
+  condition: number;
   src: Float32Array;
   off: number;
 }
@@ -73,6 +75,8 @@ export class BlobStreamer {
         stretch: msg.stretchTuning,
         scale: msg.stringLengthScale,
         a4: msg.a4FreqHz,
+        temperament: msg.temperamentId >>> 0,
+        condition: msg.condition,
         src: new Float32Array(msg.blob),
         off: 0,
       };
@@ -166,13 +170,15 @@ export class BlobStreamer {
     mem.set(b.src.subarray(b.off, b.off + n), ptr >>> 2);
     b.off += n;
     if (b.off >= b.src.length) {
-      exports.piano_apply_voicing_blob(
+      exports.piano_apply_voicing_blob_ex(
         ctx,
         b.hammer,
         b.detune,
         b.stretch,
         b.scale,
         b.a4,
+        b.temperament,
+        b.condition,
         b.src.length,
       );
       this.finishVoicing();
@@ -190,7 +196,7 @@ export function warmPrepInstallers(
   const p = raw as Record<string, ((...a: number[]) => number) | undefined>;
   if (
     !p.piano_prep_init ||
-    !p.piano_prep_voicing ||
+    !p.piano_prep_voicing_ex ||
     !p.piano_prep_space_for_body ||
     !p.piano_prep_out_ptr
   ) {
@@ -200,12 +206,12 @@ export function warmPrepInstallers(
   if (!prep) return;
   try {
     for (const [h, d] of [[0.501, 1.01], [0.5, 1.0]]) {
-      const vcLen = p.piano_prep_voicing(prep, h, d, 1.0, 1.0, 440.0) >>> 0;
+      const vcLen = p.piano_prep_voicing_ex(prep, h, d, 1.0, 1.0, 440.0, 0, 0.0) >>> 0;
       const src = p.piano_prep_out_ptr(prep) >>> 0;
       const mem = syncMemoryView();
       const dst = exports.piano_staging_offset_ptr(ctx, 0, vcLen) >>> 0;
       if (dst) mem.set(mem.subarray(src >>> 2, (src >>> 2) + vcLen), dst >>> 2);
-      exports.piano_apply_voicing_blob(ctx, h, d, 1.0, 1.0, 440.0, vcLen);
+      exports.piano_apply_voicing_blob_ex(ctx, h, d, 1.0, 1.0, 440.0, 0, 0.0, vcLen);
     }
     const spLen = p.piano_prep_space_for_body(prep, 0, 0, 2) >>> 0;
     const spSrc = p.piano_prep_out_ptr(prep) >>> 0;

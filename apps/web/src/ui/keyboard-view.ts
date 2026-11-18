@@ -3,8 +3,9 @@
 import { PointerGlissando } from '../input/pointer-glissando';
 
 export interface KeyboardViewCallbacks {
-  onPress(midiKey: number): void;
+  onPress(midiKey: number, velocity?: number): void;
   onRelease(midiKey: number): void;
+  getBaseVelocity?: () => number;
 }
 
 const IS_BLACK_KEY = [
@@ -33,8 +34,9 @@ export class KeyboardView {
     this.callbacks = callbacks;
     this.buildDom();
     this.pointerGlissando = new PointerGlissando(this.container, {
-      onPress: (midi) => this.callbacks.onPress(midi),
+      onPress: (midi, vel) => this.callbacks.onPress(midi, vel),
       onRelease: (midi) => this.callbacks.onRelease(midi),
+      getBaseVelocity: this.callbacks.getBaseVelocity,
     });
   }
 

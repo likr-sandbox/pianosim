@@ -12,6 +12,7 @@ import {
 } from '../audio/abi';
 import type { TelemetryClient } from '../audio/telemetry-client';
 import type { WasmAudioHost } from '../audio/wasm-host';
+import { triggerWavDownload } from '../audio/wav-recorder';
 import { PcKeyboard } from '../input/pc-keyboard';
 import { PedalController } from '../input/pedal-controller';
 import {
@@ -28,6 +29,7 @@ import { SpectrumCanvas } from '../viz/spectrum-canvas';
 import { KeyboardView } from './keyboard-view';
 import { PedalBar } from './pedal-bar';
 import { PresetBar } from './preset-bar';
+import { RecorderControls } from './recorder-controls';
 import { STUDIO_SHELL_HTML } from './shell-template';
 import { SpacePanel } from './space-panel';
 import { TouchCurveSelector } from './touch-curve-selector';
@@ -52,6 +54,7 @@ export class AppShell {
   private voicingPanel!: VoicingPanel;
   private spacePanel!: SpacePanel;
   private transportBar!: TransportBar;
+  private recorderControls!: RecorderControls;
   private pcKeyboard!: PcKeyboard;
   private perfMeter!: PerfMeter;
   private spectrumCanvas!: SpectrumCanvas;
@@ -123,6 +126,8 @@ export class AppShell {
     this.presetBar?.destroy();
     this.voicingPanel?.destroy();
     this.spacePanel?.destroy();
+    this.host.onRecordingUpdate(null);
+    this.recorderControls?.destroy();
     this.transportBar?.destroy();
     this.pcKeyboard?.destroy();
     this.perfMeter?.destroy();
@@ -161,8 +166,9 @@ export class AppShell {
     // 88-Key Piano Keyboard
     const keyboardContainer = this.root.querySelector<HTMLElement>('#keyboard-mount')!;
     this.keyboardView = new KeyboardView(keyboardContainer, {
-      onPress: (midi) => this.acquireNote(midi),
+      onPress: (midi, vel) => this.acquireNote(midi, vel),
       onRelease: (midi) => this.releaseNote(midi),
+      getBaseVelocity: () => this.velocity7,
     });
 
     // Touch Curve Selector
@@ -188,6 +194,8 @@ export class AppShell {
         st.stretchTuning,
         st.stringLengthScale,
         st.a4FreqHz,
+        st.temperamentId,
+        st.condition,
       );
     });
 
@@ -220,6 +228,8 @@ export class AppShell {
           preset.voicing.stretchTuning,
           preset.voicing.stringLengthScale,
           preset.voicing.a4FreqHz,
+          preset.voicing.temperamentId,
+          preset.voicing.condition,
         );
         this.host.setSpace(
           preset.space.perspective,
@@ -275,6 +285,23 @@ export class AppShell {
         },
       },
     );
+
+    this.recorderControls = new RecorderControls(this.transportBar.getRecorderMount(), {
+      onStartRecording: () => {
+        void this.ensureUnlocked();
+        this.host.startRecording();
+      },
+      onStopRecording: () => this.host.stopRecording(),
+      onExportWav: (format) => {
+        const blob = this.host.exportWavBlob(format);
+        if (blob) {
+          triggerWavDownload(blob, format);
+        }
+      },
+    });
+    this.host.onRecordingUpdate((frames, durationSec, recording) => {
+      this.recorderControls.updateStatus(frames, durationSec, recording);
+    });
 
     // Wire live Web MIDI callbacks bidirectionally to keyboard, pedals, devices, and auto-unlock
     this.midiManager.setCallbacks({

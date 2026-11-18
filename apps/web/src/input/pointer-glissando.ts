@@ -1,8 +1,9 @@
 /** Multi-touch and pointer glissando tracker for responsive 88-key piano keyboard. */
 
 export interface PointerGlissandoCallbacks {
-  onPress(midiKey: number): void;
+  onPress(midiKey: number, velocity?: number): void;
   onRelease(midiKey: number): void;
+  getBaseVelocity?: () => number;
 }
 
 const GLISSANDO_HOLD_MS = 450;
@@ -64,8 +65,9 @@ export class PointerGlissando {
         return;
       }
 
+      const vel = this.computePointerVelocity(keyEl, e.clientX, e.clientY);
       this.activePointers.set(e.pointerId, midi);
-      this.callbacks.onPress(midi);
+      this.callbacks.onPress(midi, vel);
     };
 
     const onPointerMove = (e: PointerEvent) => {
@@ -97,17 +99,19 @@ export class PointerGlissando {
 
       if (currentMidi === undefined) {
         // Dragged into keyboard with button held
+        const vel = this.computePointerVelocity(keyEl, e.clientX, e.clientY);
         this.activePointers.set(e.pointerId, nextMidi);
-        this.callbacks.onPress(nextMidi);
+        this.callbacks.onPress(nextMidi, vel);
       } else if (currentMidi !== nextMidi) {
         // Glissando transition to adjacent key: maintain voice polyphony during drag
+        const vel = this.computePointerVelocity(keyEl, e.clientX, e.clientY);
         const timerId = window.setTimeout(() => {
           this.pendingGlissando.delete(timerId);
           this.callbacks.onRelease(currentMidi);
         }, GLISSANDO_HOLD_MS);
         this.pendingGlissando.set(timerId, currentMidi);
         this.activePointers.set(e.pointerId, nextMidi);
-        this.callbacks.onPress(nextMidi);
+        this.callbacks.onPress(nextMidi, vel);
       }
     };
 
@@ -188,6 +192,24 @@ export class PointerGlissando {
       }
     }
     return null;
+  }
+
+  private computePointerVelocity(
+    keyEl: HTMLElement,
+    clientX: number,
+    clientY: number,
+  ): number | undefined {
+    // Preserve undefined on synthetic dispatchEvent({ buttons: 1 }) where clientX/Y === 0.
+    if (clientX === 0 && clientY === 0) {
+      return undefined;
+    }
+    const rect = keyEl.getBoundingClientRect();
+    if (!rect || rect.height <= 0) {
+      return undefined;
+    }
+    const yNorm = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    const base = this.callbacks.getBaseVelocity ? this.callbacks.getBaseVelocity() : 100;
+    return Math.max(1, Math.min(127, Math.round(base * (0.45 + 0.80 * yNorm))));
   }
 
   private extractMidiKey(el: HTMLElement): number | null {

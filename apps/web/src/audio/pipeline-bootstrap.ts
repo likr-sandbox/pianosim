@@ -25,6 +25,8 @@ export interface PipelineCallbacks {
   readonly telemetry: TelemetryClient;
   readonly onSpaceDone: () => void;
   readonly onVoicingDone: () => void;
+  readonly onRecChunk?: (samples: ArrayBuffer, frames: number) => void;
+  readonly onRecStopped?: () => void;
 }
 
 /** Boots AudioContext (48 kHz), AudioWorklet, AnalyserNode, and Prep Web Worker with MessageChannel IPC. */
@@ -94,7 +96,7 @@ export async function bootstrapAudioPipeline(
 
     const channel = new MessageChannel();
     await Promise.all([
-      handshakeWorklet(workletNode, wasmModule, channel.port2, telemetry),
+      handshakeWorklet(workletNode, wasmModule, channel.port2, telemetry, callbacks),
       handshakePrepWorker(prepWorker, wasmModule, audioContext.sampleRate, channel.port1, callbacks),
     ]);
 
@@ -114,6 +116,7 @@ function handshakeWorklet(
   wasmModule: WebAssembly.Module,
   prepPort: MessagePort,
   telemetry: TelemetryClient,
+  callbacks: PipelineCallbacks,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -167,6 +170,14 @@ function handshakeWorklet(
           clipped: msg.clipped,
           blockCount: msg.blockCount,
         });
+        return;
+      }
+      if (msg.type === 'recChunk') {
+        callbacks.onRecChunk?.(msg.samples, msg.frames);
+        return;
+      }
+      if (msg.type === 'recStopped') {
+        callbacks.onRecStopped?.();
       }
     };
 

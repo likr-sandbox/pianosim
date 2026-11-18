@@ -83,10 +83,51 @@ export const STRING_SCALE_MIN = 0.5;
 export const STRING_SCALE_MAX = 2.0;
 export const STRING_SCALE_DEFAULT = 1.0;
 
-export const A4_FREQ_MIN = 415.0;
-export const A4_FREQ_MAX = 466.0;
+export const A4_FREQ_MIN = 392.0;
+export const A4_FREQ_MAX = 466.2;
 export const A4_FREQ_DEFAULT = 440.0;
 export const A4_FREQ_STEP = 0.1;
+
+export const TEMPERAMENT_EQUAL = 0 as const;
+export const TEMPERAMENT_WERCKMEISTER_III = 1 as const;
+export const TEMPERAMENT_KIRNBERGER_III = 2 as const;
+export const TEMPERAMENT_VALLOTTI = 3 as const;
+
+export type TemperamentId =
+  | typeof TEMPERAMENT_EQUAL
+  | typeof TEMPERAMENT_WERCKMEISTER_III
+  | typeof TEMPERAMENT_KIRNBERGER_III
+  | typeof TEMPERAMENT_VALLOTTI;
+
+export interface TemperamentOption {
+  readonly id: TemperamentId;
+  readonly label: string;
+  readonly slug: string;
+  readonly testId: string;
+}
+
+export const TEMPERAMENT_OPTIONS: ReadonlyArray<TemperamentOption> = [
+  { id: TEMPERAMENT_EQUAL, label: 'Equal', slug: 'equal', testId: 'temperament-equal' },
+  {
+    id: TEMPERAMENT_WERCKMEISTER_III,
+    label: 'Werckmeister III',
+    slug: 'werckmeister-iii',
+    testId: 'temperament-werckmeister-iii',
+  },
+  {
+    id: TEMPERAMENT_KIRNBERGER_III,
+    label: 'Kirnberger III',
+    slug: 'kirnberger-iii',
+    testId: 'temperament-kirnberger-iii',
+  },
+  { id: TEMPERAMENT_VALLOTTI, label: 'Vallotti', slug: 'vallotti', testId: 'temperament-vallotti' },
+];
+
+export const CONDITION_MIN = 0.0;
+export const CONDITION_MAX = 1.0;
+export const CONDITION_DEFAULT = 0.0;
+
+export type WavFormat = 'pcm24' | 'f32';
 
 export type EngineStatus = 'locked' | 'initializing' | 'ready' | 'error';
 
@@ -106,6 +147,19 @@ export interface PianoWasmExports extends WebAssembly.Exports {
     lengthScale: number,
     a4FreqHz: number,
   ): number;
+  piano_set_voicing_full(
+    ctx: number,
+    hammerHardness: number,
+    unisonDetune: number,
+    stretch: number,
+    lengthScale: number,
+    concertPitchHz: number,
+    temperamentId: number,
+    condition: number,
+  ): number;
+  piano_set_concert_pitch(ctx: number, concertPitchHz: number): number;
+  piano_set_temperament(ctx: number, temperamentId: number): number;
+  piano_set_condition(ctx: number, condition: number): number;
   piano_set_hammer_hardness(ctx: number, hammerHardness: number): number;
   piano_set_space(ctx: number, perspective: number, lid: number): number;
   piano_set_reverb(ctx: number, decayS: number, mix: number): number;
@@ -142,6 +196,17 @@ export interface PianoWasmExports extends WebAssembly.Exports {
     a4FreqHz: number,
     lenF32: number,
   ): number;
+  piano_apply_voicing_blob_ex(
+    ctx: number,
+    hammerHardness: number,
+    unisonDetune: number,
+    stretch: number,
+    lengthScale: number,
+    concertPitchHz: number,
+    temperamentId: number,
+    condition: number,
+    lenF32: number,
+  ): number;
   piano_render(ctx: number, frames: number): void;
   piano_out_l_ptr(ctx: number): number;
   piano_out_r_ptr(ctx: number): number;
@@ -162,6 +227,16 @@ export interface PianoPrepWasmExports extends WebAssembly.Exports {
     lengthScale: number,
     a4FreqHz: number,
   ): number;
+  piano_prep_voicing_ex(
+    prep: number,
+    hammerHardness: number,
+    unisonDetune: number,
+    stretch: number,
+    lengthScale: number,
+    concertPitchHz: number,
+    temperamentId: number,
+    condition: number,
+  ): number;
   piano_prep_out_ptr(prep: number): number;
 }
 
@@ -179,9 +254,16 @@ export type WorkletInboundMessage =
       stretchTuning: number;
       stringLengthScale: number;
       a4FreqHz: number;
+      temperamentId: TemperamentId;
+      condition: number;
     }
+  | { type: 'setConcertPitch'; concertPitchHz: number }
+  | { type: 'setTemperament'; temperamentId: TemperamentId }
+  | { type: 'setCondition'; condition: number }
   | { type: 'setSpace'; bodyId?: BodyId; perspective: ListenerPerspective; lidState: LidState }
   | { type: 'setReverb'; decayS: number; mix: number }
+  | { type: 'setRecording'; active: boolean }
+  | { type: 'recReturn'; samples: ArrayBuffer }
   | { type: 'destroy' };
 
 export type PrepInboundMessage =
@@ -200,6 +282,8 @@ export type PrepInboundMessage =
       stretchTuning: number;
       stringLengthScale: number;
       a4FreqHz: number;
+      temperamentId: TemperamentId;
+      condition: number;
       seq: number;
     }
   | { type: 'destroy' };
@@ -220,6 +304,8 @@ export type PrepToWorkletMessage =
       stretchTuning: number;
       stringLengthScale: number;
       a4FreqHz: number;
+      temperamentId: TemperamentId;
+      condition: number;
       seq: number;
       blob: ArrayBuffer;
     };
@@ -247,6 +333,8 @@ export interface TelemetrySnapshot {
 export type WorkletOutboundMessage =
   | { type: 'ready'; sampleRate: number }
   | ({ type: 'telemetry' } & TelemetrySnapshot)
+  | { type: 'recChunk'; samples: ArrayBuffer; frames: number }
+  | { type: 'recStopped' }
   | { type: 'error'; message: string };
 
 export interface PianoDiagnostics {
