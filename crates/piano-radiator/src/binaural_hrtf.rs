@@ -77,6 +77,55 @@ impl Biquad {
         }
     }
 
+    /// Second-order bilinear highpass filter (`cutoff_hz`, resonance `q`).
+    pub(crate) fn highpass_2nd(cutoff_hz: f64, q: f64, sample_rate: f64) -> Self {
+        let sr = max_f64(sample_rate, 8_000.0);
+        if cutoff_hz <= 0.5 {
+            return Self::identity();
+        }
+        let fc = clamp_f64(cutoff_hz, 20.0, 0.46 * sr);
+        let w0 = 2.0 * PI * fc / sr;
+        let (sin_w, cos_w) = sin_cos_f64(w0);
+        let alpha = sin_w / (2.0 * max_f64(q, 0.25));
+        let a0 = 1.0 + alpha;
+        let inv_a0 = 1.0 / a0;
+        let one_plus_cos = 1.0 + cos_w;
+        Self {
+            b0: (0.5 * one_plus_cos * inv_a0) as f32,
+            b1: (-one_plus_cos * inv_a0) as f32,
+            b2: (0.5 * one_plus_cos * inv_a0) as f32,
+            a1: (-2.0 * cos_w * inv_a0) as f32,
+            a2: ((1.0 - alpha) * inv_a0) as f32,
+        }
+    }
+
+    /// Audio-EQ-Cookbook low-shelf filter.
+    pub(crate) fn low_shelf(freq_hz: f64, gain_db: f64, slope: f64, sample_rate: f64) -> Self {
+        let sr = max_f64(sample_rate, 8_000.0);
+        if abs_f64(gain_db) < 1.0e-3 || freq_hz >= 0.47 * sr {
+            return Self::identity();
+        }
+        let fc = clamp_f64(freq_hz, 40.0, 0.46 * sr);
+        let a_lin = powf_f64(10.0, gain_db / 40.0);
+        let w0 = 2.0 * PI * fc / sr;
+        let (sin_w, cos_w) = sin_cos_f64(w0);
+        let s_clamped = clamp_f64(slope, 0.1, 2.0);
+        let inside = max_f64(0.0, (a_lin + 1.0 / a_lin) * (1.0 / s_clamped - 1.0) + 2.0);
+        let alpha = 0.5 * sin_w * sqrt_f64(inside);
+        let two_sqrt_a_alpha = 2.0 * sqrt_f64(a_lin) * alpha;
+        let a0 = (a_lin + 1.0) + (a_lin - 1.0) * cos_w + two_sqrt_a_alpha;
+        let inv_a0 = 1.0 / a0;
+        Self {
+            b0: (a_lin * ((a_lin + 1.0) - (a_lin - 1.0) * cos_w + two_sqrt_a_alpha) * inv_a0)
+                as f32,
+            b1: (2.0 * a_lin * ((a_lin - 1.0) - (a_lin + 1.0) * cos_w) * inv_a0) as f32,
+            b2: (a_lin * ((a_lin + 1.0) - (a_lin - 1.0) * cos_w - two_sqrt_a_alpha) * inv_a0)
+                as f32,
+            a1: (-2.0 * ((a_lin - 1.0) + (a_lin + 1.0) * cos_w) * inv_a0) as f32,
+            a2: (((a_lin + 1.0) + (a_lin - 1.0) * cos_w - two_sqrt_a_alpha) * inv_a0) as f32,
+        }
+    }
+
     /// Audio-EQ-Cookbook high-shelf filter.
     pub(crate) fn high_shelf(freq_hz: f64, gain_db: f64, slope: f64, sample_rate: f64) -> Self {
         let sr = max_f64(sample_rate, 8_000.0);
@@ -160,6 +209,39 @@ impl Biquad {
             }
             *sample = x as f32;
         }
+    }
+}
+
+/// Stateful Direct-Form II Transposed biquad processor for real-time blocks.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BiquadState {
+    z1: f32,
+    z2: f32,
+}
+
+impl BiquadState {
+    #[inline]
+    pub(crate) fn process(&mut self, c: &Biquad, x: f32) -> f32 {
+        let y = c.b0 * x + self.z1;
+        self.z1 = c.b1 * x - c.a1 * y + self.z2;
+        self.z2 = c.b2 * x - c.a2 * y;
+        y
+    }
+
+    #[inline]
+    pub(crate) fn flush_denormals(&mut self) {
+        if self.z1.abs() < 1.0e-20 {
+            self.z1 = 0.0;
+        }
+        if self.z2.abs() < 1.0e-20 {
+            self.z2 = 0.0;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn reset(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
     }
 }
 

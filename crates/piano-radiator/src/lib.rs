@@ -6,7 +6,9 @@
 extern crate alloc;
 
 mod binaural_hrtf;
+mod body_assets;
 mod fir_head;
+mod hall_fdn;
 mod ir_synth;
 mod limiter;
 mod math;
@@ -19,15 +21,23 @@ mod space_blob;
 mod subrate_upsample;
 
 #[cfg(test)]
+mod fdn_tests;
+#[cfg(test)]
+mod limiter_tests;
+#[cfg(test)]
+mod multi_body_tests;
+#[cfg(test)]
 mod nupols_tests;
 #[cfg(test)]
 mod tests;
 
 use alloc::vec::Vec;
+pub use body_assets::{body_asset_filename, embedded_body_bytes, BodyArchetype};
 use core::fmt;
 use fir_head::{FirHead, HEAD_TAPS};
+use hall_fdn::HallFdn;
 pub use ir_synth::{ir_len_for_sample_rate, synthesize_irs, IrSynthScratch};
-use limiter::limit_stereo_buffers;
+use limiter::StereoLimiter;
 use math::clamp_f64;
 use partitioned_fft::NupolsTail;
 pub use piano_spec::{
@@ -50,6 +60,8 @@ pub struct RadiatorBank {
     scratch: IrSynthScratch,
     head: FirHead,
     tail: NupolsTail,
+    hall_fdn: HallFdn,
+    limiter: StereoLimiter,
 }
 
 impl fmt::Debug for RadiatorBank {
@@ -126,6 +138,8 @@ impl RadiatorBank {
             scratch: IrSynthScratch::new(ir_len),
             head: FirHead::new(),
             tail: NupolsTail::new(ir_len),
+            hall_fdn: HallFdn::new(sr, perspective),
+            limiter: StereoLimiter::new(sr),
         };
         bank.rebuild_ir_and_load();
         bank
@@ -164,7 +178,56 @@ impl RadiatorBank {
         }
         self.perspective = perspective;
         self.lid_state = lid_state;
+        self.hall_fdn.set_perspective(perspective);
         self.rebuild_ir_and_load();
+    }
+
+    /// Decode serialized `PIANOBOD` bytes, switch the active body preset, and
+    /// re-synthesize FIR/NUPOLS partitions in-place.
+    pub fn reconfigure_from_preset_bytes(
+        &mut self,
+        bytes: &[u8],
+        perspective: ListenerPerspective,
+        lid_state: LidState,
+    ) -> Result<(), PresetDecodeError> {
+        let preset = BodyPreset::decode(bytes)?;
+        self.reconfigure_from_preset(preset, perspective, lid_state);
+        Ok(())
+    }
+
+    /// Switch the active body preset and re-synthesize FIR/NUPOLS partitions in-place.
+    pub fn reconfigure_from_preset(
+        &mut self,
+        preset: BodyPreset,
+        perspective: ListenerPerspective,
+        lid_state: LidState,
+    ) {
+        self.preset = preset;
+        self.perspective = perspective;
+        self.lid_state = lid_state;
+        self.hall_fdn.set_perspective(perspective);
+        self.rebuild_ir_and_load();
+    }
+
+    /// Configure hall reverb decay `[0.0..3.2 s]` and wet mix `[0.0..1.0]`
+    /// (zero-alloc, bypassed completely when `mix <= 0.0 || decay_s <= 0.0`).
+    #[inline]
+    pub fn set_reverb(&mut self, decay_s: f32, mix: f32) {
+        self.hall_fdn.set_reverb(decay_s, mix);
+    }
+
+    /// Current `(reverb_decay_s, reverb_mix)` parameters.
+    #[inline]
+    #[must_use]
+    pub const fn reverb_params(&self) -> (f32, f32) {
+        self.hall_fdn.reverb_params()
+    }
+
+    /// Active [`BodyPreset`] loaded into this radiator bank.
+    #[inline]
+    #[must_use]
+    pub fn preset(&self) -> &BodyPreset {
+        &self.preset
     }
 
     fn rebuild_ir_and_load(&mut self) {
@@ -199,7 +262,8 @@ impl RadiatorBank {
 
             self.head.process_frames(z_slice, l_slice, r_slice);
             self.tail.process_subchunk(z_slice, l_slice, r_slice);
-            limit_stereo_buffers(l_slice, r_slice);
+            self.hall_fdn.process_block(l_slice, r_slice);
+            self.limiter.process_block(l_slice, r_slice);
 
             offset += chunk;
         }
@@ -212,10 +276,13 @@ impl RadiatorBank {
         }
     }
 
-    /// Zero all convolution delay lines and pending NUPOLS rings immediately.
+    /// Zero all convolution delay lines, FDN/ER/IACC buffers, limiter state,
+    /// and pending NUPOLS rings immediately.
     pub fn reset(&mut self) {
         self.head.reset();
         self.tail.reset();
+        self.hall_fdn.reset();
+        self.limiter.reset();
     }
 
     /// Algorithmic latency in samples (always exact `0` via split FIR + NUPOLS).

@@ -6,7 +6,9 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use piano_simd::{AlignedBuf, RealFft};
-use piano_spec::{BodyPreset, LidState, ListenerPerspective, PRESET_RADIATOR_ZONES};
+use piano_spec::{
+    BodyPreset, LidState, ListenerPerspective, PresetDecodeError, PRESET_RADIATOR_ZONES,
+};
 
 use crate::fir_head::{FIR_COEFFS_LEN, HEAD_TAPS};
 use crate::ir_synth::{
@@ -57,6 +59,12 @@ impl SpacePrepContext {
     pub fn new_concert_grand(sample_rate: f64) -> Self {
         let preset = BodyPreset::decode(CONCERT_GRAND_PRESET_BYTES)
             .unwrap_or_else(|_| empty_fallback_preset());
+        Self::new_from_preset(preset, sample_rate)
+    }
+
+    /// Constructs a spatial prep context from decoded `BodyPreset`.
+    #[must_use]
+    pub fn new_from_preset(preset: BodyPreset, sample_rate: f64) -> Self {
         let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
         let ir_len = ir_len_for_sample_rate(sr);
         let max_spec = MAX_TIER_FFT_LEN / 2 + 1;
@@ -75,6 +83,32 @@ impl SpacePrepContext {
             spec_im: vec![0.0; max_spec],
             out_blob: Vec::with_capacity(space_blob_len_for_sample_rate(sr)),
         }
+    }
+
+    /// Decodes `PIANOBOD` bytes and constructs a spatial prep context.
+    pub fn new_from_preset_bytes(
+        bytes: &[u8],
+        sample_rate: f64,
+    ) -> Result<Self, PresetDecodeError> {
+        let preset = BodyPreset::decode(bytes)?;
+        Ok(Self::new_from_preset(preset, sample_rate))
+    }
+
+    /// Replaces the active body preset in-place from serialized `PIANOBOD` bytes.
+    pub fn set_body_preset_bytes(&mut self, bytes: &[u8]) -> Result<(), PresetDecodeError> {
+        self.preset = BodyPreset::decode(bytes)?;
+        Ok(())
+    }
+
+    /// Replaces the active body preset in-place.
+    pub fn set_body_preset(&mut self, preset: BodyPreset) {
+        self.preset = preset;
+    }
+
+    /// Returns the active [`BodyPreset`] used by this spatial prep context.
+    #[must_use]
+    pub fn preset(&self) -> &BodyPreset {
+        &self.preset
     }
 
     /// Synthesizes IRs and pre-FFTs all NUPOLS partitions into a flat POD `f32` slice.
@@ -188,6 +222,7 @@ impl RadiatorBank {
         }
         self.perspective = perspective;
         self.lid_state = lid_state;
+        self.hall_fdn.set_perspective(perspective);
         true
     }
 
@@ -232,6 +267,7 @@ impl RadiatorBank {
         if chunk_end == total_len {
             self.perspective = perspective;
             self.lid_state = lid_state;
+            self.hall_fdn.set_perspective(perspective);
         }
         true
     }
