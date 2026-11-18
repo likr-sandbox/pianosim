@@ -4,7 +4,6 @@
 
 use crate::linalg::{invert_8x8_complex, real_eigenvalues_qr, Complex64};
 pub use crate::pole_cancel_sim::InverseReducedBridge;
-use crate::pole_cancel_sim::ReducedAdmittanceSim;
 use piano_bridge::{AdmittanceSsm, DEFAULT_Y_INF, NUM_BRIDGE_ZONES, NUM_REDUCED_MODES};
 use piano_spec::{
     BodyModeRecord, BodyPreset, PresetReducedPole, PRESET_BRIDGE_ZONES, PRESET_RADIATOR_ZONES,
@@ -269,8 +268,10 @@ pub fn verify_pole_cancellation(preset: &BodyPreset, sample_rate: f32) -> PoleCa
         }
     }
 
-    // Also run discrete sample-domain cascade through Stage 3 reduced admittance -> InverseReducedBridge.
-    let mut ssm = ReducedAdmittanceSim::from_preset(preset, sample_rate);
+    // Also run discrete sample-domain cascade through Stage 3 AdmittanceSsm -> InverseReducedBridge.
+    let mut ssm =
+        AdmittanceSsm::from_reduced_model(sample_rate, &preset.y_inf, &preset.reduced_poles);
+    let a_br = *ssm.a_br();
     let mut inv = InverseReducedBridge::from_preset(preset, sample_rate);
     let mut max_discrete_err = 0.0_f64;
     for n in 0..512 {
@@ -282,7 +283,7 @@ pub fn verify_pole_cancellation(preset: &BodyPreset, sample_rate: f32) -> PoleCa
         let mut v_out = v_free;
         for (r, vr) in v_out.iter_mut().enumerate() {
             for (c, &fc) in f_in.iter().enumerate() {
-                *vr += ssm.a_br[r][c] * fc;
+                *vr += a_br[r][c] * fc;
             }
         }
         ssm.commit_step(&qd_free, &f_in);

@@ -7,8 +7,9 @@ use crate::presets::{body_spec, BodyArchetype};
 use crate::ribs_rim::rim_signed_distance_for;
 use crate::tests::cached_concert_grand;
 use crate::types::{zeta_to_t60, MAX_MODAL_T60_S};
-use piano_bridge::NUM_BRIDGE_ZONES;
-use piano_spec::BodyPreset;
+use piano_bridge::{AdmittanceSsm, BridgeBank, NUM_BRIDGE_ZONES};
+use piano_spec::{BodyPreset, CHOIR_LAYOUTS, TOTAL_STRINGS};
+use std::f64::consts::TAU;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -265,4 +266,78 @@ fn multi_body_presets_differ_measurably_in_geometry_impedance_and_spectra() {
     assert_ne!(grand.zone_pos_m, saloon.zone_pos_m);
     assert_ne!(grand.direct_zone_gain, upright.direct_zone_gain);
     assert_ne!(grand.direct_zone_gain, saloon.direct_zone_gain);
+}
+
+#[test]
+fn stage3_admittance_ssm_and_wdf_passivity_across_all_three_pbdy_presets() {
+    for arch in BodyArchetype::ALL {
+        let disk_bytes = fs::read(asset_path(arch)).expect("read .pbdy asset");
+        let decoded = BodyPreset::decode(&disk_bytes).expect("decode .pbdy asset");
+
+        for sr in [44_100.0_f32, 48_000.0_f32, 96_000.0_f32] {
+            let ssm = AdmittanceSsm::from_reduced_model(sr, &decoded.y_inf, &decoded.reduced_poles);
+            assert_eq!(ssm.y_inf(), &decoded.y_inf);
+            for (got, want) in ssm.poles().iter().zip(decoded.reduced_poles.iter()) {
+                assert_eq!(got.freq_hz, want.freq_hz);
+                assert_eq!(got.zeta, want.zeta);
+                assert_eq!(got.modal_mass_kg, want.modal_mass_kg);
+                assert_eq!(got.zone_gains, want.zone_gains);
+            }
+
+            let rep = verify_pole_cancellation(&decoded, sr);
+            assert!(
+                rep.max_cancelled_excess_db <= 1.0,
+                "{} @ {sr}: cancelled excess {} dB > 1.0 dB",
+                arch.slug(),
+                rep.max_cancelled_excess_db
+            );
+            assert!(
+                rep.max_discrete_cascade_err_db <= 1.0,
+                "{} @ {sr}: AdmittanceSsm cascade err {} dB > 1.0 dB",
+                arch.slug(),
+                rep.max_discrete_cascade_err_db
+            );
+
+            let ts = 1.0 / f64::from(sr);
+            let mut bridge = BridgeBank::new(sr);
+            bridge.set_body_preset(&decoded);
+            assert!(bridge.is_quiescent());
+            let r0 = *bridge.port_resistances();
+            let (mut e_in_wdf, mut max_e) = (0.0_f64, 0.0_f64);
+            let n_steps = (0.03 * f64::from(sr)) as usize;
+            for n in 0..n_steps {
+                let t = (n as f64) * ts;
+                let mut a_waves = [0.0_f32; TOTAL_STRINGS];
+                for k in (4..84).step_by(8) {
+                    let s = usize::from(CHOIR_LAYOUTS[k].first_string_idx);
+                    a_waves[s] = (0.2 * (TAU * (95.0 + 30.0 * (k as f64)) * t).sin()) as f32;
+                }
+                let (mut b_waves, mut zone_out) =
+                    ([0.0_f32; TOTAL_STRINGS], [0.0_f32; NUM_BRIDGE_ZONES]);
+                let _ = bridge.step_bridge_sample(
+                    &a_waves,
+                    &[5.0; NUM_BRIDGE_ZONES],
+                    &mut b_waves,
+                    &mut zone_out,
+                );
+                let power: f64 = (0..TOTAL_STRINGS)
+                    .map(|s| {
+                        let a = f64::from(a_waves[s]);
+                        let b = f64::from(b_waves[s]);
+                        0.25 * f64::from(r0[s]) * (a * a - b * b)
+                    })
+                    .sum();
+                e_in_wdf += ts * power;
+                let cur_e = bridge.total_energy_joules();
+                max_e = max_e.max(cur_e);
+                let eps = 1.0e-8 * (max_e.max(e_in_wdf.abs()) + 1.0e-9);
+                assert!(
+                    cur_e <= e_in_wdf + eps,
+                    "{} @ {sr}: WDF passivity violation at step {n} (cur_e={cur_e}, e_in={e_in_wdf})",
+                    arch.slug()
+                );
+            }
+            assert!(bridge.dissipated_energy_joules() > 0.0);
+        }
+    }
 }

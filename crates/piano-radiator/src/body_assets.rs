@@ -35,17 +35,18 @@ pub const fn body_asset_filename(id: BodyArchetype) -> &'static str {
     }
 }
 
+/// Deterministic physics-baked 9-zone upright studio `PIANOBOD` asset.
+pub const UPRIGHT_STUDIO_PRESET_BYTES: &[u8] = include_bytes!("../assets/upright_studio_v1.pbdy");
+
+/// Deterministic physics-baked 9-zone vintage saloon `PIANOBOD` asset.
+pub const VINTAGE_SALOON_PRESET_BYTES: &[u8] = include_bytes!("../assets/vintage_saloon_v1.pbdy");
+
 /// Returns the embedded serialized `PIANOBOD` bytes for `id`.
-///
-/// Note: `upright_studio_v1.pbdy` and `vintage_saloon_v1.pbdy` are integrated
-/// into `crates/piano-radiator/assets/` by `w3_1_integrator`; until those
-/// assets land on `main`, non-grand archetypes fall back cleanly to the
-/// embedded concert-grand `.pbdy` bytes.
 #[must_use]
 pub fn embedded_body_bytes(id: BodyArchetype) -> &'static [u8] {
     match id {
         BodyArchetype::ConcertGrand => CONCERT_GRAND_PRESET_BYTES,
-        BodyArchetype::UprightStudio => CONCERT_GRAND_PRESET_BYTES,
-        BodyArchetype::VintageSaloon => CONCERT_GRAND_PRESET_BYTES,
+        BodyArchetype::UprightStudio => UPRIGHT_STUDIO_PRESET_BYTES,
+        BodyArchetype::VintageSaloon => VINTAGE_SALOON_PRESET_BYTES,
     }
 }

@@ -33,13 +33,101 @@ fn body_archetype_enum_filenames_and_embedded_bytes() {
         "vintage_saloon_v1.pbdy"
     );
 
-    for arch in [
+    let grand_bytes = embedded_body_bytes(BodyArchetype::ConcertGrand);
+    let upright_bytes = embedded_body_bytes(BodyArchetype::UprightStudio);
+    let saloon_bytes = embedded_body_bytes(BodyArchetype::VintageSaloon);
+    assert_ne!(grand_bytes, upright_bytes);
+    assert_ne!(grand_bytes, saloon_bytes);
+    assert_ne!(upright_bytes, saloon_bytes);
+
+    let grand = BodyPreset::decode(grand_bytes).expect("valid concert grand bytes");
+    let upright = BodyPreset::decode(upright_bytes).expect("valid upright studio bytes");
+    let saloon = BodyPreset::decode(saloon_bytes).expect("valid vintage saloon bytes");
+    assert!(!grand.modes.is_empty());
+    assert!(!upright.modes.is_empty());
+    assert!(!saloon.modes.is_empty());
+    assert_ne!(grand.y_inf, upright.y_inf);
+    assert_ne!(grand.y_inf, saloon.y_inf);
+    assert_ne!(upright.y_inf, saloon.y_inf);
+    assert_ne!(grand.reduced_poles, upright.reduced_poles);
+    assert_ne!(grand.reduced_poles, saloon.reduced_poles);
+    assert_ne!(upright.reduced_poles, saloon.reduced_poles);
+}
+
+#[test]
+fn all_three_embedded_pbdy_archetypes_synthesize_measurably_distinct_irs_and_audio() {
+    let sr = 48_000.0;
+    let archetypes = [
         BodyArchetype::ConcertGrand,
         BodyArchetype::UprightStudio,
         BodyArchetype::VintageSaloon,
-    ] {
-        let decoded = BodyPreset::decode(embedded_body_bytes(arch)).expect("valid embedded bytes");
-        assert!(!decoded.modes.is_empty());
+    ];
+    let mut presets = Vec::with_capacity(3);
+    let mut irs = Vec::with_capacity(3);
+    let mut outputs = Vec::with_capacity(3);
+    let mut blobs = Vec::with_capacity(3);
+
+    let mut impulse_block = [[0.0_f32; PRESET_RADIATOR_ZONES]; 128];
+    impulse_block[0] = [0.25; PRESET_RADIATOR_ZONES];
+
+    for arch in archetypes {
+        let bytes = embedded_body_bytes(arch);
+        let decoded = BodyPreset::decode(bytes).expect("valid embedded preset");
+        let ir = RadiatorBank::synthesize_ir_for_test(
+            &decoded,
+            sr,
+            ListenerPerspective::Player,
+            LidState::Open,
+        );
+        let mut bank = RadiatorBank::from_preset_bytes(bytes, sr).expect("construct bank");
+        let (mut out_l, mut out_r) = ([0.0_f32; 128], [0.0_f32; 128]);
+        bank.process_block(&impulse_block, &mut out_l, &mut out_r);
+        let e_out: f64 = out_l
+            .iter()
+            .chain(out_r.iter())
+            .map(|&x| f64::from(x) * f64::from(x))
+            .sum();
+        assert!(e_out > 1.0e-4, "{arch:?} produced silent output {e_out}");
+
+        let mut prep = SpacePrepContext::new_from_preset_bytes(bytes, sr).expect("space prep");
+        let blob = prep
+            .prepare_space(ListenerPerspective::Player, LidState::Open)
+            .to_vec();
+        blobs.push(blob);
+        presets.push(decoded);
+        irs.push(ir);
+        outputs.push((out_l, out_r));
+    }
+
+    let ir_rel_l2 = |a: &[[Vec<f32>; 2]; PRESET_RADIATOR_ZONES],
+                     b: &[[Vec<f32>; 2]; PRESET_RADIATOR_ZONES]|
+     -> f64 {
+        let (mut diff_sq, mut norm_sq) = (0.0_f64, 0.0_f64);
+        for z in 0..PRESET_RADIATOR_ZONES {
+            for ch in 0..2 {
+                for (&x, &y) in a[z][ch].iter().zip(b[z][ch].iter()) {
+                    let fx = f64::from(x);
+                    let fy = f64::from(y);
+                    diff_sq += (fx - fy) * (fx - fy);
+                    norm_sq += fx * fx + fy * fy;
+                }
+            }
+        }
+        (diff_sq / norm_sq.max(1.0e-30)).sqrt()
+    };
+
+    for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+        assert_ne!(presets[i].direct_zone_gain, presets[j].direct_zone_gain);
+        assert_ne!(presets[i].zone_pos_m, presets[j].zone_pos_m);
+        assert_ne!(blobs[i], blobs[j]);
+        assert_ne!(outputs[i], outputs[j]);
+        let rel = ir_rel_l2(&irs[i], &irs[j]);
+        assert!(
+            rel > 0.10,
+            "{:?} vs {:?} synthesized IRs too similar (rel L2={rel:.4})",
+            archetypes[i],
+            archetypes[j]
+        );
     }
 }
 
