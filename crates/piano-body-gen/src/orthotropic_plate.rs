@@ -392,12 +392,10 @@ fn extend_statistical_rayleigh_modes(modes: &mut Vec<SolvedBodyMode>, f_start: f
             let x = pos[0] as f64;
             let y = pos[1] as f64;
             let rim_d = rim_signed_distance_m(x, y).clamp(0.0, 0.25);
-            let boundary_fade = (rim_d / 0.14).clamp(0.35, 1.0);
+            let boundary_fade = (rim_d / 0.14).clamp(if z <= 1 { 0.50 } else { 0.35 }, 1.0);
             // Mid/treble bridge modes localize and radiate strongly above ~1.85 kHz.
             let treble_focus = if freq_hz > 1_850.0 && z >= 3 {
                 1.85
-            } else if freq_hz > 5_000.0 && z <= 1 {
-                0.72
             } else {
                 1.0
             };

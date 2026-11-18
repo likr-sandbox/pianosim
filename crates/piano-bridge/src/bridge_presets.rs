@@ -27,17 +27,17 @@ pub struct ReducedBridgePole {
 /// Default high-frequency passive local resistive mobility `y_inf` `[m / (N*s)]`
 /// across bridge zones `0..8`, preventing any `1.13 kHz` brick wall on treble/longitudinal signals.
 pub const DEFAULT_Y_INF: [f32; NUM_BRIDGE_ZONES] = [
-    0.000_14, 0.000_16, 0.000_28, 0.000_28, 0.000_28, 0.000_24, 0.000_22, 0.000_16,
+    0.000_32, 0.000_30, 0.000_13, 0.000_095, 0.000_24, 0.000_16, 0.000_22, 0.000_25,
 ];
 
 const MODE_FREQS_HZ: [f32; NUM_REDUCED_MODES] = [
     54.0, 89.0, 142.0, 212.0, 285.0, 405.0, 530.0, 730.0, 930.0, 1130.0,
 ];
 const MODE_ZETAS: [f32; NUM_REDUCED_MODES] = [
-    0.055, 0.042, 0.030, 0.020, 0.020, 0.019, 0.024, 0.021, 0.020, 0.019,
+    0.055, 0.042, 0.030, 0.020, 0.020, 0.0145, 0.024, 0.021, 0.020, 0.019,
 ];
 const MODE_MASSES_KG: [f32; NUM_REDUCED_MODES] =
-    [3.60, 2.50, 1.25, 0.68, 0.48, 0.56, 0.90, 2.20, 2.90, 3.40];
+    [3.60, 2.50, 1.25, 0.68, 0.48, 0.385, 0.90, 2.20, 2.90, 3.40];
 
 /// Dimensionless spatial mode gains at each of the 8 bridge zones for the 10 reduced modes.
 pub const MODE_ZONE_GAINS: [[f32; NUM_BRIDGE_ZONES]; NUM_REDUCED_MODES] = [
@@ -46,7 +46,7 @@ pub const MODE_ZONE_GAINS: [[f32; NUM_BRIDGE_ZONES]; NUM_REDUCED_MODES] = [
     [0.05, 0.06, -0.26, -0.32, -0.28, -0.12, 0.18, 0.22],
     [0.04, -0.05, -0.34, -0.36, -0.20, 0.26, 0.20, -0.16],
     [-0.04, 0.05, 0.28, 0.40, 0.26, -0.20, -0.26, 0.18],
-    [0.03, -0.04, 0.18, 0.36, -0.24, -0.32, 0.14, 0.24],
+    [0.03, -0.04, 0.21, 0.45, -0.29, -0.38, 0.16, 0.24],
     [-0.04, 0.06, -0.12, 0.30, 0.30, -0.20, -0.16, 0.14],
     [-0.03, 0.05, -0.10, 0.14, -0.14, -0.14, 0.16, -0.12],
     [0.03, -0.04, 0.08, -0.12, 0.14, -0.12, -0.16, 0.16],

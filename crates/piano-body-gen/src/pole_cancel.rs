@@ -15,14 +15,14 @@ use std::f64::consts::PI;
 /// Tapering from thinner rim-adjacent bass/treble zones toward the central soundboard belly
 /// matches the acoustic direct arrival strength prior to modal reverberation buildup.
 pub const CALIBRATED_DIRECT_ZONE_GAIN: [f32; PRESET_RADIATOR_ZONES] = [
-    0.052, // Zone 0: Bass bridge tail end
-    0.068, // Zone 1: Upper bass bridge
-    0.092, // Zone 2: Low tenor belly entry
-    0.116, // Zone 3: Tenor center belly
-    0.118, // Zone 4: Middle belly apex
-    0.112, // Zone 5: Upper middle belly
-    0.090, // Zone 6: Lower treble bridge
-    0.082, // Zone 7: Top treble capo corner
+    0.100, // Zone 0: Bass bridge tail end
+    0.104, // Zone 1: Upper bass bridge
+    0.215, // Zone 2: Low tenor belly entry
+    0.165, // Zone 3: Tenor center belly
+    0.249, // Zone 4: Middle belly apex
+    0.245, // Zone 5: Upper middle belly
+    0.120, // Zone 6: Lower treble bridge
+    0.105, // Zone 7: Top treble capo corner
     0.044, // Zone 8: Wooden keybed direct transient (KEYBED_ZONE_IDX)
 ];
 
