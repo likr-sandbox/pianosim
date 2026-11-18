@@ -85,6 +85,11 @@ async function runDirectWasmBench(page, wasmPath) {
             wasm.piano_note_on(ctx, key, toU16Vel(100), 0);
           }
           wasm.piano_render(ctx, 128);
+        } else if (type === 'half_pedal_arp') {
+          wasm.piano_set_reverb(ctx, 1.6, 0.18);
+          wasm.piano_pedal(ctx, 0, Math.round((45 * 65535) / 127), 0);
+          wasm.piano_note_on(ctx, 48, toU16Vel(78), 0);
+          wasm.piano_render(ctx, 128);
         }
 
         let arpCursor = 0;
@@ -103,6 +108,14 @@ async function runDirectWasmBench(page, wasmPath) {
             const key = SUSTAIN_20_KEYS[susCursor % SUSTAIN_20_KEYS.length];
             susCursor++;
             wasm.piano_note_on(ctx, key, toU16Vel(96), 64);
+          } else if (type === 'half_pedal_arp' && b % 46 === 0) {
+            const prev = ARPEGGIO_KEYS[arpCursor % ARPEGGIO_KEYS.length];
+            const next = ARPEGGIO_KEYS[(arpCursor + 1) % ARPEGGIO_KEYS.length];
+            const cc = 42 + ((arpCursor * 3) % 18);
+            arpCursor++;
+            wasm.piano_pedal(ctx, 0, Math.round((cc * 65535) / 127), 0);
+            wasm.piano_note_off(ctx, prev, toU16Vel(48), 0);
+            wasm.piano_note_on(ctx, next, toU16Vel(80), 32);
           }
 
           if (b < warmupCount) {
@@ -134,10 +147,24 @@ async function runDirectWasmBench(page, wasmPath) {
       }
 
       const idle = await executeScenario('idle');
+      // Allow V8 TurboFan background SIMD tier-up to settle after initial instantiation.
+      {
+        const warmInst = await WebAssembly.instantiate(wasmModule, {});
+        const ww = warmInst.exports;
+        const wctx = ww.piano_init(48000.0);
+        ww.piano_pedal(wctx, 0, Math.round((43 * 65535) / 127), 0);
+        for (const key of SUSTAIN_20_KEYS) ww.piano_note_on(wctx, key, toU16Vel(104), 0);
+        for (let i = 0; i < 48; i++) ww.piano_render(wctx, 128);
+        for (const key of SUSTAIN_20_KEYS) ww.piano_note_off(wctx, key, toU16Vel(56), 0);
+        for (let i = 0; i < 48; i++) ww.piano_render(wctx, 128);
+        ww.piano_destroy(wctx);
+        await new Promise((r) => setTimeout(r, 250));
+      }
       const chord = await executeScenario('chord12_arp');
       const sustain20 = await executeScenario('sustain20');
+      const halfPedalArp = await executeScenario('half_pedal_arp');
 
-      return { idle, chord, sustain20 };
+      return { idle, chord, sustain20, halfPedalArp };
     },
     { wasmBase64, warmupCount: WARMUP_BLOCKS, timedCount: TIMED_BLOCKS },
   );
@@ -302,6 +329,7 @@ async function main() {
       { name: 'Direct Wasm: Idle / Silence', res: wasmRes.idle },
       { name: 'Direct Wasm: 12-chord + arpeggio', res: wasmRes.chord },
       { name: 'Direct Wasm: 20-voice sustain', res: wasmRes.sustain20 },
+      { name: 'Direct Wasm: Half-pedal arpeggio', res: wasmRes.halfPedalArp },
     ];
 
     for (const sc of scenarios) {

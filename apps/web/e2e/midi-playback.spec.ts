@@ -246,12 +246,15 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
       expect(audio.rms).toBeGreaterThan(0.003);
     }
 
-    // Verify telemetry HUD p99 callback is finite and non-negative
-    const hudP99 = await page.evaluate(() => {
+    // Verify telemetry HUD p99 callback is finite and non-negative, and no clipping occurred
+    const diagCheck = await page.evaluate(() => {
       const text = document.querySelector('[data-testid="hud-p99"]')?.textContent;
-      return text ? parseFloat(text) : NaN;
+      const p99 = text ? parseFloat(text) : NaN;
+      const clipped = window.__PIANO_DIAG__?.telemetry.clipped ?? true;
+      return { p99, clipped };
     });
-    expect(Number.isFinite(hudP99) && hudP99 >= 0).toBe(true);
+    expect(Number.isFinite(diagCheck.p99) && diagCheck.p99 >= 0).toBe(true);
+    expect(diagCheck.clipped).toBe(false);
 
     await page.getByTestId('transport-stop').click();
   });

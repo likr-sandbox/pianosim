@@ -215,7 +215,7 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       exports.piano_pedal(ctx, 0, 40_000, 0);
       for (const midi of ACTIVE12_WARMUP_KEYS) exports.piano_note_on(ctx, midi, 42_000, 0);
       for (let i = 0; i < 120; i++) exports.piano_render(ctx, 128);
-      exports.piano_set_body_space(ctx, BODY_CONCERT_GRAND, 1, 1);
+      exports.piano_set_body_space(ctx, 1, 1, 1);
       exports.piano_set_reverb(ctx, 2.0, 0.25);
       for (let i = 0; i < 4; i++) exports.piano_render(ctx, 128);
       exports.piano_set_body_space(ctx, BODY_CONCERT_GRAND, 0, 2);
@@ -228,6 +228,15 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       exports.piano_set_concert_pitch(ctx, 415.0);
       for (let i = 0; i < 4; i++) exports.piano_render(ctx, 128);
       exports.piano_set_voicing_full(ctx, 0.5, 1.0, 1.0, 1.0, 440.0, 0, 0.0);
+      for (const midi of ACTIVE12_WARMUP_KEYS) exports.piano_note_off(ctx, midi, 32_768, 0);
+      exports.piano_pedal(ctx, 0, 21_671, 0);
+      for (let i = 0; i < 24; i++) exports.piano_render(ctx, 128);
+      exports.piano_pedal(ctx, 0, 23_220, 0);
+      for (let i = 0; i < 12; i++) exports.piano_render(ctx, 128);
+      exports.piano_pedal(ctx, 0, 0, 0);
+      for (let i = 0; i < 24; i++) exports.piano_render(ctx, 128);
+      exports.piano_pedal(ctx, 0, 30_000, 0);
+      for (let i = 0; i < 8; i++) exports.piano_render(ctx, 128);
       exports.piano_pedal(ctx, 0, 0, 0);
       exports.piano_all_notes_off(ctx);
       for (let i = 0; i < 16; i++) exports.piano_render(ctx, 128);
