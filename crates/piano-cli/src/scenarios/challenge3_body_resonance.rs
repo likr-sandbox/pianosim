@@ -58,7 +58,7 @@ fn render_note_hold(midi_key: u8, vel_u16: u16, sustain_u16: u16, secs: f64) -> 
     while pos < total {
         let n = (total - pos).min(128);
         let cur = if pos == 0 { &evs[..] } else { &[] };
-        engine.render_block_bridge(cur, &mut out_l[pos..pos + n], &mut out_r[pos..pos + n]);
+        engine.render_block(cur, &mut out_l[pos..pos + n], &mut out_r[pos..pos + n]);
         pos += n;
     }
     mono_mix(&out_l, &out_r)

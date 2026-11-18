@@ -4,6 +4,8 @@ use std::f64::consts::TAU;
 
 use piano_simd::{Complex, RealFft};
 
+pub use super::f0_estimator::measure_f0_hz;
+
 /// Stereo downmix to monaural signal.
 #[must_use]
 pub fn mono_mix(l: &[f32], r: &[f32]) -> Vec<f32> {
@@ -107,34 +109,6 @@ pub fn goertzel_power_f64(win: &[f64], freq_hz: f64, sr: f64) -> f64 {
         s1 = s0;
     }
     (s1 * s1 + s2 * s2 - coeff * s1 * s2).max(1.0e-30)
-}
-
-/// High-resolution fundamental frequency estimator via Goertzel and parabolic peak refinement.
-#[must_use]
-pub fn measure_f0_hz(mono: &[f32], f_nominal_hz: f64, sr: f64) -> f64 {
-    let win = blackman_harris_window(mono);
-    let mut best_f = f_nominal_hz;
-    let mut best_p = 0.0_f64;
-    for step in -200..=200 {
-        let f_try = f_nominal_hz * 2.0_f64.powf((step as f64 * 0.5) / 1200.0);
-        let p = goertzel_power_f64(&win, f_try, sr);
-        if p > best_p {
-            best_p = p;
-            best_f = f_try;
-        }
-    }
-    let dc = 0.5_f64;
-    let r = 2.0_f64.powf(dc / 1200.0);
-    let p_lo = goertzel_power_f64(&win, best_f / r, sr);
-    let p_mid = goertzel_power_f64(&win, best_f, sr);
-    let p_hi = goertzel_power_f64(&win, best_f * r, sr);
-    let denom_q = p_lo - 2.0 * p_mid + p_hi;
-    let shift = if denom_q < 0.0 {
-        (0.5 * (p_lo - p_hi) / denom_q).clamp(-1.0, 1.0) * dc
-    } else {
-        0.0
-    };
-    best_f * 2.0_f64.powf(shift / 1200.0)
 }
 
 /// Ordinary least squares linear regression slope.
