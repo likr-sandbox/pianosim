@@ -3,6 +3,7 @@ import {
   sampleDestinationAudio,
   setupErrorMonitoring,
   unlockAudioEngine,
+  waitForAudioRms,
 } from './helpers/audio-diag';
 
 test.describe('E2E Enriched Demo Scores Suite', () => {
@@ -50,16 +51,13 @@ test.describe('E2E Enriched Demo Scores Suite', () => {
       await page.getByTestId('demo-select').selectOption(demo.id);
       await page.getByTestId('transport-play').click();
 
-      // Wait for playback to begin sounding
-      await page.waitForTimeout(450);
+      const playing = await waitForAudioRms(page, 0.003);
 
-      const playing = await sampleDestinationAudio(page);
-      expect(playing.nonFiniteCount).toBe(0);
-      expect(playing.peak).toBeLessThanOrEqual(1.0);
-      expect(playing.rms).toBeGreaterThan(0.003);
-
-      const voices = Number(await page.getByTestId('hud-voices').textContent());
-      expect(voices).toBeGreaterThan(0);
+      await expect
+        .poll(async () => Number(await page.getByTestId('hud-voices').textContent()), {
+          timeout: 2000,
+        })
+        .toBeGreaterThan(0);
 
       // Verify stop clears voices and audio decays to silence
       await page.getByTestId('transport-stop').click();
@@ -74,10 +72,7 @@ test.describe('E2E Enriched Demo Scores Suite', () => {
     // Start Beethoven Moonlight
     await page.getByTestId('demo-select').selectOption('beethoven-moonlight');
     await page.getByTestId('transport-play').click();
-    await page.waitForTimeout(400);
-
-    const firstStats = await sampleDestinationAudio(page);
-    expect(firstStats.rms).toBeGreaterThan(0.003);
+    await waitForAudioRms(page, 0.003);
 
     // Switch mid-playback to Rachmaninoff Prelude
     await page.getByTestId('demo-select').selectOption('rachmaninoff-prelude');
@@ -86,12 +81,7 @@ test.describe('E2E Enriched Demo Scores Suite', () => {
 
     // Play the new score
     await page.getByTestId('transport-play').click();
-    await page.waitForTimeout(400);
-
-    const secondStats = await sampleDestinationAudio(page);
-    expect(secondStats.nonFiniteCount).toBe(0);
-    expect(secondStats.peak).toBeLessThanOrEqual(1.0);
-    expect(secondStats.rms).toBeGreaterThan(0.003);
+    await waitForAudioRms(page, 0.003);
 
     // Clean stop
     await page.getByTestId('transport-stop').click();

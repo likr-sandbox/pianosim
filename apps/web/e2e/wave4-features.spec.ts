@@ -8,6 +8,10 @@ import {
   setSlider,
   setupErrorMonitoring,
   unlockAudioEngine,
+  waitAudioBlocks,
+  waitForAudioRms,
+  waitForPrepIdle,
+  waitForSilence,
 } from './helpers/audio-diag';
 
 test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
@@ -32,10 +36,10 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
 
     await page.getByTestId('voicing-a4-chip-392').click();
     await expect(page.getByTestId('trigger-a4')).toHaveText('A4 = 392.0 Hz');
-    await page.waitForTimeout(450);
+    await waitForPrepIdle(page);
 
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(350);
+    await waitAudioBlocks(page, 96);
     const low392 = await sampleDestinationAudio(page, 360, 440);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
     expect(low392.nonFiniteCount).toBe(0);
@@ -44,14 +48,14 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
     expect(low392.peakFreqHz).toBeLessThanOrEqual(398);
 
     await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
+    await waitForSilence(page);
 
     await setSlider(page, 'voicing-a4', 466.2);
     await expect(page.getByTestId('trigger-a4')).toHaveText('A4 = 466.2 Hz');
-    await page.waitForTimeout(450);
+    await waitForPrepIdle(page);
 
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(350);
+    await waitAudioBlocks(page, 96);
     const high4662 = await sampleDestinationAudio(page, 430, 500);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
     expect(high4662.nonFiniteCount).toBe(0);
@@ -71,15 +75,15 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
 
     // Measure Equal (0) C5 (~523.25 Hz) and E4 (~329.63 Hz)
     await tempSelect.selectOption('0');
-    await page.waitForTimeout(450);
+    await waitForPrepIdle(page);
     await c5Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 96);
     const eqC5 = await sampleDestinationAudio(page, 480, 560);
     await c5Key.dispatchEvent('pointerup', { buttons: 0 });
     await expectAudioDecay(page, eqC5.rms, 0.15, 3000);
 
     await e4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 96);
     const eqE4 = await sampleDestinationAudio(page, 300, 360);
     await e4Key.dispatchEvent('pointerup', { buttons: 0 });
     await expectAudioDecay(page, eqE4.rms, 0.15, 3000);
@@ -87,10 +91,10 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
     // Measure Kirnberger III (2): A-anchored C5 is +10.26 cents (+3.1 Hz) and E4 is -3.42 cents (-0.65 Hz)
     await tempSelect.selectOption('2');
     await expect(page.getByTestId('preset-custom-badge')).toBeVisible();
-    await page.waitForTimeout(450);
+    await waitForPrepIdle(page);
 
     await c5Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 96);
     const kirnC5 = await sampleDestinationAudio(page, 480, 560);
     await c5Key.dispatchEvent('pointerup', { buttons: 0 });
     expect(kirnC5.nonFiniteCount).toBe(0);
@@ -99,7 +103,7 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
     await expectAudioDecay(page, kirnC5.rms, 0.15, 3000);
 
     await e4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 96);
     const kirnE4 = await sampleDestinationAudio(page, 300, 360);
     await e4Key.dispatchEvent('pointerup', { buttons: 0 });
     expect(kirnE4.nonFiniteCount).toBe(0);
@@ -109,11 +113,11 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
     // Cycle remaining temperaments (Werckmeister III=1, Vallotti=3) and verify A4 stays anchored at ~440 Hz
     for (const id of ['1', '3']) {
       await page.getByTestId('panic-btn').click();
-      await page.waitForTimeout(150);
+      await waitForSilence(page);
       await tempSelect.selectOption(id);
-      await page.waitForTimeout(450);
+      await waitForPrepIdle(page);
       await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-      await page.waitForTimeout(300);
+      await waitAudioBlocks(page, 96);
       const a4Stats = await sampleDestinationAudio(page, 410, 470);
       await a4Key.dispatchEvent('pointerup', { buttons: 0 });
       expect(a4Stats.nonFiniteCount).toBe(0);
@@ -132,26 +136,26 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
     // Mint condition (0%)
     await page.getByTestId('preset-concert-grand').click();
     expect(Number(await page.getByTestId('voicing-condition').inputValue())).toBe(0);
-    await page.waitForTimeout(450);
+    await waitForPrepIdle(page);
 
     await c4Key.dispatchEvent('pointerdown', { buttons: 1 });
     await e4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 96);
     const mintStats = await sampleDestinationAudio(page);
     await c4Key.dispatchEvent('pointerup', { buttons: 0 });
     await e4Key.dispatchEvent('pointerup', { buttons: 0 });
 
     await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
+    await waitForSilence(page);
 
     // Heavily aged condition (100%)
     await setSlider(page, 'voicing-condition', 100);
     await expect(page.getByTestId('preset-custom-badge')).toBeVisible();
-    await page.waitForTimeout(500);
+    await waitForPrepIdle(page);
 
     await c4Key.dispatchEvent('pointerdown', { buttons: 1 });
     await e4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 96);
     const agedStats = await sampleDestinationAudio(page);
     await c4Key.dispatchEvent('pointerup', { buttons: 0 });
     await e4Key.dispatchEvent('pointerup', { buttons: 0 });
@@ -178,7 +182,7 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
     // Upper key strike (soft)
     await page.mouse.move(centerX, topY);
     await page.mouse.down();
-    await page.waitForTimeout(320);
+    await waitAudioBlocks(page, 96);
     const topStats = await sampleDestinationAudio(page);
     await page.mouse.up();
     expect(topStats.nonFiniteCount).toBe(0);
@@ -188,7 +192,7 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
     // Lower key strike (strong)
     await page.mouse.move(centerX, bottomY);
     await page.mouse.down();
-    await page.waitForTimeout(320);
+    await waitAudioBlocks(page, 96);
     const bottomStats = await sampleDestinationAudio(page);
     await page.mouse.up();
     expect(bottomStats.nonFiniteCount).toBe(0);
@@ -234,11 +238,7 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
     // Play humanized Debussy Clair de Lune in real AudioWorklet
     await page.getByTestId('demo-select').selectOption('debussy-claire');
     await page.getByTestId('transport-play').click();
-    await page.waitForTimeout(550);
-    const stats = await sampleDestinationAudio(page);
-    expect(stats.nonFiniteCount).toBe(0);
-    expect(stats.peak).toBeLessThanOrEqual(1.0);
-    expect(stats.rms).toBeGreaterThan(0.002);
+    await waitForAudioRms(page, 0.002);
     await page.getByTestId('transport-stop').click();
   });
 
@@ -256,11 +256,11 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
     await expect(stopBtn).toBeEnabled();
     await expect(statusEl).toContainText('REC');
 
-    // Record a real C major triad
+    // Record a real C major triad (~427 ms = 160 blocks > 0.25 s)
     for (const midi of [60, 64, 67]) {
       await page.locator(`[data-midi="${midi}"]`).dispatchEvent('pointerdown', { buttons: 1 });
     }
-    await page.waitForTimeout(600);
+    await waitAudioBlocks(page, 160);
     for (const midi of [60, 64, 67]) {
       await page.locator(`[data-midi="${midi}"]`).dispatchEvent('pointerup', { buttons: 0 });
     }

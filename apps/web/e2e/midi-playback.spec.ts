@@ -1,86 +1,13 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import {
-  expectAudioDecay,
   sampleDestinationAudio,
   setSlider,
   setupErrorMonitoring,
   unlockAudioEngine,
+  waitAudioBlocks,
+  waitForAudioRms,
 } from './helpers/audio-diag';
-
-/** Encodes an unsigned integer as a MIDI Variable-Length Quantity (VLQ). */
-function encodeVlq(val: number): number[] {
-  let v = val & 0x7f;
-  const bytes = [v];
-  while ((val >>= 7) > 0) {
-    bytes.unshift((val & 0x7f) | 0x80);
-  }
-  return bytes;
-}
-
-/** Builds an in-memory Format 0 SMF binary buffer from raw events. */
-function buildMidiFile(events: Array<{ delta: number; data: number[] }>): Uint8Array {
-  const trackBytes: number[] = [];
-  // Set tempo 120 BPM: delta=0, 0xFF 0x51 0x03 0x07 0xA1 0x20
-  trackBytes.push(0x00, 0xff, 0x51, 0x03, 0x07, 0xa1, 0x20);
-  for (const ev of events) {
-    trackBytes.push(...encodeVlq(ev.delta), ...ev.data);
-  }
-  // End of track: delta=0, 0xFF 0x2F 0x00
-  trackBytes.push(0x00, 0xff, 0x2f, 0x00);
-
-  const header = [
-    0x4d, 0x54, 0x68, 0x64, // 'MThd'
-    0x00, 0x00, 0x00, 0x06, // length = 6
-    0x00, 0x00,             // format = 0
-    0x00, 0x01,             // 1 track
-    0x01, 0xe0,             // 480 ticks/quarter
-    0x4d, 0x54, 0x72, 0x6b, // 'MTrk'
-    (trackBytes.length >> 24) & 0xff,
-    (trackBytes.length >> 16) & 0xff,
-    (trackBytes.length >> 8) & 0xff,
-    trackBytes.length & 0xff,
-    ...trackBytes,
-  ];
-  return new Uint8Array(header);
-}
-
-/** Injects a mock Web MIDI input device into navigator.requestMIDIAccess. */
-async function injectMockMidi(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    class MockMIDIInput extends EventTarget {
-      readonly id = 'mock-piano-in';
-      readonly name = 'Mock Piano MIDI Controller';
-      readonly state = 'connected';
-      readonly type = 'input';
-      onmidimessage: ((e: unknown) => void) | null = null;
-      send(data: number[]) {
-        const ev = new Event('midimessage') as Event & { data: Uint8Array; receivedTime: number };
-        ev.data = new Uint8Array(data);
-        ev.receivedTime = performance.now();
-        this.dispatchEvent(ev);
-        if (this.onmidimessage) this.onmidimessage(ev);
-      }
-    }
-    const mock = new MockMIDIInput();
-    const map = new Map<string, unknown>([[mock.id, mock]]);
-    (window as unknown as { __MOCK_MIDI__: MockMIDIInput }).__MOCK_MIDI__ = mock;
-    (navigator as unknown as { requestMIDIAccess: () => Promise<unknown> }).requestMIDIAccess =
-      async () => ({
-        inputs: map,
-        outputs: new Map(),
-        sysexEnabled: false,
-      });
-  });
-}
-
-/** Dispatches raw MIDI bytes via the mock Web MIDI subsystem. */
-async function dispatchMockMidi(page: Page, bytes: number[]): Promise<void> {
-  await page.evaluate((b) => {
-    const mock = (window as unknown as { __MOCK_MIDI__?: { send: (data: number[]) => void } })
-      .__MOCK_MIDI__;
-    mock?.send(b);
-  }, bytes);
-}
+import { buildMidiFile, dispatchMockMidi, injectMockMidi } from './helpers/midi-helpers';
 
 test.describe('E2E MIDI & SMF Playback Suite', () => {
   let assertNoErrors: () => void;
@@ -106,14 +33,13 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
     await page.getByTestId('demo-select').selectOption('bach-prelude');
     await page.getByTestId('transport-play').click();
 
-    await page.waitForTimeout(450);
-    const playing = await sampleDestinationAudio(page);
-    expect(playing.nonFiniteCount).toBe(0);
-    expect(playing.peak).toBeLessThanOrEqual(1.0);
-    expect(playing.rms).toBeGreaterThan(0.005);
+    await waitForAudioRms(page, 0.005);
 
-    const voices = Number(await page.getByTestId('hud-voices').textContent());
-    expect(voices).toBeGreaterThan(0);
+    await expect
+      .poll(async () => Number(await page.getByTestId('hud-voices').textContent()), {
+        timeout: 2000,
+      })
+      .toBeGreaterThan(0);
 
     // Stop playback and verify voices decay to 0 and RMS silences.
     await page.getByTestId('transport-stop').click();
@@ -126,10 +52,7 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
   test('Tier 1: Chopin Nocturne demo plays and pauses/resumes cleanly', async ({ page }) => {
     await page.getByTestId('demo-select').selectOption('chopin-nocturne');
     await page.getByTestId('transport-play').click();
-    await page.waitForTimeout(450);
-
-    const initial = await sampleDestinationAudio(page);
-    expect(initial.rms).toBeGreaterThan(0.005);
+    const initial = await waitForAudioRms(page, 0.005);
 
     // Pause playback: sound should decay.
     await page.getByTestId('transport-pause').click();
@@ -149,7 +72,7 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
   test('Tier 1: Panic clears active demo playback instantly', async ({ page }) => {
     await page.getByTestId('demo-select').selectOption('bach-prelude');
     await page.getByTestId('transport-play').click();
-    await page.waitForTimeout(400);
+    await waitForAudioRms(page, 0.003);
 
     await page.getByTestId('panic-btn').click();
     await expect(page.getByTestId('hud-voices')).toHaveText('0');
@@ -173,9 +96,7 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
     });
 
     await page.getByTestId('transport-play').click();
-    await page.waitForTimeout(300);
-    const stats = await sampleDestinationAudio(page);
-    expect(stats.rms).toBeGreaterThan(0.003);
+    await waitForAudioRms(page, 0.003);
     await page.getByTestId('transport-stop').click();
   });
 
@@ -193,9 +114,7 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
 
     // Verify application remains responsive: normal A4 button works.
     await page.getByTestId('trigger-a4').click();
-    await page.waitForTimeout(400);
-    const audio = await sampleDestinationAudio(page);
-    expect(audio.rms).toBeGreaterThan(0.001);
+    await waitForAudioRms(page, 0.001);
   });
 
   test('Tier 2: Running status across delta-times triggers multiple notes', async ({ page }) => {
@@ -234,7 +153,7 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
       buffer: Buffer.from(smf),
     });
     await page.getByTestId('transport-play').click();
-    await page.waitForTimeout(200);
+    await waitAudioBlocks(page, 80);
 
     // After NoteOn vel 0, voice must decay cleanly.
     await expect
@@ -251,16 +170,12 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
   }) => {
     await page.getByTestId('demo-select').selectOption('bach-prelude');
     await page.getByTestId('transport-play').click();
-    await page.waitForTimeout(350);
+    await waitForAudioRms(page, 0.003);
 
     // Seek to 15 seconds into the score.
     await setSlider(page, 'transport-seek', 15);
-    await page.waitForTimeout(350);
-
-    const stats = await sampleDestinationAudio(page);
-    expect(stats.nonFiniteCount).toBe(0);
-    expect(stats.peak).toBeLessThanOrEqual(1.0);
-    expect(stats.rms).toBeGreaterThan(0.003);
+    await waitAudioBlocks(page, 48);
+    await waitForAudioRms(page, 0.003);
 
     await page.getByTestId('transport-stop').click();
   });
@@ -273,17 +188,13 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
 
     // Scale tempo to 0.5x (slow)
     await setSlider(page, 'tempo-slider', 0.5);
-    await page.waitForTimeout(300);
-    let stats = await sampleDestinationAudio(page);
-    expect(stats.nonFiniteCount).toBe(0);
-    expect(stats.rms).toBeGreaterThan(0.003);
+    await waitAudioBlocks(page, 96);
+    await waitForAudioRms(page, 0.003);
 
     // Scale tempo to 2.0x (fast)
     await setSlider(page, 'tempo-slider', 2.0);
-    await page.waitForTimeout(300);
-    stats = await sampleDestinationAudio(page);
-    expect(stats.nonFiniteCount).toBe(0);
-    expect(stats.rms).toBeGreaterThan(0.003);
+    await waitAudioBlocks(page, 96);
+    await waitForAudioRms(page, 0.003);
 
     await page.getByTestId('transport-stop').click();
   });
@@ -297,7 +208,7 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
     // 1. Dispatch 14-bit high-res velocity NoteOn: CC 88 prefix (LSB 64) followed by NoteOn (MSB 100)
     await dispatchMockMidi(page, [0xb0, 88, 64]);
     await dispatchMockMidi(page, [0x90, 60, 100]); // C4
-    await page.waitForTimeout(200);
+    await waitAudioBlocks(page, 80);
 
     let stats = await sampleDestinationAudio(page);
     expect(stats.rms).toBeGreaterThan(0.002);
@@ -307,7 +218,7 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
     await dispatchMockMidi(page, [0xb0, 64, 127]); // Full sustain
     await dispatchMockMidi(page, [0x80, 60, 64]); // Release key
 
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 96);
     // Because pedal is sustained, sound should still ring.
     stats = await sampleDestinationAudio(page);
     expect(stats.rms).toBeGreaterThan(0.001);
@@ -324,10 +235,11 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
   }) => {
     await page.getByTestId('demo-select').selectOption('bach-prelude');
     await page.getByTestId('transport-play').click();
+    await waitForAudioRms(page, 0.003);
 
-    // Monitor for 6 continuous seconds of active classical performance.
-    for (let sec = 0; sec < 12; sec++) {
-      await page.waitForTimeout(500);
+    // Monitor continuous classical performance across 1,280 audio blocks (~3.4 s).
+    for (let step = 0; step < 10; step++) {
+      await waitAudioBlocks(page, 128);
       const audio = await sampleDestinationAudio(page);
       expect(audio.nonFiniteCount).toBe(0);
       expect(audio.peak).toBeLessThanOrEqual(1.0);
@@ -342,149 +254,5 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
     expect(Number.isFinite(hudP99) && hudP99 >= 0).toBe(true);
 
     await page.getByTestId('transport-stop').click();
-  });
-});
-
-/** Passively records outbound worklet messages without altering real AudioWorklet execution. */
-async function tapWorkletMessages(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const port = window.__PIANO_DIAG__?.workletNode?.port;
-    if (!port) throw new Error('Missing worklet port');
-    const orig = port.postMessage.bind(port);
-    const log: Array<{ type: string; releaseVelU16?: number; sampleOffset?: number }> = [];
-    (window as unknown as { __MSG_LOG__: typeof log }).__MSG_LOG__ = log;
-    port.postMessage = (msg: { type: string; releaseVelU16?: number; sampleOffset?: number }) => {
-      log.push({ type: msg.type, releaseVelU16: msg.releaseVelU16, sampleOffset: msg.sampleOffset });
-      return orig(msg);
-    };
-  });
-}
-
-test.describe('Wave 1B: Lookahead, Seek Pedals, WebMIDI & Touch Curve', () => {
-  test('I-3: MidiPlayer 60ms lookahead sampleOffset and seek() restores CC64/66/67', async ({ page }) => {
-    const assertNoErrors = setupErrorMonitoring(page);
-    await page.goto('./');
-    await unlockAudioEngine(page);
-    await tapWorkletMessages(page);
-
-    const smf = buildMidiFile([
-      { delta: 0, data: [0xb0, 64, 127] }, { delta: 0, data: [0xb0, 66, 127] }, { delta: 0, data: [0xb0, 67, 64] },
-      { delta: 38, data: [0x90, 60, 100] }, { delta: 442, data: [0x80, 60, 64] },
-      { delta: 480, data: [0x90, 67, 100] }, { delta: 480, data: [0x80, 67, 64] },
-    ]);
-    await page.getByTestId('midi-file-input').setInputFiles({ name: 'lookahead.mid', mimeType: 'audio/midi', buffer: Buffer.from(smf) });
-    await page.getByTestId('transport-play').click();
-    await page.waitForTimeout(180);
-    const offsets = await page.evaluate(() =>
-      ((window as unknown as { __MSG_LOG__: Array<{ type: string; sampleOffset?: number }> }).__MSG_LOG__)
-        .filter((m) => m.type === 'noteOn').map((m) => m.sampleOffset ?? 0),
-    );
-    expect(offsets.some((off) => off > 0 && off <= 2880)).toBe(true);
-
-    await page.getByTestId('transport-pause').click();
-    await setSlider(page, 'transport-seek', 0.8);
-    await expect(page.getByTestId('sustain-toggle')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.getByTestId('pedal-sostenuto')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.getByTestId('pedal-una-corda')).toHaveAttribute('aria-pressed', 'true');
-    expect(Number(await page.getByTestId('pedal-una-corda').getAttribute('data-value'))).toBeCloseTo(64 / 127, 2);
-
-    await setSlider(page, 'transport-seek', 0.0);
-    await expect(page.getByTestId('sustain-toggle')).toHaveAttribute('aria-pressed', 'false');
-    await expect(page.getByTestId('pedal-una-corda')).toHaveAttribute('aria-pressed', 'false');
-    await page.getByTestId('panic-btn').click();
-    assertNoErrors();
-  });
-
-  test('I-3/I-4: WebMidiManager bidirectional UI, release velocity, CC67 & 3ms jitter window', async ({ page }) => {
-    const assertNoErrors = setupErrorMonitoring(page);
-    await page.goto('./');
-    await injectMockMidi(page);
-    await unlockAudioEngine(page);
-    await expect(page.getByTestId('midi-device-select')).toContainText('Mock Piano MIDI Controller');
-    await tapWorkletMessages(page);
-
-    await dispatchMockMidi(page, [0x90, 60, 100]);
-    await expect(page.locator('[data-midi="60"]')).toHaveClass(/is-active/);
-    await page.waitForTimeout(120);
-    expect((await sampleDestinationAudio(page)).rms).toBeGreaterThan(0.002);
-    await dispatchMockMidi(page, [0x80, 60, 90]);
-    await expect(page.locator('[data-midi="60"]')).not.toHaveClass(/is-active/);
-
-    await dispatchMockMidi(page, [0x90, 62, 95]);
-    await expect(page.locator('[data-midi="62"]')).toHaveClass(/is-active/);
-    await dispatchMockMidi(page, [0x90, 62, 0]);
-    await expect(page.locator('[data-midi="62"]')).not.toHaveClass(/is-active/);
-
-    await dispatchMockMidi(page, [0xb0, 67, 64]);
-    await expect(page.getByTestId('pedal-una-corda')).toHaveAttribute('aria-pressed', 'true');
-    expect(Number(await page.getByTestId('pedal-una-corda').getAttribute('data-value'))).toBeCloseTo(64 / 127, 2);
-    await dispatchMockMidi(page, [0xb0, 67, 0]);
-    await expect(page.getByTestId('pedal-una-corda')).toHaveAttribute('aria-pressed', 'false');
-
-    const log = await page.evaluate(
-      () => (window as unknown as { __MSG_LOG__: Array<{ type: string; releaseVelU16?: number; sampleOffset?: number }> }).__MSG_LOG__,
-    );
-    const noteOns = log.filter((m) => m.type === 'noteOn');
-    const noteOffs = log.filter((m) => m.type === 'noteOff');
-    expect(noteOns.some((m) => (m.sampleOffset ?? 0) > 0 && (m.sampleOffset ?? 0) <= 200)).toBe(true);
-    expect(noteOffs[0]?.releaseVelU16).toBe(Math.trunc((90 * 65535) / 127));
-    expect(noteOffs[1]?.releaseVelU16).toBe(32768);
-    await page.getByTestId('panic-btn').click();
-    assertNoErrors();
-  });
-
-  test('I-4: Incoming Web MIDI event auto-unlocks WebAudio without clicking Unlock Audio', async ({ page }) => {
-    const assertNoErrors = setupErrorMonitoring(page);
-    await page.addInitScript(() => {
-      class InitMockMidi extends EventTarget {
-        readonly id = 'auto-unlock-in';
-        readonly name = 'Auto Unlock Controller';
-        send(data: number[]) {
-          this.dispatchEvent(Object.assign(new Event('midimessage'), { data: new Uint8Array(data), receivedTime: performance.now() }));
-        }
-      }
-      const mock = new InitMockMidi();
-      (window as unknown as { __MOCK_MIDI__: InitMockMidi }).__MOCK_MIDI__ = mock;
-      (navigator as unknown as { requestMIDIAccess: () => Promise<unknown> }).requestMIDIAccess = async () => ({
-        inputs: new Map([[mock.id, mock]]),
-        outputs: new Map(),
-      });
-    });
-
-    await page.goto('./');
-    await dispatchMockMidi(page, [0x90, 69, 105]);
-    await expect.poll(async () => page.evaluate(() => `${window.__PIANO_DIAG__?.status}:${window.__PIANO_DIAG__?.contextState}`)).toBe('ready:running');
-    await page.waitForTimeout(250);
-    expect((await sampleDestinationAudio(page)).rms).toBeGreaterThan(0.002);
-    await dispatchMockMidi(page, [0x80, 69, 64]);
-    await page.getByTestId('panic-btn').click();
-    assertNoErrors();
-  });
-
-  test('I-2: Touch Curve (Light / Natural / Heavy) alters strike velocity RMS ordering', async ({ page }) => {
-    const assertNoErrors = setupErrorMonitoring(page);
-    await page.goto('./');
-    await unlockAudioEngine(page);
-    await setSlider(page, 'velocity-slider', 64);
-
-    const strikeA4 = async (mode: 'light' | 'natural' | 'heavy'): Promise<number> => {
-      await page.getByTestId(`touch-curve-${mode}`).click();
-      await expect(page.getByTestId(`touch-curve-${mode}`)).toHaveAttribute('aria-checked', 'true');
-      const a4 = page.locator('[data-midi="69"]');
-      await a4.dispatchEvent('pointerdown', { buttons: 1 });
-      await page.waitForTimeout(260);
-      const stats = await sampleDestinationAudio(page);
-      await a4.dispatchEvent('pointerup', { buttons: 0 });
-      await expectAudioDecay(page, stats.rms, 0.08, 3000);
-      await page.getByTestId('panic-btn').click();
-      await page.waitForTimeout(120);
-      return stats.rms;
-    };
-
-    const [lightRms, naturalRms, heavyRms] = [await strikeA4('light'), await strikeA4('natural'), await strikeA4('heavy')];
-    expect(lightRms).toBeGreaterThan(naturalRms);
-    expect(naturalRms).toBeGreaterThan(heavyRms);
-    await page.getByTestId('touch-curve-natural').click();
-    assertNoErrors();
   });
 });

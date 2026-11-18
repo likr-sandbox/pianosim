@@ -4,6 +4,7 @@ import {
   sampleDestinationAudio,
   setupErrorMonitoring,
   unlockAudioEngine,
+  waitAudioBlocks,
 } from './helpers/audio-diag';
 
 test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
@@ -55,7 +56,7 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
 
     await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height * 0.8);
     await page.mouse.down();
-    await page.waitForTimeout(420);
+    await waitAudioBlocks(page, 96);
 
     const held = await sampleDestinationAudio(page, 400, 500);
     expect(held.nonFiniteCount).toBe(0);
@@ -94,7 +95,7 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
     // Trigger A4 via PC keyboard KeyH to establish sounding tone.
     const a4Key = page.locator('[data-midi="69"]');
     await page.keyboard.down('KeyH');
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 96);
 
     const activeAudio = await sampleDestinationAudio(page);
     expect(activeAudio.rms).toBeGreaterThan(0.001);
@@ -134,7 +135,7 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
       })
       .toBeGreaterThanOrEqual(1);
 
-    await page.waitForTimeout(160);
+    await waitAudioBlocks(page, 48);
     const audio = await sampleDestinationAudio(page, 400, 500);
     expect(audio.nonFiniteCount).toBe(0);
     expect(audio.peak).toBeLessThanOrEqual(1.0);

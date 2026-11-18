@@ -4,6 +4,9 @@ import {
   setSlider,
   setupErrorMonitoring,
   unlockAudioEngine,
+  waitAudioBlocks,
+  waitForPrepIdle,
+  waitForSilence,
 } from './helpers/audio-diag';
 
 test.describe('E2E Parameter Presets Suite', () => {
@@ -111,11 +114,11 @@ test.describe('E2E Parameter Presets Suite', () => {
     for (const key of [60, 64, 67]) {
       const keyEl = page.locator(`[data-midi="${key}"]`);
       await keyEl.dispatchEvent('pointerdown', { buttons: 1 });
-      await page.waitForTimeout(50);
+      await waitAudioBlocks(page, 16);
       await keyEl.dispatchEvent('pointerup', { buttons: 0 });
     }
 
-    await page.waitForTimeout(150);
+    await waitAudioBlocks(page, 48);
     const initialStats = await sampleDestinationAudio(page);
     expect(initialStats.rms).toBeGreaterThan(0.003);
 
@@ -123,7 +126,7 @@ test.describe('E2E Parameter Presets Suite', () => {
     const presetIds = ['intimate-upright', 'bright-pop', 'vintage-saloon', 'concert-grand'];
     for (const pid of presetIds) {
       await page.getByTestId(`preset-${pid}`).click();
-      await page.waitForTimeout(150);
+      await waitForPrepIdle(page);
 
       const stats = await sampleDestinationAudio(page);
       expect(stats.nonFiniteCount).toBe(0);
@@ -137,11 +140,11 @@ test.describe('E2E Parameter Presets Suite', () => {
   }) => {
     // 1. Measure Intimate Upright
     await page.getByTestId('preset-intimate-upright').click();
-    await page.waitForTimeout(550); // Allow serialized voicing + space blobs and crossfade to settle
+    await waitForPrepIdle(page);
 
     const a4Key = page.locator('[data-midi="69"]');
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(180);
+    await waitAudioBlocks(page, 64);
     const intimateStats = await sampleDestinationAudio(page);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
 
@@ -150,14 +153,14 @@ test.describe('E2E Parameter Presets Suite', () => {
 
     // Reset silence
     await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
+    await waitForSilence(page);
 
     // 2. Measure Bright Pop
     await page.getByTestId('preset-bright-pop').click();
-    await page.waitForTimeout(550);
+    await waitForPrepIdle(page);
 
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(180);
+    await waitAudioBlocks(page, 64);
     const brightStats = await sampleDestinationAudio(page);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
 
@@ -208,26 +211,26 @@ test.describe('E2E Parameter Presets Suite', () => {
 
     // 1. Baseline E7 under Concert Grand (A4=440, stretch=1.0, lengthScale=1.0)
     await page.getByTestId('preset-concert-grand').click();
-    await page.waitForTimeout(550);
+    await waitForPrepIdle(page);
     await e7Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 80);
     const concertStats = await sampleDestinationAudio(page, { minFreq: 2400, maxFreq: 3100 });
     await e7Key.dispatchEvent('pointerup', { buttons: 0 });
     expect(concertStats.nonFiniteCount).toBe(0);
     expect(concertStats.rms).toBeGreaterThan(0.0005);
 
     await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
+    await waitForSilence(page);
 
     // 2. Rapidly switch presets concurrently ending on Vintage Saloon (A4=435, stretch=0.2, lengthScale=0.65, detune=2.5)
     // so spaceBlob and voicingBlob contend for WasmContext::staging.
     await page.getByTestId('preset-bright-pop').click();
     await page.getByTestId('preset-intimate-upright').click();
     await page.getByTestId('preset-vintage-saloon').click();
-    await page.waitForTimeout(650);
+    await waitForPrepIdle(page);
 
     await e7Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 80);
     const saloonStats = await sampleDestinationAudio(page, { minFreq: 2400, maxFreq: 3100 });
     await e7Key.dispatchEvent('pointerup', { buttons: 0 });
     expect(saloonStats.nonFiniteCount).toBe(0);
@@ -237,16 +240,16 @@ test.describe('E2E Parameter Presets Suite', () => {
     expect(saloonStats.peakFreqHz - concertStats.peakFreqHz).toBeGreaterThan(45);
 
     await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
+    await waitForSilence(page);
 
     // 3. Rapidly switch back concurrently ending on Bright Pop (A4=442, stretch=1.3, lengthScale=1.15)
     await page.getByTestId('preset-intimate-upright').click();
     await page.getByTestId('preset-concert-grand').click();
     await page.getByTestId('preset-bright-pop').click();
-    await page.waitForTimeout(650);
+    await waitForPrepIdle(page);
 
     await e7Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 80);
     const brightStats = await sampleDestinationAudio(page, { minFreq: 2400, maxFreq: 3100 });
     await e7Key.dispatchEvent('pointerup', { buttons: 0 });
     expect(brightStats.nonFiniteCount).toBe(0);

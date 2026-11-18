@@ -247,6 +247,47 @@ export async function waitForSilence(
     .toBeLessThan(thresholdRms);
 }
 
+/** Polls until Prep Worker space/voicing blobs are committed in the AudioWorklet, then settles blocks. */
+export async function waitForPrepIdle(page: Page, settleBlocks = 16): Promise<void> {
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => {
+          const d = window.__PIANO_DIAG__;
+          return d
+            ? d.appliedSpaceSeq >= d.requestedSpaceSeq &&
+                d.appliedVoicingSeq >= d.requestedVoicingSeq
+            : false;
+        }),
+      { timeout: 10_000, intervals: [15] },
+    )
+    .toBe(true);
+  if (settleBlocks > 0) {
+    await waitAudioBlocks(page, settleBlocks);
+  }
+}
+
+/** Polls destination audio until RMS exceeds threshold with finite amplitude <= 1.0. */
+export async function waitForAudioRms(
+  page: Page,
+  minRms = 0.002,
+  timeoutMs = 4000,
+): Promise<AudioSampleStats> {
+  let last: AudioSampleStats | null = null;
+  await expect
+    .poll(
+      async () => {
+        last = await sampleDestinationAudio(page);
+        expect(last.nonFiniteCount).toBe(0);
+        expect(last.peak).toBeLessThanOrEqual(1.0);
+        return last.rms;
+      },
+      { timeout: timeoutMs, intervals: [20] },
+    )
+    .toBeGreaterThan(minRms);
+  return last!;
+}
+
 async function stopAndReadMonoWav(page: Page): Promise<CapturedWav> {
   await page.getByTestId('record-stop').click();
   await expect(page.getByTestId('record-status')).toContainText('Ready', { timeout: 3000 });

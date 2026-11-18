@@ -5,6 +5,9 @@ import {
   setSlider,
   setupErrorMonitoring,
   unlockAudioEngine,
+  waitAudioBlocks,
+  waitForPrepIdle,
+  waitForSilence,
 } from './helpers/audio-diag';
 
 test.describe('E2E Multi-Body Space & Hall Reverb Suite', () => {
@@ -46,10 +49,10 @@ test.describe('E2E Multi-Body Space & Hall Reverb Suite', () => {
       await page.getByTestId(body.testId).click();
       await expect(page.getByTestId(body.testId)).toHaveAttribute('aria-pressed', 'true');
       await expect(page.getByTestId(body.testId)).toHaveClass(/active/);
-      await page.waitForTimeout(550); // Allow PrepWorker + BlobStreamer transfer to commit
+      await waitForPrepIdle(page);
 
       await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-      await page.waitForTimeout(200);
+      await waitAudioBlocks(page, 80);
       const stats = await sampleDestinationAudio(page);
       await a4Key.dispatchEvent('pointerup', { buttons: 0 });
 
@@ -65,7 +68,7 @@ test.describe('E2E Multi-Body Space & Hall Reverb Suite', () => {
       });
 
       await page.getByTestId('panic-btn').click();
-      await page.waitForTimeout(200);
+      await waitForSilence(page);
     }
 
     // Verify all 3 physical body archetypes yield distinct RMS/brightness acoustic profiles
@@ -92,11 +95,11 @@ test.describe('E2E Multi-Body Space & Hall Reverb Suite', () => {
     for (const midi of [60, 64, 67]) {
       await page.locator(`[data-midi="${midi}"]`).dispatchEvent('pointerdown', { buttons: 1 });
     }
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 96);
 
     for (const bodyId of ['body-upright-studio', 'body-vintage-saloon', 'body-concert-grand']) {
       await page.getByTestId(bodyId).click();
-      await page.waitForTimeout(450);
+      await waitForPrepIdle(page);
       const stats = await sampleDestinationAudio(page);
       expect(stats.nonFiniteCount).toBe(0);
       expect(stats.peak).toBeLessThanOrEqual(1.0);
@@ -123,11 +126,11 @@ test.describe('E2E Multi-Body Space & Hall Reverb Suite', () => {
       for (const midi of [60, 64, 67]) {
         await page.locator(`[data-midi="${midi}"]`).dispatchEvent('pointerdown', { buttons: 1 });
       }
-      await page.waitForTimeout(110);
+      await waitAudioBlocks(page, 42);
       for (const midi of [60, 64, 67]) {
         await page.locator(`[data-midi="${midi}"]`).dispatchEvent('pointerup', { buttons: 0 });
       }
-      await page.waitForTimeout(420);
+      await waitAudioBlocks(page, 160);
       return sampleDestinationAudio(page);
     };
 
@@ -144,7 +147,7 @@ test.describe('E2E Multi-Body Space & Hall Reverb Suite', () => {
     expect(dryTail.peak).toBeLessThanOrEqual(1.0);
 
     await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
+    await waitForSilence(page);
 
     // 2. Zero-decay wet mix check: Decay 0.0 s, Mix 65%
     await setSlider(page, 'reverb-decay-slider', 0.0);
@@ -156,7 +159,7 @@ test.describe('E2E Multi-Body Space & Hall Reverb Suite', () => {
     expect(zeroDecayTail.peak).toBeLessThanOrEqual(1.0);
 
     await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
+    await waitForSilence(page);
 
     // 3. Long hall reverb: Decay 3.0 s, Mix 65%
     await setSlider(page, 'reverb-decay-slider', 3.0);

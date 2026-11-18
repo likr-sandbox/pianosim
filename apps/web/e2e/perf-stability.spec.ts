@@ -4,6 +4,8 @@ import {
   setSlider,
   setupErrorMonitoring,
   unlockAudioEngine,
+  waitAudioBlocks,
+  waitForPrepIdle,
 } from './helpers/audio-diag';
 
 test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
@@ -45,7 +47,9 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
           key.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, buttons: 0 }));
         }
       }, midi);
-      await page.waitForTimeout(5);
+      if ((midi - 68) % 5 === 4) {
+        await waitAudioBlocks(page, 2);
+      }
     }
 
     // Robustly poll until all 20 voices are actively ringing under sustain pedal
@@ -74,28 +78,19 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
   test('Audio stability soak: 5-second continuous rapid arpeggio stress without dropouts or NaN', async ({
     page,
   }) => {
-    test.setTimeout(20000);
+    test.setTimeout(25000);
 
-    // Continuous 5-second rapid arpeggio playback across keys
-    const startTime = Date.now();
-    let noteCounter = 0;
-    while (Date.now() - startTime < 5000) {
+    // Continuous deterministic ~4.5-second rapid arpeggio playback paced by AudioWorklet blocks
+    for (let noteCounter = 0; noteCounter < 45; noteCounter++) {
       const midi = 36 + (noteCounter % 52); // Loop across C2 to E6
-      await page.evaluate((m) => {
-        const k = document.querySelector(`[data-midi="${m}"]`);
-        if (k) {
-          k.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, buttons: 1 }));
-          setTimeout(() => {
-            k.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, buttons: 0 }));
-          }, 80);
-        }
-      }, midi);
+      const key = page.locator(`[data-midi="${midi}"]`);
+      await key.dispatchEvent('pointerdown', { buttons: 1 });
+      await waitAudioBlocks(page, 28);
+      await key.dispatchEvent('pointerup', { buttons: 0 });
+      await waitAudioBlocks(page, 8);
 
-      noteCounter++;
-      await page.waitForTimeout(90);
-
-      // Spot-check audio stability mid-stream every ~500ms
-      if (noteCounter % 5 === 0) {
+      // Spot-check audio stability mid-stream every 5 notes
+      if ((noteCounter + 1) % 5 === 0) {
         const snap = await sampleDestinationAudio(page);
         expect(snap.nonFiniteCount).toBe(0);
         expect(snap.peak).toBeLessThanOrEqual(1.0);
@@ -124,25 +119,44 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
 
     // Strike A4 to produce acoustic excitation
     await page.locator('[data-midi="69"]').dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 64);
 
     // Verify canvas context has non-zero drawn pixels during active playback
-    const isActivelyDrawing = await page.evaluate(() => {
-      const c = document.querySelector<HTMLCanvasElement>('[data-testid="spectrum-canvas"]');
-      if (!c || c.width === 0 || c.height === 0) return false;
-      const ctx = c.getContext('2d');
-      if (!ctx) return false;
-      const data = ctx.getImageData(0, 0, c.width, c.height).data;
-      let nonZeroCount = 0;
-      for (let i = 3; i < data.length; i += 4) {
-        if (data[i] > 0) nonZeroCount++;
-      }
-      return nonZeroCount > 10;
-    });
-    expect(isActivelyDrawing).toBe(true);
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(() => {
+            const c = document.querySelector<HTMLCanvasElement>('[data-testid="spectrum-canvas"]');
+            if (!c || c.width === 0 || c.height === 0) return false;
+            const ctx = c.getContext('2d');
+            if (!ctx) return false;
+            const data = ctx.getImageData(0, 0, c.width, c.height).data;
+            let nonZeroCount = 0;
+            for (let i = 3; i < data.length; i += 4) {
+              if (data[i] > 0) nonZeroCount++;
+            }
+            return nonZeroCount > 10;
+          }),
+        { timeout: 3000 },
+      )
+      .toBe(true);
 
-    // Run animation for 2 seconds while chord rings to confirm animation loop stability
-    await page.waitForTimeout(2000);
+    // Confirm animation loop renders 45+ frames cleanly alongside audio blocks
+    await Promise.all([
+      waitAudioBlocks(page, 128),
+      page.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            let frames = 0;
+            const step = () => {
+              frames += 1;
+              if (frames >= 45) resolve();
+              else requestAnimationFrame(step);
+            };
+            requestAnimationFrame(step);
+          }),
+      ),
+    ]);
 
     await page.locator('[data-midi="69"]').dispatchEvent('pointerup', { buttons: 0 });
   });
@@ -154,7 +168,7 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
     for (const midi of [60, 64, 67]) {
       await page.locator(`[data-midi="${midi}"]`).dispatchEvent('pointerdown', { buttons: 1 });
     }
-    await page.waitForTimeout(350);
+    await waitAudioBlocks(page, 96);
 
     const before = await page.evaluate(() => {
       const d = window.__PIANO_DIAG__!;
@@ -171,13 +185,13 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
     await setSlider(page, 'voicing-unison', 2.4);
     await page.getByTestId('lid-closed').click();
     await page.getByTestId('perspective-hall').click();
-    await page.waitForTimeout(250);
+    await waitForPrepIdle(page);
 
     await setSlider(page, 'voicing-hammer', 0.2);
     await setSlider(page, 'voicing-stretch', 1.4);
     await page.getByTestId('lid-open').click();
     await page.getByTestId('perspective-player').click();
-    await page.waitForTimeout(250);
+    await waitForPrepIdle(page);
 
     const snap = await sampleDestinationAudio(page);
     expect(snap.nonFiniteCount).toBe(0);

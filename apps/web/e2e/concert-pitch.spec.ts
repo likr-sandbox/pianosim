@@ -4,6 +4,9 @@ import {
   setSlider,
   setupErrorMonitoring,
   unlockAudioEngine,
+  waitAudioBlocks,
+  waitForPrepIdle,
+  waitForSilence,
 } from './helpers/audio-diag';
 
 test.describe('E2E Concert Pitch (A4 = 392.0–466.2 Hz) Suite', () => {
@@ -77,10 +80,10 @@ test.describe('E2E Concert Pitch (A4 = 392.0–466.2 Hz) Suite', () => {
 
     // 1. Baroque 415.0 Hz
     await page.getByTestId('voicing-a4-chip-415').click();
-    await page.waitForTimeout(220);
+    await waitForPrepIdle(page);
 
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(380);
+    await waitAudioBlocks(page, 96);
     const bar415 = await sampleDestinationAudio(page, 380, 500);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
 
@@ -90,14 +93,14 @@ test.describe('E2E Concert Pitch (A4 = 392.0–466.2 Hz) Suite', () => {
     expect(bar415.peakFreqHz).toBeLessThanOrEqual(421);
 
     await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
+    await waitForSilence(page);
 
     // 2. Modern Standard 440.0 Hz
     await page.getByTestId('voicing-a4-chip-440').click();
-    await page.waitForTimeout(220);
+    await waitForPrepIdle(page);
 
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(380);
+    await waitAudioBlocks(page, 96);
     const std440 = await sampleDestinationAudio(page, 380, 500);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
 
@@ -107,14 +110,14 @@ test.describe('E2E Concert Pitch (A4 = 392.0–466.2 Hz) Suite', () => {
     expect(std440.peakFreqHz).toBeLessThanOrEqual(446);
 
     await page.getByTestId('panic-btn').click();
-    await page.waitForTimeout(200);
+    await waitForSilence(page);
 
     // 3. Chorton 466.0 Hz
     await setSlider(page, 'voicing-a4', 466.0);
-    await page.waitForTimeout(220);
+    await waitForPrepIdle(page);
 
     await a4Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await page.waitForTimeout(380);
+    await waitAudioBlocks(page, 96);
     const high466 = await sampleDestinationAudio(page, 380, 500);
     await a4Key.dispatchEvent('pointerup', { buttons: 0 });
 
@@ -134,11 +137,11 @@ test.describe('E2E Concert Pitch (A4 = 392.0–466.2 Hz) Suite', () => {
     for (const midi of [60, 64, 67]) {
       await page.locator(`[data-midi="${midi}"]`).dispatchEvent('pointerdown', { buttons: 1 });
     }
-    await page.waitForTimeout(250);
+    await waitAudioBlocks(page, 96);
 
     for (const targetHz of [415.0, 466.0, 432.0, 440.0]) {
       await setSlider(page, 'voicing-a4', targetHz);
-      await page.waitForTimeout(160);
+      await waitForPrepIdle(page);
       const stats = await sampleDestinationAudio(page);
       expect(stats.nonFiniteCount).toBe(0);
       expect(stats.peak).toBeLessThanOrEqual(1.0);

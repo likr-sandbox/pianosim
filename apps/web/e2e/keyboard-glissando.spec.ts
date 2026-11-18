@@ -5,6 +5,7 @@ import {
   setSlider,
   setupErrorMonitoring,
   unlockAudioEngine,
+  waitAudioBlocks,
 } from './helpers/audio-diag';
 
 async function getKeyCenter(page: Page, midi: number): Promise<{ x: number; y: number }> {
@@ -61,7 +62,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await page.mouse.move(c4Pos.x, c4Pos.y);
     await page.mouse.down();
     await expect(page.locator('[data-midi="60"]')).toHaveClass(/is-active/);
-    await page.waitForTimeout(420);
+    await waitAudioBlocks(page, 96);
 
     const c4Stats = await sampleDestinationAudio(page);
     expect(c4Stats.nonFiniteCount).toBe(0);
@@ -79,7 +80,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await page.mouse.move(fs4Pos.x, fs4Pos.y);
     await page.mouse.down();
     await expect(page.locator('[data-midi="66"]')).toHaveClass(/is-active/);
-    await page.waitForTimeout(420);
+    await waitAudioBlocks(page, 96);
 
     const fs4Stats = await sampleDestinationAudio(page);
     expect(fs4Stats.peakFreqHz).toBeGreaterThanOrEqual(360);
@@ -104,7 +105,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     const a0Pos = await getKeyCenter(page, 21);
     await page.mouse.move(a0Pos.x, a0Pos.y);
     await page.mouse.down();
-    await page.waitForTimeout(450);
+    await waitAudioBlocks(page, 128);
     const a0Stats = await sampleDestinationAudio(page);
     expect(a0Stats.nonFiniteCount).toBe(0);
     expect(a0Stats.rms).toBeGreaterThan(0.0005);
@@ -115,7 +116,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     const c8Pos = await getKeyCenter(page, 108);
     await page.mouse.move(c8Pos.x, c8Pos.y);
     await page.mouse.down();
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 80);
     const c8Stats = await sampleDestinationAudio(page, { minFreq: 3500 });
     expect(c8Stats.nonFiniteCount).toBe(0);
     expect(c8Stats.rms).toBeGreaterThan(0.0005);
@@ -134,7 +135,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await setSlider(page, 'velocity-slider', 1);
     await page.mouse.move(a4Pos.x, a4Pos.y);
     await page.mouse.down();
-    await page.waitForTimeout(420);
+    await waitAudioBlocks(page, 96);
     const ppStats = await sampleDestinationAudio(page);
     expect(ppStats.nonFiniteCount).toBe(0);
     expect(ppStats.rms).toBeGreaterThan(1e-5);
@@ -145,7 +146,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await setSlider(page, 'velocity-slider', 127);
     await page.mouse.move(a4Pos.x, a4Pos.y);
     await page.mouse.down();
-    await page.waitForTimeout(420);
+    await waitAudioBlocks(page, 96);
     const ffStats = await sampleDestinationAudio(page);
     expect(ffStats.nonFiniteCount).toBe(0);
     expect(ffStats.peak).toBeLessThanOrEqual(1.0);
@@ -167,11 +168,11 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     for (let i = 0; i < 5; i++) {
       await page.mouse.move(pos.x, pos.y);
       await page.mouse.down();
-      await page.waitForTimeout(60);
+      await waitAudioBlocks(page, 24);
       await page.mouse.up();
-      await page.waitForTimeout(40);
+      await waitAudioBlocks(page, 16);
     }
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 80);
 
     const stats = await sampleDestinationAudio(page);
     expect(stats.nonFiniteCount).toBe(0);
@@ -208,7 +209,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await page.mouse.move(pos.x, pos.y);
     await page.mouse.down();
     await expect(page.locator('[data-midi="60"]')).toHaveClass(/is-active/);
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 96);
 
     const sounding = await sampleDestinationAudio(page);
     expect(sounding.rms).toBeGreaterThan(0.001);
@@ -231,7 +232,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
 
     // Default octave: KeyA = C4 (261 Hz).
     await page.keyboard.down('KeyA');
-    await page.waitForTimeout(420);
+    await waitAudioBlocks(page, 96);
     const c4 = await sampleDestinationAudio(page);
     expect(c4.peakFreqHz).toBeGreaterThanOrEqual(255);
     expect(c4.peakFreqHz).toBeLessThanOrEqual(268);
@@ -244,7 +245,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await page.keyboard.press('KeyZ');
     await page.keyboard.down('KeyA');
     await expect(page.locator('[data-midi="48"]')).toHaveClass(/is-active/);
-    await page.waitForTimeout(420);
+    await waitAudioBlocks(page, 96);
     const c3 = await sampleDestinationAudio(page, { minFreq: 100, maxFreq: 200 });
     const c3RmsDb = 20 * Math.log10(Math.max(c3.rms, 1e-12));
     expect(c3.nonFiniteCount).toBe(0);
@@ -258,7 +259,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await page.keyboard.press('KeyX');
     await page.keyboard.press('KeyX');
     await page.keyboard.down('KeyA');
-    await page.waitForTimeout(420);
+    await waitAudioBlocks(page, 96);
     const c5 = await sampleDestinationAudio(page);
     expect(c5.peakFreqHz).toBeGreaterThanOrEqual(510);
     expect(c5.peakFreqHz).toBeLessThanOrEqual(535);
@@ -277,7 +278,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await page.keyboard.down('KeyA'); // C4
     await page.keyboard.down('KeyD'); // E4
     await page.keyboard.down('KeyG'); // G4
-    await page.waitForTimeout(420);
+    await waitAudioBlocks(page, 96);
 
     const triad = await sampleDestinationAudio(page);
     expect(triad.nonFiniteCount).toBe(0);
@@ -299,7 +300,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
     await page.keyboard.down('KeyG'); // G4
     await page.keyboard.down('KeyJ'); // B4
     await page.keyboard.down('KeyL'); // D5
-    await page.waitForTimeout(420);
+    await waitAudioBlocks(page, 96);
 
     const chord5 = await sampleDestinationAudio(page);
     expect(chord5.nonFiniteCount).toBe(0);
@@ -335,7 +336,7 @@ test.describe('88-Key Keyboard & Glissando E2E Suite', () => {
 
     // Smooth glissando sweep across 27 keys in 25 interpolated mousemove steps.
     await page.mouse.move(endPos.x, endPos.y, { steps: 25 });
-    await page.waitForTimeout(300);
+    await waitAudioBlocks(page, 96);
 
     const sweepAudio = await sampleDestinationAudio(page);
     expect(sweepAudio.nonFiniteCount).toBe(0);
