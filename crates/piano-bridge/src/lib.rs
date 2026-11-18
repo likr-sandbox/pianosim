@@ -6,6 +6,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+mod admittance_smooth;
 pub mod admittance_ssm;
 pub mod bridge_presets;
 mod bridge_step;
@@ -23,6 +24,9 @@ mod tests;
 #[cfg(test)]
 #[path = "bridge_tests_pbdy.rs"]
 mod tests_pbdy;
+#[cfg(test)]
+#[path = "bridge_tests_pbdy_edge.rs"]
+mod tests_pbdy_edge;
 
 use piano_spec::{BodyPreset, PresetReducedPole, VoicingSpec, TOTAL_STRINGS};
 

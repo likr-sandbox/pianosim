@@ -8,6 +8,7 @@ pub mod orthotropic_plate;
 mod plate_assembly;
 pub mod pole_cancel;
 mod pole_cancel_sim;
+mod preset_bodies;
 pub mod presets;
 pub mod ribs_rim;
 pub mod types;
