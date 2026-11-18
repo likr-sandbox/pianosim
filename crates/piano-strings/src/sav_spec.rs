@@ -15,7 +15,8 @@ use crate::longitudinal::{
 };
 use crate::modal_soa::NYQUIST_CUTOFF_RATIO;
 use crate::phantom::{
-    slope_factor, MAX_PHANTOM_LONG_MODES, MAX_PHANTOM_LONG_VECS, MAX_PHANTOM_TRANSVERSE_MODES,
+    max_phantom_long_vecs_for_key, max_phantom_transverse_vecs_for_key, slope_factor,
+    MAX_PHANTOM_LONG_MODES, MAX_PHANTOM_LONG_VECS, MAX_PHANTOM_TRANSVERSE_MODES,
     MAX_PHANTOM_TRANSVERSE_VECS,
 };
 
@@ -52,6 +53,7 @@ fn build_scaled_mask4<const N: usize>(count: usize, scale: f64) -> [F32x4; N] {
 
 fn fill_pol_slopes(
     modes: usize,
+    max_modes: usize,
     f0: f64,
     nyquist: f64,
     spec: &StringPhysicalParams,
@@ -64,7 +66,7 @@ fn fill_pol_slopes(
     let mut sig = [0.0_f64; MAX_PHANTOM_TRANSVERSE_MODES];
     let mut omsig = [0.0_f64; MAX_PHANTOM_TRANSVERSE_MODES];
     let mut n_c = 0usize;
-    for j in 1..=modes.min(MAX_PHANTOM_TRANSVERSE_MODES) {
+    for j in 1..=modes.min(max_modes).min(MAX_PHANTOM_TRANSVERSE_MODES) {
         let f_j = partial_frequency_hz(f0, spec.inharmonicity_b, j);
         if f_j > 0.0 && f_j < nyquist {
             let om = TAU * f_j;
@@ -177,14 +179,16 @@ impl SavStringSpec {
             0.0
         };
 
+        let max_t_modes = max_phantom_transverse_vecs_for_key(k) * 4;
+        let max_t_shared = max_t_modes.min(entry.vert_vecs.len().min(entry.horiz_vecs.len()) * 4);
         let v_modes = count_transverse_partials(f0_v, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ)
             .min(entry.vert_vecs.len() * 4);
         let h_modes = count_transverse_partials(f0_h, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ)
             .min(entry.horiz_vecs.len() * 4);
         let (sigma_v, omega_sigma_v, nv_c) =
-            fill_pol_slopes(v_modes, f0_v, nyquist, &spec, gamma_s);
+            fill_pol_slopes(v_modes, max_t_shared, f0_v, nyquist, &spec, gamma_s);
         let (sigma_h, omega_sigma_h, nh_c) =
-            fill_pol_slopes(h_modes, f0_h, nyquist, &spec, gamma_s);
+            fill_pol_slopes(h_modes, max_t_shared, f0_h, nyquist, &spec, gamma_s);
 
         let quarter_l = 0.25 * length_m;
         let inv_q = if quarter_l > 0.0 {
@@ -201,9 +205,10 @@ impl SavStringSpec {
         } else {
             0.0
         };
+        let max_l_modes = max_phantom_long_vecs_for_key(k) * 4;
         let l_modes = count_longitudinal_partials(k, spec.f_long_hz, MAX_AUDIBLE_FREQ_HZ)
             .min(entry.long_vecs.len() * 4)
-            .min(MAX_PHANTOM_LONG_MODES);
+            .min(max_l_modes);
         for m in 1..=l_modes {
             let f_nom = (m as f64) * spec.f_long_hz;
             let f_init = long_init_freq_hz(k, spec.f_long_hz, m);

@@ -10,12 +10,14 @@ use crate::choir_map::{ChoirMap, StringMapEntry};
 use crate::modal_soa::sqrt_f64;
 use crate::modal_soa::ModalSoa;
 use crate::phantom::{
-    convolve_transverse_slopes, MAX_PHANTOM_LONG_VECS, MAX_PHANTOM_TRANSVERSE_MODES,
+    convolve_transverse_slopes, BASE_PHANTOM_LONG_VECS, MAX_PHANTOM_LONG_VECS,
+    MAX_PHANTOM_TRANSVERSE_MODES, MAX_PHANTOM_TRANSVERSE_VECS,
 };
 #[allow(unused_imports)]
 pub(crate) use crate::sav_kernels::{
-    apply_cayley_u, eval_p_vec, eval_p_vec_slice, load_nl_state_n, load_vh_state, prepare_vh,
-    step_sav_no_phantom_spec, step_sav_phantom_spec_n, store_nl_state_n, store_vh_u,
+    apply_cayley_u, eval_p_vec, eval_p_vec_slice, load_nl_state_n, load_vh_state, load_vh_state_n,
+    prepare_vh, prepare_vh_n, step_sav_no_phantom_spec, step_sav_no_phantom_spec_n,
+    step_sav_phantom_spec_3x6, step_sav_phantom_spec_n, store_nl_state_n, store_vh_u_n,
 };
 use crate::sav_spec::{SavEnergySlopes, SavStringSpec};
 
@@ -190,32 +192,72 @@ impl SavBank {
             entry.long_vecs.start,
         );
 
-        let (mut uv, vv) = load_vh_state(soa, vb, nv);
-        let (mut uh, vh) = load_vh_state(soa, hb, nh);
-
-        let mut r_n = self.r_sav[s_idx];
-        if nl == 0 {
-            step_sav_no_phantom_spec(
-                sp, self.ts, &mut r_n, &mut uv, &vv, &mut uh, &vh, lambda_reg,
-            );
-        } else if nl == 1 {
-            let (mut ul, vl) = load_nl_state_n::<1>(soa, lb, 1);
-            step_sav_phantom_spec_n::<1>(
-                sp, self.ts, 1, &mut r_n, &mut uv, &vv, &mut uh, &vh, &mut ul, &vl, lambda_reg,
-            );
-            soa.u.as_f32x4_slice_mut()[lb] = ul[0];
+        if nv <= 2 && nh <= 2 && nl <= BASE_PHANTOM_LONG_VECS {
+            let (mut uv, vv) = load_vh_state_n::<2>(soa, vb, nv);
+            let (mut uh, vh) = load_vh_state_n::<2>(soa, hb, nh);
+            let mut r_n = self.r_sav[s_idx];
+            if nl == 0 {
+                step_sav_no_phantom_spec(
+                    sp, self.ts, &mut r_n, &mut uv, &vv, &mut uh, &vh, lambda_reg,
+                );
+            } else if nl == 1 {
+                let (mut ul, vl) = load_nl_state_n::<1>(soa, lb, 1);
+                step_sav_phantom_spec_n::<1>(
+                    sp, self.ts, 1, &mut r_n, &mut uv, &vv, &mut uh, &vh, &mut ul, &vl, lambda_reg,
+                );
+                soa.u.as_f32x4_slice_mut()[lb] = ul[0];
+            } else {
+                let (mut ul, vl) = load_nl_state_n::<BASE_PHANTOM_LONG_VECS>(soa, lb, nl);
+                step_sav_phantom_spec_n::<BASE_PHANTOM_LONG_VECS>(
+                    sp, self.ts, nl, &mut r_n, &mut uv, &vv, &mut uh, &vh, &mut ul, &vl, lambda_reg,
+                );
+                soa.u.as_f32x4_slice_mut()[lb..lb + nl].copy_from_slice(&ul[..nl]);
+            }
+            self.r_sav[s_idx] = r_n;
+            store_vh_u_n::<2>(soa, vb, nv, &uv);
+            store_vh_u_n::<2>(soa, hb, nh, &uh);
         } else {
-            let nl = nl.min(MAX_PHANTOM_LONG_VECS);
-            let (mut ul, vl) = load_nl_state_n::<MAX_PHANTOM_LONG_VECS>(soa, lb, nl);
-            step_sav_phantom_spec_n::<MAX_PHANTOM_LONG_VECS>(
-                sp, self.ts, nl, &mut r_n, &mut uv, &vv, &mut uh, &vh, &mut ul, &vl, lambda_reg,
+            step_string_sav_3x6(
+                sp,
+                self.ts,
+                &mut self.r_sav[s_idx],
+                soa,
+                (vb, hb, lb),
+                (nv, nh, nl),
+                lambda_reg,
             );
-            soa.u.as_f32x4_slice_mut()[lb..lb + nl].copy_from_slice(&ul[..nl]);
         }
-        self.r_sav[s_idx] = r_n;
-        store_vh_u(soa, vb, nv, &uv);
-        store_vh_u(soa, hb, nh, &uh);
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn step_string_sav_3x6(
+    sp: &SavStringSpec,
+    ts: f64,
+    r_n: &mut f64,
+    soa: &mut ModalSoa,
+    base: (usize, usize, usize),
+    lens: (usize, usize, usize),
+    lambda_reg: f64,
+) {
+    let (vb, hb, lb) = base;
+    let (nv, nh, nl) = lens;
+    let (mut uv, vv) = load_vh_state_n::<MAX_PHANTOM_TRANSVERSE_VECS>(soa, vb, nv);
+    let (mut uh, vh) = load_vh_state_n::<MAX_PHANTOM_TRANSVERSE_VECS>(soa, hb, nh);
+    if nl == 0 {
+        step_sav_no_phantom_spec_n::<MAX_PHANTOM_TRANSVERSE_VECS>(
+            sp, ts, r_n, &mut uv, &vv, &mut uh, &vh, lambda_reg,
+        );
+    } else {
+        let nl_c = nl.min(MAX_PHANTOM_LONG_VECS);
+        let (mut ul, vl) = load_nl_state_n::<MAX_PHANTOM_LONG_VECS>(soa, lb, nl_c);
+        step_sav_phantom_spec_3x6(
+            sp, ts, nl_c, r_n, &mut uv, &vv, &mut uh, &vh, &mut ul, &vl, lambda_reg,
+        );
+        soa.u.as_f32x4_slice_mut()[lb..lb + nl_c].copy_from_slice(&ul[..nl_c]);
+    }
+    store_vh_u_n::<MAX_PHANTOM_TRANSVERSE_VECS>(soa, vb, nv, &uv);
+    store_vh_u_n::<MAX_PHANTOM_TRANSVERSE_VECS>(soa, hb, nh, &uh);
 }
 
 #[cfg(test)]

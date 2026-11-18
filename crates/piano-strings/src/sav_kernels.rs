@@ -4,36 +4,50 @@ use piano_simd::F32x4;
 
 use crate::modal_soa::ModalSoa;
 use crate::phantom::{
-    accum_phantom_grad_vh_simd_n, convolve_transverse_slopes_f32_n, MAX_PHANTOM_TRANSVERSE_VECS,
+    accum_phantom_grad_vh_simd_n, convolve_transverse_slopes_f32_n, BASE_PHANTOM_TRANSVERSE_VECS,
+    MAX_PHANTOM_LONG_VECS, MAX_PHANTOM_TRANSVERSE_VECS,
 };
+use crate::phantom_3x6::{accum_phantom_grad_vh_simd_3x6, convolve_transverse_slopes_f32_3x6};
 use crate::sav_drift::{C0_SAV, DELTA_U_SAV};
 use crate::sav_spec::SavStringSpec;
 
-pub(crate) type PhVecs = [F32x4; MAX_PHANTOM_TRANSVERSE_VECS];
+pub(crate) type PhVecs = [F32x4; BASE_PHANTOM_TRANSVERSE_VECS];
 
 #[inline(always)]
-pub(crate) fn load_vh_state(soa: &ModalSoa, b: usize, len: usize) -> ([F32x4; 2], [F32x4; 2]) {
+pub(crate) fn load_vh_state_n<const NT_MAX: usize>(
+    soa: &ModalSoa,
+    b: usize,
+    len: usize,
+) -> ([F32x4; NT_MAX], [F32x4; NT_MAX]) {
     let (u_s, v_s) = (soa.u.as_f32x4_slice(), soa.v.as_f32x4_slice());
-    if len >= 2 {
-        assert!(b + 1 < u_s.len() && b + 1 < v_s.len());
-        ([u_s[b], u_s[b + 1]], [v_s[b], v_s[b + 1]])
-    } else if len == 1 {
-        ([u_s[b], F32x4::zero()], [v_s[b], F32x4::zero()])
-    } else {
-        ([F32x4::zero(); 2], [F32x4::zero(); 2])
+    let (mut u, mut v) = ([F32x4::zero(); NT_MAX], [F32x4::zero(); NT_MAX]);
+    let n = len.min(NT_MAX);
+    if n > 0 {
+        assert!(b + n <= u_s.len() && b + n <= v_s.len());
+        u[..n].copy_from_slice(&u_s[b..b + n]);
+        v[..n].copy_from_slice(&v_s[b..b + n]);
+    }
+    (u, v)
+}
+
+#[inline(always)]
+pub(crate) fn store_vh_u_n<const NT_MAX: usize>(
+    soa: &mut ModalSoa,
+    b: usize,
+    len: usize,
+    u: &[F32x4; NT_MAX],
+) {
+    let u_s = soa.u.as_f32x4_slice_mut();
+    let n = len.min(NT_MAX);
+    if n > 0 {
+        assert!(b + n <= u_s.len());
+        u_s[b..b + n].copy_from_slice(&u[..n]);
     }
 }
 
 #[inline(always)]
-pub(crate) fn store_vh_u(soa: &mut ModalSoa, b: usize, len: usize, u: &[F32x4; 2]) {
-    let u_s = soa.u.as_f32x4_slice_mut();
-    if len >= 2 {
-        assert!(b + 1 < u_s.len());
-        u_s[b] = u[0];
-        u_s[b + 1] = u[1];
-    } else if len == 1 {
-        u_s[b] = u[0];
-    }
+pub(crate) fn load_vh_state(soa: &ModalSoa, b: usize, len: usize) -> ([F32x4; 2], [F32x4; 2]) {
+    load_vh_state_n::<2>(soa, b, len)
 }
 
 #[inline(always)]
@@ -78,13 +92,30 @@ pub(crate) fn step_sav_no_phantom_spec(
     sp: &SavStringSpec,
     ts: f64,
     r_n_ref: &mut f64,
-    uv: &mut [F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    vv: &[F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    uh: &mut [F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    vh: &[F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    uv: &mut [F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    vv: &[F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    uh: &mut [F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    vh: &[F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
     lambda_reg: f64,
 ) {
-    let (uv_m, mut dv4, uh_m, mut dh4, u_sq4, d_sq4) = prepare_vh(sp, uv, vv, uh, vh);
+    step_sav_no_phantom_spec_n::<BASE_PHANTOM_TRANSVERSE_VECS>(
+        sp, ts, r_n_ref, uv, vv, uh, vh, lambda_reg,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub(crate) fn step_sav_no_phantom_spec_n<const NT_MAX: usize>(
+    sp: &SavStringSpec,
+    ts: f64,
+    r_n_ref: &mut f64,
+    uv: &mut [F32x4; NT_MAX],
+    vv: &[F32x4; NT_MAX],
+    uh: &mut [F32x4; NT_MAX],
+    vh: &[F32x4; NT_MAX],
+    lambda_reg: f64,
+) {
+    let (uv_m, mut dv4, uh_m, mut dh4, u_sq4, d_sq4) = prepare_vh_n::<NT_MAX>(sp, uv, vv, uh, vh);
     let den_u = f64::from(u_sq4.reduce_sum()) + DELTA_U_SAV;
     let s_val = sp.quarter_l * f64::from(d_sq4.reduce_sum());
     let e_nl = 0.5 * sp.kappa_0 * s_val * s_val;
@@ -97,7 +128,7 @@ pub(crate) fn step_sav_no_phantom_spec(
     let kg = F32x4::splat((half_ts * inv_psi * 0.5 * sp.length_m * sp.kappa_0 * s_val) as f32);
     let kr = F32x4::splat((half_ts * reg) as f32);
     let (mut dot4, mut p2_4) = (F32x4::zero(), F32x4::zero());
-    eval_p_vec(
+    eval_p_vec_slice(
         kg,
         kr,
         &sp.omega_sigma_v4,
@@ -106,7 +137,7 @@ pub(crate) fn step_sav_no_phantom_spec(
         &mut dot4,
         &mut p2_4,
     );
-    eval_p_vec(
+    eval_p_vec_slice(
         kg,
         kr,
         &sp.omega_sigma_h4,
@@ -130,10 +161,10 @@ pub(crate) fn step_sav_phantom_spec_n<const NL_MAX: usize>(
     ts: f64,
     nl: usize,
     r_n_ref: &mut f64,
-    uv: &mut [F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    vv: &[F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    uh: &mut [F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    vh: &[F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    uv: &mut [F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    vv: &[F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    uh: &mut [F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    vh: &[F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
     ul: &mut [F32x4; NL_MAX],
     vl: &[F32x4; NL_MAX],
     lambda_reg: f64,
@@ -168,6 +199,93 @@ pub(crate) fn step_sav_phantom_spec_n<const NL_MAX: usize>(
 
     let c_sum = (0.5 * sp.length_m * sp.kappa_0 * s_val) as f32;
     let (mut gv4, mut gh4) = accum_phantom_grad_vh_simd_n::<NL_MAX>(&dv4, &dh4, c_sum, &c_phi4);
+
+    let half_ts = 0.5 * ts;
+    let kg = F32x4::splat((half_ts * inv_psi) as f32);
+    let kr = F32x4::splat((half_ts * reg) as f32);
+    let (mut dot4, mut p2_4) = (F32x4::zero(), F32x4::zero());
+    eval_p_vec_slice(
+        kg,
+        kr,
+        &sp.omega_sigma_v4,
+        &mut gv4,
+        &uv_m,
+        &mut dot4,
+        &mut p2_4,
+    );
+    eval_p_vec_slice(
+        kg,
+        kr,
+        &sp.omega_sigma_h4,
+        &mut gh4,
+        &uh_m,
+        &mut dot4,
+        &mut p2_4,
+    );
+    eval_p_vec_slice(
+        kg,
+        kr,
+        &sp.omega_alpha_l_norm4,
+        &mut c_phi4,
+        &ul_m,
+        &mut dot4,
+        &mut p2_4,
+    );
+
+    let r_bar = (r_n + f64::from(dot4.reduce_sum())) / (1.0 + f64::from(p2_4.reduce_sum()));
+    *r_n_ref = 2.0 * r_bar - r_n;
+    let trb4 = F32x4::splat((2.0 * r_bar) as f32);
+    apply_cayley_u(uv, &gv4, trb4);
+    apply_cayley_u(uh, &gh4, trb4);
+    apply_cayley_u(ul, &c_phi4, trb4);
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+pub(crate) fn step_sav_phantom_spec_3x6(
+    sp: &SavStringSpec,
+    ts: f64,
+    nl: usize,
+    r_n_ref: &mut f64,
+    uv: &mut [F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    vv: &[F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    uh: &mut [F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    vh: &[F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    ul: &mut [F32x4; MAX_PHANTOM_LONG_VECS],
+    vl: &[F32x4; MAX_PHANTOM_LONG_VECS],
+    lambda_reg: f64,
+) {
+    let n = nl.min(MAX_PHANTOM_LONG_VECS);
+    let (uv_m, dv4, uh_m, dh4, mut u_sq4, d_sq4) =
+        prepare_vh_n::<MAX_PHANTOM_TRANSVERSE_VECS>(sp, uv, vv, uh, vh);
+
+    let mut ul_m = [F32x4::zero(); MAX_PHANTOM_LONG_VECS];
+    for i in 0..n {
+        let um = ul[i] * sp.mask_l4[i];
+        ul_m[i] = um;
+        u_sq4 = um.mul_add(um, u_sq4);
+    }
+    let den_u = f64::from(u_sq4.reduce_sum()) + DELTA_U_SAV;
+    let inv_u = 1.0 / den_u;
+    let phi4 = convolve_transverse_slopes_f32_3x6(&dv4, &dh4);
+    let c_phi_scale4 = F32x4::splat((sp.quarter_l * sp.kappa_ph) as f32);
+    let mut r2_4 = F32x4::zero();
+    let mut c_phi4 = [F32x4::zero(); MAX_PHANTOM_LONG_VECS];
+    for i in 0..n {
+        let res = sp.half_ql_mask4[i] * phi4[i] + sp.alpha_l4[i] * vl[i];
+        r2_4 = res.mul_add(res, r2_4);
+        c_phi4[i] = res * c_phi_scale4;
+    }
+
+    let s_val = sp.quarter_l * f64::from(d_sq4.reduce_sum());
+    let sum_res_sq = f64::from(r2_4.reduce_sum());
+    let e_nl = 0.5 * (sp.kappa_0 * s_val * s_val + sp.kappa_ph * sum_res_sq);
+    let (psi, inv_psi) = psi_and_inv(2.0 * e_nl + C0_SAV);
+    let r_n = *r_n_ref;
+    let reg = lambda_reg * (r_n - psi) * inv_u;
+
+    let c_sum = (0.5 * sp.length_m * sp.kappa_0 * s_val) as f32;
+    let (mut gv4, mut gh4) = accum_phantom_grad_vh_simd_3x6(&dv4, &dh4, c_sum, &c_phi4);
 
     let half_ts = 0.5 * ts;
     let kg = F32x4::splat((half_ts * inv_psi) as f32);
@@ -217,10 +335,28 @@ pub(crate) fn prepare_vh(
     uh: &PhVecs,
     vh: &PhVecs,
 ) -> (PhVecs, PhVecs, PhVecs, PhVecs, F32x4, F32x4) {
-    let mut uv_m = [F32x4::zero(); MAX_PHANTOM_TRANSVERSE_VECS];
+    prepare_vh_n::<BASE_PHANTOM_TRANSVERSE_VECS>(sp, uv, vv, uh, vh)
+}
+
+#[inline(always)]
+pub(crate) fn prepare_vh_n<const NT_MAX: usize>(
+    sp: &SavStringSpec,
+    uv: &[F32x4; NT_MAX],
+    vv: &[F32x4; NT_MAX],
+    uh: &[F32x4; NT_MAX],
+    vh: &[F32x4; NT_MAX],
+) -> (
+    [F32x4; NT_MAX],
+    [F32x4; NT_MAX],
+    [F32x4; NT_MAX],
+    [F32x4; NT_MAX],
+    F32x4,
+    F32x4,
+) {
+    let mut uv_m = [F32x4::zero(); NT_MAX];
     let (mut dv4, mut uh_m, mut dh4) = (uv_m, uv_m, uv_m);
     let (mut u_sq4, mut d_sq4) = (F32x4::zero(), F32x4::zero());
-    for i in 0..MAX_PHANTOM_TRANSVERSE_VECS {
+    for i in 0..NT_MAX {
         let um_v = uv[i] * sp.mask_v4[i];
         let dv = sp.sigma_v4[i] * vv[i];
         uv_m[i] = um_v;

@@ -5,16 +5,54 @@ use core::f64::consts::PI;
 
 use crate::modal_soa::sqrt_f64;
 
-/// Maximum SIMD4 vector count per transverse polarization coupled via SAV/phantom.
-pub(crate) const MAX_PHANTOM_TRANSVERSE_VECS: usize = 2;
-/// Maximum transverse modes per polarization coupled via SAV/phantom (`<= 8`).
+/// Exclusive upper key index for `3x6` (`12 x 24`) bass phantom harmonic coupling (`keys 0..16`).
+pub(crate) const BASS_PHANTOM_MAX_KEY_IDX: usize = 16;
+/// Baseline SIMD4 vector count per transverse polarization for tenor/mid keys `16..52` (`8` modes).
+pub(crate) const BASE_PHANTOM_TRANSVERSE_VECS: usize = 2;
+/// Baseline transverse modes per polarization for keys `16..52` (`8`).
+#[allow(dead_code)]
+pub(crate) const BASE_PHANTOM_TRANSVERSE_MODES: usize = BASE_PHANTOM_TRANSVERSE_VECS * 4;
+/// Baseline SIMD4 vector count of longitudinal modes for keys `16..52` (`16` modes).
+pub(crate) const BASE_PHANTOM_LONG_VECS: usize = 4;
+/// Baseline longitudinal modes for keys `16..52` (`16`).
+#[cfg(test)]
+pub(crate) const BASE_PHANTOM_LONG_MODES: usize = BASE_PHANTOM_LONG_VECS * 4;
+/// Maximum SIMD4 vector count per transverse polarization coupled via SAV/phantom (`keys 0..16`: `3`).
+pub(crate) const MAX_PHANTOM_TRANSVERSE_VECS: usize = 3;
+/// Maximum transverse modes per polarization coupled via SAV/phantom (`<= 12`).
 pub(crate) const MAX_PHANTOM_TRANSVERSE_MODES: usize = MAX_PHANTOM_TRANSVERSE_VECS * 4;
-/// Maximum SIMD4 vector count of longitudinal modes coupled via SAV/phantom.
-pub(crate) const MAX_PHANTOM_LONG_VECS: usize = 4;
-/// Maximum longitudinal modes coupled via SAV/phantom (`<= 16`).
+/// Maximum SIMD4 vector count of longitudinal modes coupled via SAV/phantom (`keys 0..16`: `6`).
+pub(crate) const MAX_PHANTOM_LONG_VECS: usize = 6;
+/// Maximum longitudinal modes coupled via SAV/phantom (`<= 24`).
 pub(crate) const MAX_PHANTOM_LONG_MODES: usize = MAX_PHANTOM_LONG_VECS * 4;
-/// 1-based longitudinal projection buffer length (`0` unused, `1..=16` active).
+/// 1-based longitudinal projection buffer length (`0` unused, `1..=24` active).
 pub(crate) const PHANTOM_ARRAY_LEN: usize = MAX_PHANTOM_LONG_MODES + 1;
+
+/// Maximum coupled transverse SIMD4 vectors per polarization for `key_idx`.
+#[inline]
+#[must_use]
+pub(crate) const fn max_phantom_transverse_vecs_for_key(key_idx: usize) -> usize {
+    if key_idx < BASS_PHANTOM_MAX_KEY_IDX {
+        MAX_PHANTOM_TRANSVERSE_VECS
+    } else if key_idx < piano_spec::LONGITUDINAL_MAX_KEY_IDX {
+        BASE_PHANTOM_TRANSVERSE_VECS
+    } else {
+        0
+    }
+}
+
+/// Maximum coupled longitudinal SIMD4 vectors for `key_idx`.
+#[inline]
+#[must_use]
+pub(crate) const fn max_phantom_long_vecs_for_key(key_idx: usize) -> usize {
+    if key_idx < BASS_PHANTOM_MAX_KEY_IDX {
+        MAX_PHANTOM_LONG_VECS
+    } else if key_idx < piano_spec::LONGITUDINAL_MAX_KEY_IDX {
+        BASE_PHANTOM_LONG_VECS
+    } else {
+        0
+    }
+}
 
 /// Maps modal oscillator state `v_{p,n}` to regularized physical modal slope `d_{p,n}`.
 #[inline]
@@ -176,11 +214,11 @@ fn convolve_pol_n<const NL: usize>(
     out
 }
 
-/// Evaluates unscaled `phi_sum[1..=NL*4]` across `NL` longitudinal SIMD4 vectors.
+/// Evaluates unscaled `phi_sum[1..=NL*4]` across `NL` longitudinal SIMD4 vectors (`2` transverse vecs).
 #[inline(always)]
 pub(crate) fn convolve_transverse_slopes_f32_n<const NL: usize>(
-    dv4: &[piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    dh4: &[piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    dv4: &[piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    dh4: &[piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
 ) -> [piano_simd::F32x4; NL] {
     let pv = convolve_pol_n::<NL>(dv4[0], dv4[1]);
     let ph = convolve_pol_n::<NL>(dh4[0], dh4[1]);
@@ -191,23 +229,23 @@ pub(crate) fn convolve_transverse_slopes_f32_n<const NL: usize>(
 #[cfg(test)]
 #[inline(always)]
 pub(crate) fn convolve_transverse_slopes_f32(
-    dv4: &[piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    dh4: &[piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-) -> [piano_simd::F32x4; MAX_PHANTOM_LONG_VECS] {
-    convolve_transverse_slopes_f32_n::<MAX_PHANTOM_LONG_VECS>(dv4, dh4)
+    dv4: &[piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    dh4: &[piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+) -> [piano_simd::F32x4; BASE_PHANTOM_LONG_VECS] {
+    convolve_transverse_slopes_f32_n::<BASE_PHANTOM_LONG_VECS>(dv4, dh4)
 }
 
 /// Column-wise unrolled `F32x4` Toeplitz+Hankel adjoint gradient across `N = 8` V/H slope modes
 /// specialized to `NL` active longitudinal SIMD4 vectors (`NL * 4` modes).
 #[inline(always)]
 pub(crate) fn accum_phantom_grad_vh_simd_n<const NL: usize>(
-    dv4: &[piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    dh4: &[piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    dv4: &[piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    dh4: &[piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
     c_sum: f32,
     c_phi4: &[piano_simd::F32x4; NL],
 ) -> (
-    [piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    [piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    [piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    [piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
 ) {
     use piano_simd::F32x4;
     let z = F32x4::zero();
@@ -262,13 +300,13 @@ pub(crate) fn accum_phantom_grad_vh_simd_n<const NL: usize>(
 #[cfg(test)]
 #[inline(always)]
 pub(crate) fn accum_phantom_grad_vh_simd(
-    dv4: &[piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    dh4: &[piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    dv4: &[piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    dh4: &[piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
     c_sum: f32,
-    c_phi4: &[piano_simd::F32x4; MAX_PHANTOM_LONG_VECS],
+    c_phi4: &[piano_simd::F32x4; BASE_PHANTOM_LONG_VECS],
 ) -> (
-    [piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
-    [piano_simd::F32x4; MAX_PHANTOM_TRANSVERSE_VECS],
+    [piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
+    [piano_simd::F32x4; BASE_PHANTOM_TRANSVERSE_VECS],
 ) {
     accum_phantom_grad_vh_simd_n(dv4, dh4, c_sum, c_phi4)
 }

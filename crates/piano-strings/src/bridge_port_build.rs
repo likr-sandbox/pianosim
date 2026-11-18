@@ -5,8 +5,8 @@ use core::ops::Range;
 
 use piano_simd::{AlignedBuf, F32x4};
 use piano_spec::{
-    effective_string_f0_hz, Polarization, StringPhysicalParams, VoicingSpec,
-    LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS,
+    effective_string_f0_hz, Polarization, StringPhysicalParams, VoicingSpec, NUM_KEYS,
+    TOTAL_STRINGS,
 };
 
 use crate::bridge_port::{
@@ -16,7 +16,7 @@ use crate::bridge_port::{
 use crate::choir_map::ChoirMap;
 use crate::contact_ports::ContactPorts;
 use crate::modal_soa::{sqrt_f64, ModalSoa, C_HORIZ, C_VERT, NYQUIST_CUTOFF_RATIO};
-use crate::phantom::MAX_PHANTOM_TRANSVERSE_VECS;
+use crate::phantom::max_phantom_transverse_vecs_for_key;
 
 impl BridgePorts {
     /// Precomputes L1d-packed `state`/`coef` and key-grouped contiguous `tl_soa`.
@@ -51,11 +51,7 @@ impl BridgePorts {
                 count_prefix_modes(k, entry.vert_modes, f0_v, spec.inharmonicity_b, nyquist);
             let nh_cut =
                 count_prefix_modes(k, entry.horiz_modes, f0_h, spec.inharmonicity_b, nyquist);
-            let sav_min = if k < LONGITUDINAL_MAX_KEY_IDX {
-                MAX_PHANTOM_TRANSVERSE_VECS
-            } else {
-                0
-            };
+            let sav_min = max_phantom_transverse_vecs_for_key(k);
             let n_pol = nv_cut
                 .max(nh_cut)
                 .div_ceil(4)

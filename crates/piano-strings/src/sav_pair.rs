@@ -5,11 +5,11 @@ use piano_simd::F32x4;
 use crate::choir_map::StringMapEntry;
 use crate::modal_soa::ModalSoa;
 use crate::phantom::{
-    accum_phantom_grad_vh_simd_n, convolve_transverse_slopes_f32_n, MAX_PHANTOM_LONG_VECS,
+    accum_phantom_grad_vh_simd_n, convolve_transverse_slopes_f32_n, BASE_PHANTOM_LONG_VECS,
 };
 use crate::sav_drift::{
-    apply_cayley_u, eval_p_vec, eval_p_vec_slice, load_nl_state_n, load_vh_state, prepare_vh,
-    store_nl_state_n, SavBank, C0_SAV, DELTA_U_SAV, LAMBDA_REG_DEFAULT,
+    apply_cayley_u, eval_p_vec_slice, load_nl_state_n, load_vh_state, prepare_vh, store_nl_state_n,
+    SavBank, C0_SAV, DELTA_U_SAV, LAMBDA_REG_DEFAULT,
 };
 use crate::sav_spec::SavStringSpec;
 use crate::sav_tile::{
@@ -19,7 +19,7 @@ use crate::sav_tile::{
 /// Batches ringing SAV strings with identical `(nv>=2, nh>=2, nl)` layouts into pairs
 /// so independent `sqrt`/`div`/`reduce_sum` chains execute in parallel across the two strings.
 pub(crate) struct SavPairQueue {
-    pending: [Option<usize>; MAX_PHANTOM_LONG_VECS + 1],
+    pending: [Option<usize>; BASE_PHANTOM_LONG_VECS + 1],
     long_on: bool,
     sav_on: bool,
 }
@@ -28,7 +28,7 @@ impl SavPairQueue {
     #[inline(always)]
     pub fn new(long_on: bool, sav_on: bool) -> Self {
         Self {
-            pending: [None; MAX_PHANTOM_LONG_VECS + 1],
+            pending: [None; BASE_PHANTOM_LONG_VECS + 1],
             long_on,
             sav_on,
         }
@@ -58,7 +58,7 @@ impl SavPairQueue {
             return;
         }
         let (nv, nh, nl, m_ph) = sav.string_prefix_bounds(s_idx, self.long_on);
-        if nv < 2 || nh < 2 {
+        if nv != 2 || nh != 2 || (m_ph > 0 && nl > BASE_PHANTOM_LONG_VECS) {
             step_ringing_string_tile(
                 soa,
                 sav,
@@ -74,7 +74,7 @@ impl SavPairQueue {
         let bucket = if m_ph == 0 {
             0
         } else {
-            nl.min(MAX_PHANTOM_LONG_VECS)
+            nl.min(BASE_PHANTOM_LONG_VECS)
         };
         if let Some(s0) = self.pending[bucket].take() {
             step_sav_pair_tile(
@@ -134,8 +134,8 @@ fn cayley_step_vh<const NL: usize>(
     cp: Option<(&mut [F32x4; NL], &[F32x4; NL])>,
 ) -> (f64, F32x4) {
     let (mut d, mut p2) = (F32x4::zero(), F32x4::zero());
-    eval_p_vec(kg, kr, &sp.omega_sigma_v4, gv, uvm, &mut d, &mut p2);
-    eval_p_vec(kg, kr, &sp.omega_sigma_h4, gh, uhm, &mut d, &mut p2);
+    eval_p_vec_slice(kg, kr, &sp.omega_sigma_v4, gv, uvm, &mut d, &mut p2);
+    eval_p_vec_slice(kg, kr, &sp.omega_sigma_h4, gh, uhm, &mut d, &mut p2);
     if let Some((cp_mut, ulm)) = cp {
         eval_p_vec_slice(
             kg,
@@ -475,7 +475,7 @@ fn step_sav_pair_tile(
     } else if bucket == 1 {
         step_phantom_pair_tile::<1>(soa, sav, s0, e0, s1, e1, 1, out_l, out_r);
     } else {
-        step_phantom_pair_tile::<MAX_PHANTOM_LONG_VECS>(
+        step_phantom_pair_tile::<BASE_PHANTOM_LONG_VECS>(
             soa, sav, s0, e0, s1, e1, bucket, out_l, out_r,
         );
     }

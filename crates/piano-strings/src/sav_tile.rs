@@ -6,12 +6,14 @@ use piano_simd::F32x4;
 
 use crate::choir_map::StringMapEntry;
 use crate::modal_soa::ModalSoa;
-use crate::phantom::MAX_PHANTOM_LONG_VECS;
+use crate::phantom::BASE_PHANTOM_LONG_VECS;
 use crate::sav_drift::{
     load_nl_state_n, load_vh_state, step_sav_no_phantom_spec, step_sav_phantom_spec_n,
     store_nl_state_n, SavBank, LAMBDA_REG_DEFAULT,
 };
-use crate::sav_spec::SavStringSpec;
+use crate::sav_tile_3x6::{
+    step_no_phantom_flex_loop, step_phantom_flex_loop, step_ringing_string_tile_3x6,
+};
 use crate::zoh_kernel::{
     accum_string_tile_in, accum_tile_stereo, step_string_subblock, step_string_subblock_3,
     step_string_tile, zoh_rotate, TILE,
@@ -57,7 +59,7 @@ pub(crate) fn step_2_slices(
 }
 
 #[inline(always)]
-fn step_flex_slices(
+pub(crate) fn step_flex_slices(
     u: &mut [F32x4; 2],
     v: &mut [F32x4; 2],
     b: usize,
@@ -184,41 +186,6 @@ pub(crate) fn step_tails(
     }
 }
 
-#[cold]
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn step_no_phantom_flex_loop(
-    soa: &ModalSoa,
-    sp: &SavStringSpec,
-    ts: f64,
-    r_n: &mut f64,
-    uv: &mut [F32x4; 2],
-    vv: &mut [F32x4; 2],
-    uh: &mut [F32x4; 2],
-    vh: &mut [F32x4; 2],
-    entry: &StringMapEntry,
-    nv_vecs: usize,
-    nh_vecs: usize,
-    out_l: &mut [f32],
-    out_r: &mut [f32],
-) {
-    let (vb, hb) = (entry.vert_vecs.start, entry.horiz_vecs.start);
-    let (d_s, s_s, c_s) = (
-        soa.d_coeff.as_f32x4_slice(),
-        soa.s_coeff.as_f32x4_slice(),
-        soa.c_bridge.as_f32x4_slice(),
-    );
-    let steps = out_l.len().min(out_r.len());
-    for (lo, ro) in out_l[..steps].iter_mut().zip(out_r[..steps].iter_mut()) {
-        let av = step_flex_slices(uv, vv, vb, nv_vecs, d_s, s_s, c_s);
-        let ah = step_flex_slices(uh, vh, hb, nh_vecs, d_s, s_s, c_s);
-        step_sav_no_phantom_spec(sp, ts, r_n, uv, vv, uh, vh, LAMBDA_REG_DEFAULT);
-        let term = (av + ah).reduce_sum();
-        *lo += term * entry.pan_l;
-        *ro += term * entry.pan_r;
-    }
-}
-
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn step_no_phantom_sav_tile(
@@ -288,62 +255,6 @@ fn step_no_phantom_sav_tile(
     sav.r_sav[s_idx] = r_n;
     store_vh_state(soa, vb, nv_vecs, &uv, &vv);
     store_vh_state(soa, hb, nh_vecs, &uh, &vh);
-}
-
-#[cold]
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn step_phantom_flex_loop<const NL_MAX: usize>(
-    soa: &ModalSoa,
-    sp: &SavStringSpec,
-    ts: f64,
-    r_n: &mut f64,
-    uv: &mut [F32x4; 2],
-    vv: &mut [F32x4; 2],
-    uh: &mut [F32x4; 2],
-    vh: &mut [F32x4; 2],
-    ul: &mut [F32x4; NL_MAX],
-    vl: &mut [F32x4; NL_MAX],
-    entry: &StringMapEntry,
-    nv_vecs: usize,
-    nh_vecs: usize,
-    nl_vecs: usize,
-    out_l: &mut [f32],
-    out_r: &mut [f32],
-) {
-    let (vb, hb, lb) = (
-        entry.vert_vecs.start,
-        entry.horiz_vecs.start,
-        entry.long_vecs.start,
-    );
-    let (d_s, s_s, c_s) = (
-        soa.d_coeff.as_f32x4_slice(),
-        soa.s_coeff.as_f32x4_slice(),
-        soa.c_bridge.as_f32x4_slice(),
-    );
-    assert!(lb + nl_vecs <= d_s.len().min(s_s.len()).min(c_s.len()));
-    let steps = out_l.len().min(out_r.len());
-    for (lo, ro) in out_l[..steps].iter_mut().zip(out_r[..steps].iter_mut()) {
-        let av = step_flex_slices(uv, vv, vb, nv_vecs, d_s, s_s, c_s);
-        let ah = step_flex_slices(uh, vh, hb, nh_vecs, d_s, s_s, c_s);
-        let al = step_nl_slices::<NL_MAX>(ul, vl, lb, nl_vecs, d_s, s_s, c_s);
-        step_sav_phantom_spec_n::<NL_MAX>(
-            sp,
-            ts,
-            nl_vecs,
-            r_n,
-            uv,
-            vv,
-            uh,
-            vh,
-            ul,
-            vl,
-            LAMBDA_REG_DEFAULT,
-        );
-        let term = (av + ah + al).reduce_sum();
-        *lo += term * entry.pan_l;
-        *ro += term * entry.pan_r;
-    }
 }
 
 #[inline(never)]
@@ -460,7 +371,21 @@ pub(crate) fn step_ringing_string_tile(
     }
 
     let (nv_vecs, nh_vecs, nl_vecs, m_ph) = sav.string_prefix_bounds(s_idx, longitudinal_enabled);
-    if m_ph == 0 {
+    if nv_vecs > 2 || nh_vecs > 2 || nl_vecs > BASE_PHANTOM_LONG_VECS {
+        step_ringing_string_tile_3x6(
+            soa,
+            sav,
+            s_idx,
+            entry,
+            nv_vecs,
+            nh_vecs,
+            nl_vecs,
+            m_ph,
+            longitudinal_enabled,
+            out_l,
+            out_r,
+        );
+    } else if m_ph == 0 {
         step_no_phantom_sav_tile(
             soa,
             sav,
@@ -475,7 +400,7 @@ pub(crate) fn step_ringing_string_tile(
     } else if nl_vecs == 1 {
         step_phantom_sav_tile::<1>(soa, sav, s_idx, entry, nv_vecs, nh_vecs, 1, out_l, out_r);
     } else {
-        step_phantom_sav_tile::<MAX_PHANTOM_LONG_VECS>(
+        step_phantom_sav_tile::<BASE_PHANTOM_LONG_VECS>(
             soa, sav, s_idx, entry, nv_vecs, nh_vecs, nl_vecs, out_l, out_r,
         );
     }
