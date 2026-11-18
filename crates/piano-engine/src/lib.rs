@@ -47,6 +47,9 @@ mod wave3_tests;
 mod wave4_tests;
 
 #[cfg(test)]
+mod half_pedal_tests;
+
+#[cfg(test)]
 mod tests {
     use core::f64::consts::TAU;
 

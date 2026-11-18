@@ -72,7 +72,7 @@ fn render_bridge_blocks(
     (out_l, out_r)
 }
 
-fn render_stage4_blocks(
+pub(crate) fn render_stage4_blocks(
     engine: &mut PianoEngine,
     total_frames: usize,
     first_events: &[SampleEvent],

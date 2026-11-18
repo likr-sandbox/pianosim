@@ -205,10 +205,11 @@ pub(crate) fn step_coupled_prefixes(
             if f_peel != 0.0 {
                 r.ports.may_be_nonzero[s_idx] = true;
             }
+            let y_lim = plan.symp_y_lim[s_idx];
             if plan.symp_has_gains[s_idx]
                 && f_peel == 0.0
-                && r.ports.y_dv[s_idx].abs() <= 1.0e-6
-                && r.ports.y_dh[s_idx].abs() <= 1.0e-6
+                && r.ports.y_dv[s_idx].abs() <= y_lim
+                && r.ports.y_dh[s_idx].abs() <= y_lim
             {
                 let (gv, gh) = (plan.symp_gv[s_idx], plan.symp_gh[s_idx]);
                 let fd_v = gv * r.ports.v_dv[s_idx];
@@ -242,7 +243,7 @@ pub(crate) fn step_coupled_prefixes(
                         refresh_prefix_damp_ports_bp(r.bridge_ports, r.ports, s_idx);
                     }
                     if f_peel == 0.0
-                        && yc >= 2.5e-5
+                        && yc > 2.0e-7
                         && !r.ports.tail_nonzero[s_idx]
                         && r.ports.y_dv[s_idx].abs() <= 0.25 * yc
                         && r.ports.y_dh[s_idx].abs() <= 0.25 * yc
@@ -344,11 +345,24 @@ mod tests {
     struct PeelTestAction {
         clear: f32,
         peel: [f32; 88],
+        mid_drop_key: Option<(usize, usize)>,
     }
 
     impl KeyActionDriver for PeelTestAction {
         fn is_hammer_active(&self, _key_idx: usize) -> bool {
             false
+        }
+        fn has_mid_block_event(&self, key_idx: usize, chunk_base: usize, sub: usize) -> bool {
+            self.mid_drop_key
+                .is_some_and(|(k, at)| k == key_idx && at >= chunk_base && at < chunk_base + sub)
+        }
+        fn apply_sample_events_at(&mut self, abs_sample: usize) -> u128 {
+            if let Some((_, at)) = self.mid_drop_key {
+                if abs_sample == at {
+                    self.clear = -3.0e-4;
+                }
+            }
+            0
         }
         fn damper_clearance_m(&self, _key_idx: usize) -> f32 {
             self.clear
@@ -379,11 +393,16 @@ mod tests {
             _: usize,
             _: usize,
             _: f32,
-            _: f32,
-            _: f32,
-            _: f32,
+            v_damp_mps: f32,
+            r_port_damp: f32,
+            y_clear_m: f32,
         ) -> f32 {
-            0.0
+            if y_clear_m < 0.0 {
+                let c = 24.0_f32.min(2.4 / r_port_damp.max(1.0e-6));
+                -(c * v_damp_mps) / (1.0 + 0.5 * r_port_damp * c)
+            } else {
+                0.0
+            }
         }
     }
 
@@ -422,6 +441,7 @@ mod tests {
         let mut action = PeelTestAction {
             clear: 1.0e-5,
             peel: [0.0; 88],
+            mid_drop_key: None,
         };
         action.peel[39] = 1.5e-3;
 
@@ -450,5 +470,28 @@ mod tests {
         for s_idx in bank.choir_map.key(40).unwrap().string_range.clone() {
             assert!(!bank.ports.may_be_nonzero[s_idx]);
         }
+
+        // Mid-block damper drop (sample_offset = 37) on may_be_nonzero && !tail_nonzero string
+        // must damp prefix modes cleanly while keeping tl_soa strictly zero.
+        let e_pre = bank.key_sav_energy_joules(39);
+        assert!(e_pre > 0.0);
+        action.peel[39] = 0.0;
+        action.mid_drop_key = Some((39, 37));
+        bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut out_l, &mut out_r);
+        action.mid_drop_key = None;
+        for _ in 0..48 {
+            bank.render_subblock_bridge_coupled(&mut action, &mut bridge, &mut out_l, &mut out_r);
+        }
+        let e_post = bank.key_sav_energy_joules(39);
+        assert!(
+            e_post < e_pre * 1.0e-4,
+            "mid-block damper drop failed on prefix-only string: e_pre={e_pre:.3e}, e_post={e_post:.3e}"
+        );
+        for s_idx in bank.choir_map.key(39).unwrap().string_range.clone() {
+            assert!(!bank.ports.tail_nonzero[s_idx]);
+        }
+        let tl_u = bank.bridge_ports.tl_soa.u.as_slice();
+        let tl_v = bank.bridge_ports.tl_soa.v.as_slice();
+        assert!(tl_u.iter().all(|&x| x == 0.0) && tl_v.iter().all(|&x| x == 0.0));
     }
 }

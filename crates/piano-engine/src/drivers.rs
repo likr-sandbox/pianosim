@@ -173,6 +173,7 @@ impl KeyActionDriver for ActionDriver<'_> {
             .symp_linear_gains_if_settled(key_idx, str_idx, r_dv, r_dh, y_clear_m)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     fn symp_linear_gains_for_chunk(
         &mut self,
@@ -180,11 +181,17 @@ impl KeyActionDriver for ActionDriver<'_> {
         str_idx: usize,
         r_dv: f32,
         r_dh: f32,
-        yc_mid: f32,
+        yc0: f32,
+        yc_end: f32,
         sub: usize,
     ) -> Option<(f32, f32)> {
         self.action
-            .symp_linear_gains_for_chunk(key_idx, str_idx, r_dv, r_dh, yc_mid, sub)
+            .symp_linear_gains_for_chunk(key_idx, str_idx, r_dv, r_dh, yc0, yc_end, sub)
+    }
+
+    #[inline]
+    fn relax_open_gap_chunk(&mut self, str_idx: usize, sub: usize) {
+        self.action.relax_open_gap_chunk(str_idx, sub);
     }
 }
 

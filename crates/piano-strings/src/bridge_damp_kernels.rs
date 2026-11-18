@@ -41,6 +41,7 @@ fn clear_if_excursion(
     s_idx: usize,
     y_dv: f32,
     y_dh: f32,
+    y_lim: f32,
     str_coupled: &mut [bool; TOTAL_STRINGS],
     coupled_strs: &mut [u8; TOTAL_STRINGS],
     n_coupled_strs: &mut usize,
@@ -49,7 +50,7 @@ fn clear_if_excursion(
     symp_gh: &mut [f32; TOTAL_STRINGS],
     symp_mask: &mut [f32; TOTAL_STRINGS],
 ) {
-    if y_dv.abs() > 8.0e-6 || y_dh.abs() > 8.0e-6 {
+    if y_dv.abs() > y_lim || y_dh.abs() > y_lim {
         symp_has_gains[s_idx] = false;
         symp_gv[s_idx] = 0.0;
         symp_gh[s_idx] = 0.0;
@@ -70,6 +71,7 @@ fn verify_quad_damp_y(
     s: usize,
     st4: &[PrefixState],
     ad4: &[F32x4],
+    symp_y_lim: &[f32; TOTAL_STRINGS],
     str_coupled: &mut [bool; TOTAL_STRINGS],
     coupled_strs: &mut [u8; TOTAL_STRINGS],
     n_coupled_strs: &mut usize,
@@ -98,6 +100,7 @@ fn verify_quad_damp_y(
             s_idx,
             y_dv,
             y_dh,
+            symp_y_lim[s_idx],
             str_coupled,
             coupled_strs,
             n_coupled_strs,
@@ -117,6 +120,7 @@ fn verify_single_damp_y(
     s_idx: usize,
     st: &[PrefixState],
     ad: &[F32x4],
+    y_lim: f32,
     str_coupled: &mut [bool; TOTAL_STRINGS],
     coupled_strs: &mut [u8; TOTAL_STRINGS],
     n_coupled_strs: &mut usize,
@@ -134,6 +138,7 @@ fn verify_single_damp_y(
         s_idx,
         y_dv,
         y_dh,
+        y_lim,
         str_coupled,
         coupled_strs,
         n_coupled_strs,
@@ -155,6 +160,7 @@ pub(crate) fn step_prefix_quad_damp<const K: usize>(
     h_proj: F32x4,
     s: usize,
     ts: usize,
+    symp_y_lim: &[f32; TOTAL_STRINGS],
     str_coupled: &mut [bool; TOTAL_STRINGS],
     coupled_strs: &mut [u8; TOTAL_STRINGS],
     n_coupled_strs: &mut usize,
@@ -219,12 +225,13 @@ pub(crate) fn step_prefix_quad_damp<const K: usize>(
     let mv = vdv4 * mask4;
     let mh = vdh4 * mask4;
     let v_sq = (mv * mv + mh * mh).reduce_sum();
-    if v_sq > 2.5e-5 || ((ts & 31) == 31 && v_sq > 4.0e-6) {
+    if v_sq > 2.5e-5 || ((ts & 31) == 31 && v_sq > 1.0e-9) {
         verify_quad_damp_y(
             K,
             s,
             st4,
             ad4,
+            symp_y_lim,
             str_coupled,
             coupled_strs,
             n_coupled_strs,
@@ -252,6 +259,7 @@ pub(crate) fn step_single_prefix_damp<const K: usize>(
     ad: &[F32x4],
     neg_vbr: F32x4,
     h_proj: F32x4,
+    y_lim: f32,
     str_coupled: &mut [bool; TOTAL_STRINGS],
     coupled_strs: &mut [u8; TOTAL_STRINGS],
     n_coupled_strs: &mut usize,
@@ -274,12 +282,13 @@ pub(crate) fn step_single_prefix_damp<const K: usize>(
     ports.v_dv[s_idx] = v_dv;
     ports.v_dh[s_idx] = v_dh;
     let v_sq = v_dv * v_dv + v_dh * v_dh;
-    if v_sq > 2.5e-5 || ((ts & 31) == 31 && v_sq > 4.0e-6) {
+    if v_sq > 2.5e-5 || ((ts & 31) == 31 && v_sq > 1.0e-9) {
         verify_single_damp_y(
             K,
             s_idx,
             st,
             ad,
+            y_lim,
             str_coupled,
             coupled_strs,
             n_coupled_strs,

@@ -147,6 +147,7 @@ impl ActionBank {
         } else {
             self.pedals.note_on_silent(key_idx);
         }
+        self.damper_pad.lift_key_open(key_idx);
         self.keybed.note_on(key_idx, velocity_u16);
         let slot = &mut self.keys[key_idx];
         let target_h = self.hammer_voicing.hammer_hardness;
@@ -370,6 +371,7 @@ impl ActionBank {
     }
 
     /// Advances quiescent damper felt relaxation over `sub` samples and returns linear V/H gains.
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn symp_linear_gains_for_chunk(
         &mut self,
@@ -377,11 +379,18 @@ impl ActionBank {
         str_idx: usize,
         r_dv: f32,
         r_dh: f32,
-        yc_mid: f32,
+        yc0: f32,
+        yc_end: f32,
         sub: usize,
     ) -> Option<(f32, f32)> {
         self.damper_pad
-            .symp_linear_gains_for_chunk(key_idx, str_idx, r_dv, r_dh, yc_mid, sub)
+            .symp_linear_gains_for_chunk(key_idx, str_idx, r_dv, r_dh, yc0, yc_end, sub)
+    }
+
+    /// Relaxes damper felt hysteresis states `(z_pos, z_neg)` across `sub` open-gap samples.
+    #[inline]
+    pub fn relax_open_gap_chunk(&mut self, str_idx: usize, sub: usize) {
+        self.damper_pad.relax_open_gap_chunk(str_idx, sub);
     }
 
     /// Advances active keybed rail impacts by one host sample, returning the total

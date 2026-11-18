@@ -166,6 +166,9 @@ impl EngineCore {
                     EventKind::Pedal { .. } | EventKind::AllNotesOff
                 ) {
                     seg_end = off;
+                    while idx > mid_start && (events[idx - 1].sample_offset as usize) >= seg_end {
+                        idx -= 1;
+                    }
                     break;
                 }
                 idx += 1;
@@ -363,6 +366,9 @@ impl EngineCore {
                 self.bank.retire_key_struck_contact(k);
             } else {
                 self.bank.retire_key_sav_dormant(k);
+                if peak_rms < 2.5e-5 && !self.bank.key_has_transverse_tail(k) {
+                    self.bank.retire_key_struck_contact(k);
+                }
                 if damper_closed || peak_rms < 2.5e-5 {
                     self.ringing[k] = false;
                 }

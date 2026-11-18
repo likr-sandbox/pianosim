@@ -6,7 +6,7 @@ use core::f64::consts::{PI, TAU};
 use piano_simd::AlignedBuf;
 use piano_spec::{
     count_transverse_partials, effective_string_f0_hz, partial_frequency_hz, Polarization,
-    StringPhysicalParams, VoicingSpec, MAX_AUDIBLE_FREQ_HZ, NUM_KEYS, TOTAL_STRINGS,
+    StringPhysicalParams, VoicingSpec, DAMPED_KEYS, MAX_AUDIBLE_FREQ_HZ, NUM_KEYS, TOTAL_STRINGS,
 };
 
 use crate::choir_map::{ChoirMap, StringMapEntry};
@@ -46,6 +46,7 @@ pub(crate) struct ContactPorts {
     pub ports_synced: [bool; TOTAL_STRINGS],
     pub tl_v_active: [u16; TOTAL_STRINGS],
     pub tl_h_active: [u16; TOTAL_STRINGS],
+    pub tl_damp_active: [bool; TOTAL_STRINGS],
     pub sav_dormant: [bool; TOTAL_STRINGS],
     pub sav_low_nl_chunks: [u8; TOTAL_STRINGS],
     pub y_clear_scratch: alloc::vec::Vec<[f32; 128]>,
@@ -84,6 +85,7 @@ impl ContactPorts {
             ports_synced: [true; TOTAL_STRINGS],
             tl_v_active: [u16::MAX; TOTAL_STRINGS],
             tl_h_active: [u16::MAX; TOTAL_STRINGS],
+            tl_damp_active: [false; TOTAL_STRINGS],
             sav_dormant: [false; TOTAL_STRINGS],
             sav_low_nl_chunks: [0; TOTAL_STRINGS],
             y_clear_scratch: alloc::vec![[0.0_f32; 128]; NUM_KEYS],
@@ -107,6 +109,7 @@ impl ContactPorts {
         self.ports_synced.fill(true);
         self.tl_v_active.fill(u16::MAX);
         self.tl_h_active.fill(u16::MAX);
+        self.tl_damp_active.fill(false);
         self.sav_dormant.fill(false);
         self.sav_low_nl_chunks.fill(0);
     }
@@ -118,6 +121,7 @@ impl ContactPorts {
         self.struck_active[s_idx] = false;
         self.tl_v_active[s_idx] = u16::MAX;
         self.tl_h_active[s_idx] = u16::MAX;
+        self.tl_damp_active[s_idx] = false;
         self.sav_dormant[s_idx] = false;
         self.sav_low_nl_chunks[s_idx] = 0;
         self.y_h[s_idx] = 0.0;
@@ -192,15 +196,36 @@ pub(crate) fn strike_phi(key_idx: usize, partial_index: usize, speaking_length_m
     sin_term * window
 }
 
+const DAMPER_W_BASS_M: f64 = 0.080;
+const DAMPER_W_TREB_M: f64 = 0.055;
+const DAMPER_K_SPATIAL: f64 = 1.0;
+const DAMPER_VISC_CUTOFF_HZ: f64 = 2_600.0;
+
 #[inline]
-pub(crate) fn damper_phi(partial_index: usize) -> f64 {
+pub(crate) fn damper_phi(
+    key_idx: usize,
+    partial_index: usize,
+    speaking_length_m: f64,
+    freq_hz: f64,
+) -> f64 {
     let jf = partial_index as f64;
-    let (x_d, w) = (0.125_f64, 0.082_f64);
-    let pw = jf * PI * w;
+    let x = (key_idx.min(DAMPED_KEYS - 1) as f64) / ((DAMPED_KEYS - 1) as f64);
+    let w_felt_m = DAMPER_W_BASS_M + (DAMPER_W_TREB_M - DAMPER_W_BASS_M) * x;
+    let w_d = if speaking_length_m > 0.0 {
+        (w_felt_m / speaking_length_m).clamp(0.03, 0.22)
+    } else {
+        0.082
+    };
+    let pw = jf * PI * w_d;
     let sinc_w = sin_cos_f64(pw).0 / pw;
-    let cos_2xd = sin_cos_f64(2.0 * jf * PI * x_d).1;
+    let cos_2xd = sin_cos_f64(2.0 * jf * PI * 0.125).1;
     let env_rms = sqrt_f64((0.5 - 0.5 * cos_2xd * sinc_w).max(0.0));
-    env_rms * (1.0 + 0.44 * (1.0 - exp_f64(-0.48 * ((partial_index - 1) as f64))))
+    let ramp = 1.0 + 0.44 * (1.0 - exp_f64(-0.48 * ((partial_index - 1) as f64)));
+    let u_sp = DAMPER_K_SPATIAL * jf * w_d;
+    let spatial_lpf = 1.0 / sqrt_f64(1.0 + u_sp * u_sp);
+    let fr = freq_hz / DAMPER_VISC_CUTOFF_HZ;
+    let visc_lpf = 1.0 / sqrt_f64(1.0 + fr * fr);
+    env_rms * ramp * spatial_lpf * visc_lpf
 }
 
 pub(crate) fn populate_string_ports(
@@ -310,7 +335,7 @@ pub(crate) fn populate_string_ports(
                 ah_s[base + (j - 1)] = ah;
                 sum_bh_sq += f64::from(bh) * f64::from(bh);
                 if entry.has_damper {
-                    let pd = ds * damper_phi(j);
+                    let pd = ds * damper_phi(k, j, spec.speaking_length_m, f_j);
                     let (bd, ad) = ((b_gain * pd) as f32, (pd / (omega * gamma_k)) as f32);
                     bd_s[base + (j - 1)] = bd;
                     ad_s[base + (j - 1)] = ad;
@@ -330,3 +355,7 @@ pub(crate) fn populate_string_ports(
     ports.r_port_damp_v[s_idx] = (alpha64 * sum_bd_v_sq) as f32;
     ports.r_port_damp_h[s_idx] = (alpha64 * sum_bd_h_sq) as f32;
 }
+
+#[cfg(test)]
+#[path = "contact_port_tests.rs"]
+mod port_tests;

@@ -13,7 +13,8 @@ use crate::bridge_prefix_step::{
 };
 use crate::bridge_sav::step_sav_scheduled;
 use crate::bridge_tails::{
-    prepare_sample_tails_and_hammers, sav_long_vecs, step_uncoupled_tails, BridgeRun, ChunkPlan,
+    key_clear_of_open_damper, key_needs_active_tail, prepare_sample_tails_and_hammers,
+    route_damped_symp_key, sav_long_vecs, step_uncoupled_tails, BridgeRun, ChunkPlan,
     HammerStepForce, KeyCat, SavLongSlice, TailDampPartial, SUB,
 };
 use crate::choir_map::ChoirMap;
@@ -58,36 +59,45 @@ fn step_all_strings_prefix_wdf(
             &plan.sav_strings[..plan.n_sav],
             r.long_on,
         );
-    }
-    for idx in 0..plan.n_a {
-        let k = usize::from(plan.active_keys[idx]);
-        let has_hammer = plan.key_has_hammer[k];
-        let sav_key = r.sav_on && k < LONGITUDINAL_MAX_KEY_IDX;
-        for s_idx in r.keys[k].string_range.clone() {
-            if !r.ports.may_be_nonzero[s_idx] {
+        for &s_u8 in &plan.sav_strings[..plan.n_sav] {
+            let s_idx = usize::from(s_u8);
+            if !r.ports.may_be_nonzero[s_idx] || !r.strings[s_idx].has_damper {
                 continue;
             }
-            if has_hammer {
-                refresh_string_ports_bp(
-                    r.bridge_ports,
-                    r.ports,
-                    s_idx,
-                    r.strings[s_idx].has_damper,
-                );
-            } else if sav_key
-                && r.ports.struck_active[s_idx]
-                && !r.ports.sav_dormant[s_idx]
-                && r.sav.string_n_vh(s_idx) > 0
-            {
+            let k = usize::from(r.strings[s_idx].key_idx);
+            if plan.key_has_hammer[k] {
+                continue;
+            }
+            if plan.str_coupled[s_idx] || plan.symp_has_gains[s_idx] {
                 let m = &r.bridge_ports.meta[s_idx];
-                let tp = plan.tail_partial_damp[s_idx];
                 let vdv_br =
                     accum_prefix_damp_vel_bp(r.bridge_ports, r.ports, m.beta_v_off, m.v_br.clone());
                 let vdh_br =
                     accum_prefix_damp_vel_bp(r.bridge_ports, r.ports, m.beta_h_off, m.h_br.clone());
+                let (tv, th) = if plan.key_cat[k] == KeyCat::ActiveContact {
+                    let tp = plan.tail_partial_damp[s_idx];
+                    (tp.vdv_raw, tp.vdh_raw)
+                } else {
+                    (0.0, 0.0)
+                };
                 let alpha = r.ports.alpha_vel[s_idx];
-                r.ports.v_dv[s_idx] = alpha * (vdv_br + tp.vdv_raw);
-                r.ports.v_dh[s_idx] = alpha * (vdh_br + tp.vdh_raw);
+                r.ports.v_dv[s_idx] = alpha * (vdv_br + tv);
+                r.ports.v_dh[s_idx] = alpha * (vdh_br + th);
+            }
+        }
+    }
+    for idx in 0..plan.n_a {
+        let k = usize::from(plan.active_keys[idx]);
+        if plan.key_has_hammer[k] {
+            for s_idx in r.keys[k].string_range.clone() {
+                if r.ports.may_be_nonzero[s_idx] {
+                    refresh_string_ports_bp(
+                        r.bridge_ports,
+                        r.ports,
+                        s_idx,
+                        r.strings[s_idx].has_damper,
+                    );
+                }
             }
         }
     }
@@ -155,6 +165,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         symp_gv: [0.0; TOTAL_STRINGS],
         symp_gh: [0.0; TOTAL_STRINGS],
         symp_mask: [0.0; TOTAL_STRINGS],
+        symp_y_lim: [0.0; TOTAL_STRINGS],
         symp_has_gains: [false; TOTAL_STRINGS],
         zone_tail_n: [[0.0; 8]; SUB],
         n_a: 0,
@@ -183,6 +194,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         plan.symp_gv.fill(0.0);
         plan.symp_gh.fill(0.0);
         plan.symp_mask.fill(0.0);
+        plan.symp_y_lim.fill(0.0);
         peel_slot.fill(u8::MAX);
         let mut n_peel_slots = 0usize;
         (plan.n_a, plan.n_coupled_strs, plan.n_sl, plan.n_sav) = (0, 0, 0, 0);
@@ -244,8 +256,14 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             } else {
                 (f32::MAX, false)
             };
-            let any_struck = r.ports.struck_active[sr.clone()].iter().any(|&b| b);
-            if mid_ev || hammer || (any_struck && min_c < DAMPER_CLEAR_THRESHOLD_M) {
+            if r.sav_on && k < LONGITUDINAL_MAX_KEY_IDX && !r.lossless && !hammer && !mid_ev {
+                for s_idx in sr.clone() {
+                    if r.ports.struck_active[s_idx] {
+                        update_sav_dormancy(r.ports, r.bridge_ports, r.sav, s_idx);
+                    }
+                }
+            }
+            if mid_ev || hammer {
                 plan.key_cat[k] = KeyCat::ActiveContact;
                 plan.key_has_hammer[k] = hammer;
                 plan.key_has_mid_ev[k] = mid_ev;
@@ -255,99 +273,40 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                     plan.push_coupled(s_idx);
                 }
             } else if has_peel || min_c < DAMPER_CLEAR_THRESHOLD_M {
-                if !has_peel && !any_struck && key.has_damper && min_c >= 2.5e-5 {
-                    let mut all_clear = true;
+                let open_clear = !has_peel
+                    && key.has_damper
+                    && key_clear_of_open_damper(&r, &plan.was_nz, sr.clone(), min_c);
+                if open_clear {
                     for s_idx in sr.clone() {
-                        if !plan.was_nz[s_idx] {
-                            continue;
-                        }
-                        if r.ports.tail_nonzero[s_idx] {
-                            all_clear = false;
-                            break;
-                        }
-                        if !r.ports.ports_synced[s_idx] {
-                            crate::contact_ports::refresh_prefix_damp_ports_bp(
-                                r.bridge_ports,
-                                r.ports,
-                                s_idx,
-                            );
-                            r.ports.ports_synced[s_idx] = true;
-                        }
-                        let lim = 0.5 * min_c;
-                        let bound_v =
-                            r.ports.y_dv[s_idx].abs() + 4.0e-3 * r.ports.v_dv[s_idx].abs();
-                        let bound_h =
-                            r.ports.y_dh[s_idx].abs() + 4.0e-3 * r.ports.v_dh[s_idx].abs();
-                        if bound_v > lim || bound_h > lim {
-                            all_clear = false;
-                            break;
+                        if plan.was_nz[s_idx] {
+                            driver.relax_open_gap_chunk(s_idx, sub);
                         }
                     }
-                    if all_clear {
-                        continue;
-                    }
-                }
-                plan.key_cat[k] = KeyCat::DampedSymp;
-                if key.has_damper {
-                    let yc0 = r.ports.y_clear_scratch[k][0];
-                    let yc_end = r.ports.y_clear_scratch[k][sub - 1];
-                    let const_closed = yc0 <= -5.0e-5
-                        && r.ports.y_clear_scratch[k][..sub].iter().all(|&c| c == yc0);
-                    let closed_chunk = yc0 <= -5.0e-5 && yc_end <= -5.0e-5;
+                } else if key.has_damper && key_needs_active_tail(&r, sr.clone(), min_c) {
+                    plan.key_cat[k] = KeyCat::ActiveContact;
+                    plan.active_keys[plan.n_a] = k as u8;
+                    plan.n_a += 1;
                     for s_idx in sr.clone() {
-                        if has_peel {
-                            plan.push_coupled(s_idx);
-                        } else if plan.was_nz[s_idx] {
-                            let mut routed_fast = false;
-                            if closed_chunk {
-                                if !r.ports.ports_synced[s_idx] {
-                                    crate::contact_ports::refresh_prefix_damp_ports_bp(
-                                        r.bridge_ports,
-                                        r.ports,
-                                        s_idx,
-                                    );
-                                    r.ports.ports_synced[s_idx] = true;
-                                }
-                                let (yv, yh) =
-                                    (r.ports.y_dv[s_idx].abs(), r.ports.y_dh[s_idx].abs());
-                                if yv <= 6.5e-6 && yh <= 6.5e-6 {
-                                    let rv = r.bridge_ports.r_damp_prefix_v[s_idx];
-                                    let rh = r.bridge_ports.r_damp_prefix_h[s_idx];
-                                    let gains_opt = if const_closed {
-                                        driver
-                                            .symp_linear_gains_if_settled(k, s_idx, rv, rh, yc0)
-                                            .or_else(|| {
-                                                driver.symp_linear_gains_for_chunk(
-                                                    k, s_idx, rv, rh, yc0, sub,
-                                                )
-                                            })
-                                    } else {
-                                        driver.symp_linear_gains_for_chunk(
-                                            k,
-                                            s_idx,
-                                            rv,
-                                            rh,
-                                            0.5 * (yc0 + yc_end),
-                                            sub,
-                                        )
-                                    };
-                                    if let Some((gv, gh)) = gains_opt {
-                                        plan.symp_gv[s_idx] = gv;
-                                        plan.symp_gh[s_idx] = gh;
-                                        plan.symp_mask[s_idx] = 1.0;
-                                        plan.symp_has_gains[s_idx] = true;
-                                        routed_fast = true;
-                                    }
-                                }
-                            }
-                            if !routed_fast {
-                                plan.push_coupled(s_idx);
-                            }
-                        }
+                        plan.push_coupled(s_idx);
+                    }
+                } else {
+                    plan.key_cat[k] = KeyCat::DampedSymp;
+                    if key.has_damper {
+                        route_damped_symp_key(
+                            &mut r,
+                            driver,
+                            &mut plan,
+                            k,
+                            sr.clone(),
+                            sub,
+                            has_peel,
+                        );
                     }
                 }
             }
-            if plan.key_cat[k] != KeyCat::ActiveContact {
+            if plan.key_cat[k] != KeyCat::ActiveContact
+                || (!plan.key_has_hammer[k] && !plan.key_has_mid_ev[k])
+            {
                 for s_idx in sr.clone() {
                     let nl = sav_long_vecs(&r, s_idx);
                     if nl > 0 {
@@ -363,9 +322,6 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             }
             if r.sav_on && k < LONGITUDINAL_MAX_KEY_IDX {
                 for s_idx in sr {
-                    if !r.lossless && !hammer && !mid_ev && r.ports.struck_active[s_idx] {
-                        update_sav_dormancy(r.ports, r.bridge_ports, r.sav, s_idx);
-                    }
                     if r.ports.struck_active[s_idx]
                         && !r.ports.sav_dormant[s_idx]
                         && r.sav.string_n_vh(s_idx) > 0

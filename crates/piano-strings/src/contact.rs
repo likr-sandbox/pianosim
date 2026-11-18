@@ -177,6 +177,24 @@ pub(crate) fn eval_hammer_choir(
 }
 
 #[inline]
+pub(crate) fn sample_damper_with_r(
+    drv: &mut impl KeyActionDriver,
+    p: &ContactPorts,
+    k: usize,
+    s: usize,
+    rv: f32,
+    rh: f32,
+    yc: f32,
+) -> (f32, f32) {
+    let (fv, fh) =
+        drv.step_damper_pair(k, s, p.y_dv[s], p.v_dv[s], rv, p.y_dh[s], p.v_dh[s], rh, yc);
+    (
+        if fv.is_finite() { fv } else { 0.0 },
+        if fh.is_finite() { fh } else { 0.0 },
+    )
+}
+
+#[inline]
 pub(crate) fn sample_damper(
     drv: &mut impl KeyActionDriver,
     p: &ContactPorts,
@@ -184,21 +202,7 @@ pub(crate) fn sample_damper(
     s: usize,
     yc: f32,
 ) -> (f32, f32) {
-    let (rv, rh) = drv.step_damper_pair(
-        k,
-        s,
-        p.y_dv[s],
-        p.v_dv[s],
-        p.r_port_damp_v[s],
-        p.y_dh[s],
-        p.v_dh[s],
-        p.r_port_damp_h[s],
-        yc,
-    );
-    (
-        if rv.is_finite() { rv } else { 0.0 },
-        if rh.is_finite() { rh } else { 0.0 },
-    )
+    sample_damper_with_r(drv, p, k, s, p.r_port_damp_v[s], p.r_port_damp_h[s], yc)
 }
 
 #[inline(never)]
@@ -438,4 +442,4 @@ pub(crate) fn render_subblock_coupled_core(
 
 #[cfg(test)]
 #[path = "contact_tests.rs"]
-mod tests;
+pub(crate) mod tests;

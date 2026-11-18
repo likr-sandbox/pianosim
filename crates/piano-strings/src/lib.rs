@@ -177,6 +177,7 @@ impl StringBank {
                 self.ports.ports_synced[str_idx] = false;
                 self.ports.tl_v_active[str_idx] = u16::MAX;
                 self.ports.tl_h_active[str_idx] = u16::MAX;
+                self.ports.tl_damp_active[str_idx] = true;
                 self.ports.sav_dormant[str_idx] = false;
                 self.ports.sav_low_nl_chunks[str_idx] = 0;
             }

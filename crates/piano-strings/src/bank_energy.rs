@@ -138,10 +138,24 @@ impl StringBank {
                 self.ports.ports_synced[s_idx] = false;
                 self.ports.tl_v_active[s_idx] = u16::MAX;
                 self.ports.tl_h_active[s_idx] = u16::MAX;
+                self.ports.tl_damp_active[s_idx] = true;
                 self.ports.sav_dormant[s_idx] = false;
                 self.ports.sav_low_nl_chunks[s_idx] = 0;
             }
         }
+    }
+
+    /// Returns `true` if any string of `key_idx` still holds active transverse tail modes above `-90 dBFS`.
+    #[must_use]
+    #[inline]
+    pub fn key_has_transverse_tail(&self, key_idx: usize) -> bool {
+        let Some(entry) = self.choir_map.key(key_idx) else {
+            return false;
+        };
+        entry
+            .string_range
+            .clone()
+            .any(|s_idx| self.ports.tail_nonzero[s_idx] && self.ports.tl_damp_active[s_idx])
     }
 
     /// Retires struck contact state for all strings belonging to `key_idx` once
@@ -151,6 +165,7 @@ impl StringBank {
         if let Some(entry) = self.choir_map.key(key_idx) {
             for s_idx in entry.string_range.clone() {
                 self.ports.struck_active[s_idx] = false;
+                self.ports.tl_damp_active[s_idx] = false;
                 self.ports.sav_dormant[s_idx] = false;
                 self.ports.sav_low_nl_chunks[s_idx] = 0;
                 self.sav.reset_string(s_idx);

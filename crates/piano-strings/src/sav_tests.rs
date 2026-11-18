@@ -256,7 +256,8 @@ fn hundred_strike_ff_pitch_drift_under_0_5_cents_across_a0_c3() {
                 r_port_damp: f32,
                 _y_clear_m: f32,
             ) -> f32 {
-                -v_damp_mps / (r_port_damp + 0.005)
+                let c = 24.0_f32.min(2.4 / r_port_damp.max(1.0e-6));
+                -(c * v_damp_mps) / (1.0 + 0.5 * r_port_damp * c)
             }
         }
         let mut drv = DampDriver {

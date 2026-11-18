@@ -263,11 +263,17 @@ impl StringBank {
 }
 
 const ENERGY_HORIZON_SQ: f32 = 1.0e-18; // (-120 dBFS post-Stage-4 amplitude horizon, FTO #4/#7 pure energy check)
+const TAIL_DAMP_HORIZON_SQ: f32 = 4.0e-12; // (half-pedal tail-grazing horizon; closed damper damps to -120 dBFS)
 const SAV_DORMANCY_RATIO: f64 = 1.581e-6; // E_nl / (2 * E_lin) threshold corresponding to -55 dB
 const SAV_DORMANCY_CHUNKS: u8 = 12;
 
 #[inline]
-fn shrink_tail_horizon(tl_soa: &mut ModalSoa, range: Range<usize>, active: &mut u16) {
+fn shrink_tail_horizon(
+    tl_soa: &mut ModalSoa,
+    range: Range<usize>,
+    active: &mut u16,
+    check_damp: bool,
+) -> bool {
     let mut n = usize::from(*active).min(range.len());
     let u = &mut tl_soa.u.as_f32x4_slice_mut()[range.clone()];
     let v = &mut tl_soa.v.as_f32x4_slice_mut()[range];
@@ -287,6 +293,13 @@ fn shrink_tail_horizon(tl_soa: &mut ModalSoa, range: Range<usize>, active: &mut 
         }
     }
     *active = n as u16;
+    check_damp
+        && (0..n).any(|idx| {
+            (u[idx] * u[idx] + v[idx] * v[idx])
+                .to_array()
+                .iter()
+                .any(|&e| e >= TAIL_DAMP_HORIZON_SQ)
+        })
 }
 
 pub(crate) fn update_sav_dormancy(
@@ -370,19 +383,26 @@ pub(crate) fn flush_bridge_subnormals_core(
                 !lossless && key_closed_damp[k] && !ports.tail_nonzero[s_idx],
             );
             let nz = if !ports.tail_nonzero[s_idx] {
+                ports.tl_damp_active[s_idx] = false;
                 nz_br
             } else {
                 if !lossless && !key_has_hammer[k] {
-                    shrink_tail_horizon(
+                    let check_d = ports.tl_damp_active[s_idx];
+                    let dv = shrink_tail_horizon(
                         &mut bridge_ports.tl_soa,
                         tl_v.clone(),
                         &mut ports.tl_v_active[s_idx],
+                        check_d,
                     );
-                    shrink_tail_horizon(
+                    let dh = shrink_tail_horizon(
                         &mut bridge_ports.tl_soa,
                         tl_h.clone(),
                         &mut ports.tl_h_active[s_idx],
+                        check_d,
                     );
+                    if check_d && !dv && !dh {
+                        ports.tl_damp_active[s_idx] = false;
+                    }
                 }
                 let nv = usize::from(ports.tl_v_active[s_idx]).min(tl_v.len());
                 let nh = usize::from(ports.tl_h_active[s_idx]).min(tl_h.len());

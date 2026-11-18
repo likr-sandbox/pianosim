@@ -355,6 +355,13 @@ impl AdaaState {
         self.x_prev = 0.0;
     }
 
+    /// Returns `true` when stored previous sample `x_prev` is `0.0`.
+    #[must_use]
+    #[inline]
+    pub fn is_zero(&self) -> bool {
+        self.x_prev == 0.0
+    }
+
     /// Updates `x_prev` directly when stepping within a linear equilibrium region.
     #[inline]
     pub fn sync_x(&mut self, x: f32) {

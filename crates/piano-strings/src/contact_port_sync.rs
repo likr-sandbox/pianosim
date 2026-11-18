@@ -103,17 +103,25 @@ pub(crate) fn refresh_string_ports_bp(
                 avd.reduce_sum(),
             )
         };
+    let (nv, nh) = if ports.tail_nonzero[s_idx] {
+        (
+            usize::from(ports.tl_v_active[s_idx]).min(m.tl_v.len()),
+            usize::from(ports.tl_h_active[s_idx]).min(m.tl_h.len()),
+        )
+    } else {
+        (0, 0)
+    };
     let (yh_v, vh_v, ydv, vdv) = accum_pol(
         m.beta_v_off,
         m.v_br.clone(),
-        m.tl_v.clone(),
-        m.v_tail.clone(),
+        m.tl_v.start..(m.tl_v.start + nv),
+        m.v_tail.start..(m.v_tail.start + nv),
     );
     let (yh_h, vh_h, ydh, vdh) = accum_pol(
         m.beta_h_off,
         m.h_br.clone(),
-        m.tl_h.clone(),
-        m.h_tail.clone(),
+        m.tl_h.start..(m.tl_h.start + nh),
+        m.h_tail.start..(m.h_tail.start + nh),
     );
     let alpha = ports.alpha_vel[s_idx];
     ports.y_h[s_idx] = yh_v + yh_h;

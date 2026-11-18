@@ -6,7 +6,7 @@ use piano_simd::F32x4;
 use piano_spec::NUM_KEYS;
 
 use crate::bridge_tails::{add_zone_n, BridgeRun, ChunkPlan, HammerStepForce, TailDampPartial};
-use crate::contact::{eval_hammer_choir, sample_damper, KeyActionDriver};
+use crate::contact::{eval_hammer_choir, sample_damper_with_r, KeyActionDriver};
 use crate::contact_ports::{refresh_string_ports_bp, ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
 use crate::modal_soa::ModalSoa;
 use crate::zoh_kernel::{step_string_modes, zoh_rotate};
@@ -155,6 +155,7 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                 r.ports.ports_synced[s_idx] = false;
                 r.ports.tl_v_active[s_idx] = u16::MAX;
                 r.ports.tl_h_active[s_idx] = u16::MAX;
+                r.ports.tl_damp_active[s_idx] = true;
                 r.ports.sav_dormant[s_idx] = false;
                 r.ports.sav_low_nl_chunks[s_idx] = 0;
             }
@@ -192,6 +193,7 @@ pub(crate) fn prepare_sample_tails_and_hammers(
         let k = usize::from(plan.active_keys[idx]);
         let key = &r.keys[k];
         let sr = key.string_range.clone();
+        let step_long_here = plan.key_has_hammer[k] || plan.key_has_mid_ev[k];
         for s_idx in sr.clone() {
             if r.ports.may_be_nonzero[s_idx] && !r.ports.ports_synced[s_idx] {
                 refresh_string_ports_bp(
@@ -220,9 +222,16 @@ pub(crate) fn prepare_sample_tails_and_hammers(
         let damp_on = key.has_damper && yc < DAMPER_CLEAR_THRESHOLD_M;
         for (c, s_idx) in sr.enumerate() {
             let fh = fh_arr[c];
-            #[rustfmt::skip]
-            let (fd_v, fd_h) = if damp_on && r.ports.may_be_nonzero[s_idx] && (fh != 0.0 || r.ports.tail_nonzero[s_idx]) {
-                sample_damper(driver, r.ports, k, s_idx, yc)
+            let (fd_v, fd_h) = if damp_on && r.ports.may_be_nonzero[s_idx] {
+                let (rv, rh) = if r.ports.tail_nonzero[s_idx] || fh != 0.0 {
+                    (r.ports.r_port_damp_v[s_idx], r.ports.r_port_damp_h[s_idx])
+                } else {
+                    (
+                        r.bridge_ports.r_damp_prefix_v[s_idx],
+                        r.bridge_ports.r_damp_prefix_h[s_idx],
+                    )
+                };
+                sample_damper_with_r(driver, r.ports, k, s_idx, rv, rh, yc)
             } else {
                 (0.0, 0.0)
             };
@@ -231,19 +240,19 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                 r.ports.tail_nonzero[s_idx] = true;
                 r.ports.tl_v_active[s_idx] = u16::MAX;
                 r.ports.tl_h_active[s_idx] = u16::MAX;
-            } else if r.ports.tail_nonzero[s_idx] {
-                if fd_v != 0.0 {
-                    r.ports.tl_v_active[s_idx] = u16::MAX;
-                }
-                if fd_h != 0.0 {
-                    r.ports.tl_h_active[s_idx] = u16::MAX;
-                }
+                r.ports.tl_damp_active[s_idx] = true;
             }
             let entry = &r.strings[s_idx];
             let (tl_v, v_tail, tl_h, h_tail, tl_l, nt, nl_f) = {
                 let m = &r.bridge_ports.meta[s_idx];
-                let nv = usize::from(r.ports.tl_v_active[s_idx]).min(m.tl_v.len());
-                let nh = usize::from(r.ports.tl_h_active[s_idx]).min(m.tl_h.len());
+                let (nv, nh) = if r.ports.tail_nonzero[s_idx] {
+                    (
+                        usize::from(r.ports.tl_v_active[s_idx]).min(m.tl_v.len()),
+                        usize::from(r.ports.tl_h_active[s_idx]).min(m.tl_h.len()),
+                    )
+                } else {
+                    (0, 0)
+                };
                 let tr = |r: &Range<usize>, n: usize| r.start..(r.start + n);
                 (
                     tr(&m.tl_v, nv),
@@ -274,7 +283,7 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                 };
                 (tv, th)
             };
-            let tl = if tl_l.is_empty() {
+            let tl = if !step_long_here || tl_l.is_empty() {
                 0.0
             } else {
                 let tl_soa = &mut r.bridge_ports.tl_soa;

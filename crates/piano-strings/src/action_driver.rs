@@ -107,6 +107,7 @@ pub trait KeyActionDriver {
         None
     }
     /// Advances quiescent damper felt memory over `sub` samples and returns chunk linear V/H gains.
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     fn symp_linear_gains_for_chunk(
         &mut self,
@@ -114,9 +115,13 @@ pub trait KeyActionDriver {
         _str_idx: usize,
         _r_dv: f32,
         _r_dh: f32,
-        _yc_mid: f32,
+        _yc0: f32,
+        _yc_end: f32,
         _sub: usize,
     ) -> Option<(f32, f32)> {
         None
     }
+    /// Relaxes damper felt hysteresis states across `sub` open-gap samples when contact-free.
+    #[inline]
+    fn relax_open_gap_chunk(&mut self, _str_idx: usize, _sub: usize) {}
 }
