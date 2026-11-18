@@ -5,6 +5,7 @@ pub mod engine;
 pub(crate) mod engine_core;
 pub mod event_queue;
 pub mod param_smooth;
+pub mod space_control;
 pub mod space_guard;
 pub mod telemetry;
 
@@ -13,9 +14,12 @@ pub use event_queue::{EventQueue, MAX_EVENTS};
 pub use param_smooth::{
     IntoLidState, IntoListenerPerspective, SpaceCrossfadeGuard, VoicingSmoother,
 };
-pub use piano_radiator::{space_blob_len_for_sample_rate, SpacePrepContext};
+pub use piano_radiator::{
+    embedded_body_bytes, space_blob_len_for_sample_rate, BodyArchetype, SpacePrepContext,
+};
 pub use piano_spec;
 pub use piano_strings::{voicing_blob_len, VoicingPrepContext};
+pub use space_control::{IntoBodyArchetype, DEFAULT_REVERB_DECAY_S, DEFAULT_REVERB_MIX};
 pub use telemetry::EngineTelemetry;
 
 #[cfg(test)]
@@ -35,6 +39,9 @@ mod m6_acoustic_tests;
 
 #[cfg(test)]
 mod wave2_tests;
+
+#[cfg(test)]
+mod wave3_tests;
 
 #[cfg(test)]
 mod tests {

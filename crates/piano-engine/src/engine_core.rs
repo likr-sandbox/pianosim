@@ -2,7 +2,7 @@
 
 use piano_action::ActionBank;
 use piano_bridge::BridgeBank;
-use piano_radiator::RadiatorBank;
+use piano_radiator::{BodyArchetype, RadiatorBank};
 use piano_spec::{
     midi_to_key, EventKind, PedalKind, SampleEvent, VoicingSpec, DAMPED_KEYS, NUM_KEYS,
 };
@@ -10,6 +10,7 @@ use piano_strings::StringBank;
 
 use crate::drivers::{ActionDriver, BridgeDriver};
 use crate::param_smooth::{apply_raised_cosine_crossfade, SpaceCrossfadeGuard};
+use crate::space_control::{BodyModelCache, DEFAULT_REVERB_DECAY_S, DEFAULT_REVERB_MIX};
 
 const KEY_SILENCE_RMS_THRESHOLD: f32 = 2.5e-4;
 const DAMPER_ACTIVE_HOLD_CLEARANCE_M: f32 = 0.5e-3;
@@ -79,6 +80,10 @@ pub(crate) struct EngineCore {
     pub bank: StringBank,
     pub bridge: BridgeBank,
     pub radiators: [RadiatorBank; 2],
+    pub body_archetype: BodyArchetype,
+    pub radiator_bodies: [Option<BodyArchetype>; 2],
+    pub staged_standby_body: Option<BodyArchetype>,
+    pub body_models: BodyModelCache,
     pub scratch: EngineScratch,
     pub key_down: [bool; NUM_KEYS],
     pub ringing: [bool; NUM_KEYS],
@@ -90,16 +95,42 @@ impl EngineCore {
         let bank = StringBank::new_bridge_coupled(sample_rate, voicing);
         let mut bridge = BridgeBank::new_with_voicing(bank.sample_rate(), voicing);
         bridge.set_port_resistances(bank.bridge_port_resistances());
-        let rad0 = RadiatorBank::new_concert_grand(f64::from(sample_rate));
+        let mut rad0 = RadiatorBank::new_concert_grand(f64::from(sample_rate));
+        rad0.set_reverb(DEFAULT_REVERB_DECAY_S, DEFAULT_REVERB_MIX);
         let rad1 = rad0.clone();
         Self {
             action,
             bank,
             bridge,
             radiators: [rad0, rad1],
+            body_archetype: BodyArchetype::ConcertGrand,
+            radiator_bodies: [Some(BodyArchetype::ConcertGrand); 2],
+            staged_standby_body: None,
+            body_models: BodyModelCache::new(),
             scratch: EngineScratch::default(),
             key_down: [false; NUM_KEYS],
             ringing: [false; NUM_KEYS],
+        }
+    }
+
+    #[inline]
+    pub fn set_reverb(&mut self, decay_s: f32, mix: f32) {
+        self.radiators[0].set_reverb(decay_s, mix);
+        self.radiators[1].set_reverb(decay_s, mix);
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn reverb_params(&self) -> (f32, f32) {
+        self.radiators[0].reverb_params()
+    }
+
+    #[inline]
+    pub fn sync_to_body_if_changed(&mut self, archetype: BodyArchetype) {
+        if self.body_archetype != archetype {
+            let (y_inf, reduced_poles) = self.body_models.reduced_model(archetype);
+            self.bridge.set_reduced_model(y_inf, reduced_poles);
+            self.body_archetype = archetype;
         }
     }
 

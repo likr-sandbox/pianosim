@@ -1,6 +1,7 @@
 //! Spatial raised-cosine crossfade guard and perspective/lid conversion traits.
 
 use core::f32::consts::PI;
+use piano_radiator::BodyArchetype;
 use piano_spec::{LidState, ListenerPerspective};
 
 /// Duration of the raised-cosine crossfade when changing listener perspective or lid (`8 ms`).
@@ -26,11 +27,13 @@ pub enum SpaceTransitionAction {
     },
 }
 
-/// Raised-cosine spatial crossfade guard across perspective and lid changes.
+/// Raised-cosine spatial crossfade guard across body, perspective, and lid changes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpaceCrossfadeGuard {
+    current_body: BodyArchetype,
     current_perspective: ListenerPerspective,
     current_lid: LidState,
+    target_body: BodyArchetype,
     target_perspective: ListenerPerspective,
     target_lid: LidState,
     active_radiator_idx: usize,
@@ -44,8 +47,10 @@ impl SpaceCrossfadeGuard {
     #[must_use]
     pub const fn new(perspective: ListenerPerspective, lid: LidState) -> Self {
         Self {
+            current_body: BodyArchetype::ConcertGrand,
             current_perspective: perspective,
             current_lid: lid,
+            target_body: BodyArchetype::ConcertGrand,
             target_perspective: perspective,
             target_lid: lid,
             active_radiator_idx: 0,
@@ -61,19 +66,64 @@ impl SpaceCrossfadeGuard {
         self.recent_envelope = if env.is_nan() { 0.0 } else { env.abs() };
     }
 
+    /// Resets envelope to silence and immediately completes any in-flight crossfade.
+    pub fn on_silence_reset(&mut self) {
+        self.recent_envelope = 0.0;
+        if self.crossfading {
+            self.active_radiator_idx = 1 - self.active_radiator_idx;
+            self.current_body = self.target_body;
+            self.current_perspective = self.target_perspective;
+            self.current_lid = self.target_lid;
+            self.crossfading = false;
+            self.elapsed_samples = 0;
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn would_instant_switch(&self) -> bool {
+        self.recent_envelope <= SPACE_SILENCE_ENV_THRESHOLD
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn target_radiator_idx(&self) -> usize {
+        if self.would_instant_switch() {
+            self.active_radiator_idx
+        } else {
+            1 - self.active_radiator_idx
+        }
+    }
+
     pub fn request_space(
         &mut self,
         perspective: ListenerPerspective,
         lid: LidState,
         sample_rate: f32,
     ) -> SpaceTransitionAction {
-        if perspective == self.current_perspective && lid == self.current_lid && !self.crossfading {
+        self.request_body_space(self.current_body, perspective, lid, sample_rate)
+    }
+
+    pub fn request_body_space(
+        &mut self,
+        body: BodyArchetype,
+        perspective: ListenerPerspective,
+        lid: LidState,
+        sample_rate: f32,
+    ) -> SpaceTransitionAction {
+        if body == self.current_body
+            && perspective == self.current_perspective
+            && lid == self.current_lid
+            && !self.crossfading
+        {
             return SpaceTransitionAction::None;
         }
+        self.target_body = body;
         self.target_perspective = perspective;
         self.target_lid = lid;
 
         if self.recent_envelope <= SPACE_SILENCE_ENV_THRESHOLD {
+            self.current_body = body;
             self.current_perspective = perspective;
             self.current_lid = lid;
             self.crossfading = false;
@@ -98,6 +148,26 @@ impl SpaceCrossfadeGuard {
         }
     }
 
+    #[inline]
+    #[must_use]
+    pub const fn current_body(&self) -> BodyArchetype {
+        self.current_body
+    }
+    #[inline]
+    #[must_use]
+    pub const fn target_body(&self) -> BodyArchetype {
+        self.target_body
+    }
+    #[inline]
+    #[must_use]
+    pub const fn current_perspective(&self) -> ListenerPerspective {
+        self.current_perspective
+    }
+    #[inline]
+    #[must_use]
+    pub const fn current_lid(&self) -> LidState {
+        self.current_lid
+    }
     #[inline]
     #[must_use]
     pub const fn is_crossfading(&self) -> bool {
@@ -131,16 +201,32 @@ impl SpaceCrossfadeGuard {
         lid: LidState,
         sample_rate: f32,
     ) -> SpaceTransitionAction {
+        self.commit_body_standby(self.current_body, perspective, lid, sample_rate)
+    }
+
+    /// Commits a pre-staged standby radiator bank for `(body, perspective, lid)`.
+    pub fn commit_body_standby(
+        &mut self,
+        body: BodyArchetype,
+        perspective: ListenerPerspective,
+        lid: LidState,
+        sample_rate: f32,
+    ) -> SpaceTransitionAction {
         if self.crossfading {
             return SpaceTransitionAction::None;
         }
-        if perspective == self.current_perspective && lid == self.current_lid {
+        if body == self.current_body
+            && perspective == self.current_perspective
+            && lid == self.current_lid
+        {
             return SpaceTransitionAction::None;
         }
+        self.target_body = body;
         self.target_perspective = perspective;
         self.target_lid = lid;
         if self.recent_envelope <= SPACE_SILENCE_ENV_THRESHOLD {
             self.active_radiator_idx = 1 - self.active_radiator_idx;
+            self.current_body = body;
             self.current_perspective = perspective;
             self.current_lid = lid;
             self.elapsed_samples = 0;
@@ -171,6 +257,7 @@ impl SpaceCrossfadeGuard {
         self.elapsed_samples += frames;
         if self.elapsed_samples >= self.total_samples {
             self.active_radiator_idx = 1 - self.active_radiator_idx;
+            self.current_body = self.target_body;
             self.current_perspective = self.target_perspective;
             self.current_lid = self.target_lid;
             self.crossfading = false;

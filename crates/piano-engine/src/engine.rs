@@ -7,8 +7,7 @@ use piano_spec::{LidState, ListenerPerspective, SampleEvent, VoicingSpec};
 use crate::engine_core::{AudioTap, EngineCore};
 use crate::event_queue::{is_sorted_by_offset, EventQueue};
 use crate::param_smooth::{
-    IntoLidState, IntoListenerPerspective, SpaceCrossfadeGuard, SpaceTransitionAction,
-    VoicingSmoother, DIRTY_TUNING,
+    IntoLidState, IntoListenerPerspective, SpaceCrossfadeGuard, VoicingSmoother, DIRTY_TUNING,
 };
 use crate::telemetry::{compute_block_telemetry, EngineTelemetry};
 
@@ -16,11 +15,11 @@ use crate::telemetry::{compute_block_telemetry, EngineTelemetry};
 /// Stage 2 strings, Stage 3 bridge, and Stage 4 spatial acoustic radiator.
 #[derive(Clone, Debug)]
 pub struct PianoEngine {
-    core: EngineCore,
+    pub(crate) core: EngineCore,
     scratch_events: EventQueue,
     telemetry: EngineTelemetry,
     voicing_smoother: VoicingSmoother,
-    space_guard: SpaceCrossfadeGuard,
+    pub(crate) space_guard: SpaceCrossfadeGuard,
 }
 
 impl PianoEngine {
@@ -75,6 +74,7 @@ impl PianoEngine {
     /// Resets all 88 keys, pedals, hammers, dampers, and modal buffers without reallocating.
     pub fn reset(&mut self) {
         self.core.all_notes_off();
+        self.space_guard.on_silence_reset();
         self.telemetry = EngineTelemetry::default();
     }
 
@@ -151,29 +151,7 @@ impl PianoEngine {
         lid: impl IntoLidState,
         blob: &[f32],
     ) -> bool {
-        let Some(persp) = perspective.into_perspective() else {
-            return false;
-        };
-        let Some(lid_state) = lid.into_lid_state() else {
-            return false;
-        };
-        let action = self
-            .space_guard
-            .request_space(persp, lid_state, self.sample_rate());
-        match action {
-            SpaceTransitionAction::None => true,
-            SpaceTransitionAction::InstantSwitch {
-                target_idx,
-                perspective,
-                lid,
-            } => self.core.radiators[target_idx].install_precomputed_space(perspective, lid, blob),
-            SpaceTransitionAction::StartCrossfade {
-                fade_in_idx,
-                perspective,
-                lid,
-                ..
-            } => self.core.radiators[fade_in_idx].install_precomputed_space(perspective, lid, blob),
-        }
+        self.apply_precomputed_body_space(self.core.body_archetype, perspective, lid, blob)
     }
 
     /// Streams a chunk `[blob_off..blob_off + chunk.len())` into the standby Stage 4 radiator.
@@ -185,21 +163,14 @@ impl PianoEngine {
         chunk: &[f32],
         total_len: usize,
     ) -> bool {
-        if self.space_guard.is_crossfading() {
-            return false;
-        }
-        let Some(persp) = perspective.into_perspective() else {
-            return false;
-        };
-        let Some(lid_state) = lid.into_lid_state() else {
-            return false;
-        };
-        let standby = self.space_guard.standby_radiator_idx();
-        if blob_off == 0 {
-            self.core.radiators[standby].reset();
-        }
-        self.core.radiators[standby]
-            .install_precomputed_space_chunk(persp, lid_state, blob_off, chunk, total_len)
+        self.stage_precomputed_body_space_chunk(
+            self.core.body_archetype,
+            perspective,
+            lid,
+            blob_off,
+            chunk,
+            total_len,
+        )
     }
 
     /// Activates the pre-staged standby radiator bank via instant swap (silent) or 8 ms crossfade.
@@ -208,55 +179,12 @@ impl PianoEngine {
         perspective: impl IntoListenerPerspective,
         lid: impl IntoLidState,
     ) -> bool {
-        if self.space_guard.is_crossfading() {
-            return false;
-        }
-        let Some(persp) = perspective.into_perspective() else {
-            return false;
-        };
-        let Some(lid_state) = lid.into_lid_state() else {
-            return false;
-        };
-        let standby = self.space_guard.standby_radiator_idx();
-        let rad = &self.core.radiators[standby];
-        if rad.perspective() != persp || rad.lid_state() != lid_state {
-            return false;
-        }
-        let _ = self
-            .space_guard
-            .commit_standby(persp, lid_state, self.sample_rate());
-        true
+        self.commit_precomputed_body_space(self.core.body_archetype, perspective, lid)
     }
 
     /// Sets listener perspective and lid opening state with 8 ms raised-cosine crossfade.
     pub fn set_space(&mut self, perspective: impl IntoListenerPerspective, lid: impl IntoLidState) {
-        let Some(persp) = perspective.into_perspective() else {
-            return;
-        };
-        let Some(lid_state) = lid.into_lid_state() else {
-            return;
-        };
-        let action = self
-            .space_guard
-            .request_space(persp, lid_state, self.sample_rate());
-        match action {
-            SpaceTransitionAction::None => {}
-            SpaceTransitionAction::InstantSwitch {
-                target_idx,
-                perspective,
-                lid,
-            } => {
-                self.core.radiators[target_idx].reconfigure_space(perspective, lid);
-            }
-            SpaceTransitionAction::StartCrossfade {
-                fade_in_idx,
-                perspective,
-                lid,
-                ..
-            } => {
-                self.core.radiators[fade_in_idx].reconfigure_space(perspective, lid);
-            }
-        }
+        let _ = self.set_body_space(self.core.body_archetype, perspective, lid);
     }
 
     /// Returns reference to voicing smoother.
