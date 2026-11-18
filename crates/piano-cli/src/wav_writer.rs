@@ -353,7 +353,7 @@ mod tests {
         let ext = fs::read(&out_ext).expect("read ext");
         let q0l = unpack_i24(&ext[44..47]);
         let q1l = unpack_i24(&ext[50..53]);
-        assert!(q0l <= 8_388_607 && q0l >= 8_388_606);
+        assert!((8_388_606..=8_388_607).contains(&q0l));
         assert!((-8_388_608..=-8_388_606).contains(&q1l));
 
         let _ = fs::remove_file(&out_a);

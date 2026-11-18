@@ -15,13 +15,13 @@ use crate::wav_writer::{
     AudioMetrics,
 };
 
-struct ShowcaseDemo {
-    title: &'static str,
-    mid_filename: &'static str,
-    wav_filename: &'static str,
+pub(crate) struct ShowcaseDemo {
+    pub(crate) title: &'static str,
+    pub(crate) mid_filename: &'static str,
+    pub(crate) wav_filename: &'static str,
 }
 
-const SHOWCASE_DEMOS: [ShowcaseDemo; 6] = [
+pub(crate) const SHOWCASE_DEMOS: [ShowcaseDemo; 6] = [
     ShowcaseDemo {
         title: "Bach: Prelude in C (BWV 846)",
         mid_filename: "01-bach-prelude-bwv846.mid",

@@ -3,6 +3,7 @@
 mod bench_composite;
 mod bench_rt;
 mod check_lines;
+mod diag;
 mod render_cmd;
 mod scenarios;
 mod smf_parser;
@@ -25,6 +26,10 @@ fn main() {
         Some("check-wasm-simd") => cmd_check_wasm_simd(&args[1..]),
         Some("render-wav") => render_cmd::cmd_render_wav(&args[1..]),
         Some("render-demos") => render_cmd::cmd_render_demos(&args[1..]),
+        Some("diag-radiator") => diag::cmd_diag_radiator(&args[1..]),
+        Some("diag-bridge") => diag::cmd_diag_bridge(&args[1..]),
+        Some("diag-hammer") => diag::cmd_diag_hammer(&args[1..]),
+        Some("diag-buzz") => diag::cmd_diag_buzz(&args[1..]),
         Some("scenarios") => scenarios::run_scenarios(&args[1..]),
         _ => Err(usage()),
     };
@@ -37,8 +42,9 @@ fn main() {
 
 fn usage() -> String {
     format!(
-        "Usage:\n  piano-cli bench\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli scenarios [--json] [--markdown]\n{}",
-        render_cmd::render_usage()
+        "Usage:\n  piano-cli bench\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli scenarios [--json] [--markdown]\n{}\n{}",
+        render_cmd::render_usage(),
+        diag::diag_usage()
     )
 }
 
