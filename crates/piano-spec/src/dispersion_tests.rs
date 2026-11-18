@@ -152,3 +152,74 @@ fn bank_mode_counts_hit_concert_grand_25k_to_26k5_budget() {
         "{counts:?}"
     );
 }
+
+#[test]
+fn temperament_and_concert_pitch_shift_f0_prior_to_analytical_dispersion() {
+    use crate::Temperament;
+
+    let kirn = VoicingSpec {
+        stretch_amount: 0.0,
+        unison_detune_scale: 0.0,
+        a4_freq_hz: 415.0,
+        temperament: Temperament::KirnbergerIII,
+        ..VoicingSpec::default()
+    };
+    let specs = build_scale_design(&kirn);
+
+    // A4 remains exact concert pitch 415.0 Hz across temperaments.
+    let f0_a4 = key_tuned_f0_hz(A4_KEY_IDX, &specs, &kirn);
+    assert_eq!(f0_a4, 415.0);
+
+    // C4 (key 39) -> E4 (key 43) must form a pure 5:4 major third before dispersion.
+    let f0_c4 = key_tuned_f0_hz(39, &specs, &kirn);
+    let f0_e4 = key_tuned_f0_hz(43, &specs, &kirn);
+    assert!(
+        (f0_e4 / f0_c4 - 1.25).abs() < 1e-12,
+        "Kirnberger III C4-E4 ratio={}",
+        f0_e4 / f0_c4
+    );
+
+    // Verify analytical dispersion f_j = j * F0 * sqrt(1 + B * j^2) uses the temperament F0.
+    let f0_str = effective_string_f0_hz(39, 0, Polarization::Vertical, &specs, &kirn);
+    assert_eq!(f0_str, f0_c4);
+    for j in 1..=12 {
+        let f_j = partial_frequency_hz(f0_str, specs[39].inharmonicity_b, j);
+        let expected =
+            (j as f64) * f0_str * (1.0 + specs[39].inharmonicity_b * (j * j) as f64).sqrt();
+        assert!((f_j - expected).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn equal_440_condition_zero_is_bit_exact_and_condition_adds_deterministic_detune() {
+    use crate::Temperament;
+
+    let a = VoicingSpec::default();
+    let b = VoicingSpec::from_globals_full(0.5, 1.0, 1.0, 1.0, 440.0, Temperament::Equal, 0.0);
+    let specs_a = build_scale_design(&a);
+    let specs_b = build_scale_design(&b);
+    for k in 0..NUM_KEYS {
+        assert_eq!(
+            key_tuned_f0_hz(k, &specs_a, &a).to_bits(),
+            key_tuned_f0_hz(k, &specs_b, &b).to_bits()
+        );
+        for s in 0..usize::from(CHOIR_LAYOUTS[k].strings_per_key) {
+            for pol in [Polarization::Vertical, Polarization::Horizontal] {
+                assert_eq!(
+                    effective_string_f0_hz(k, s, pol, &specs_a, &a).to_bits(),
+                    effective_string_f0_hz(k, s, pol, &specs_b, &b).to_bits()
+                );
+            }
+        }
+    }
+
+    let aged = VoicingSpec::default().with_condition(0.8);
+    let specs_aged = build_scale_design(&aged);
+    let f0_mint = effective_string_f0_hz(48, 0, Polarization::Vertical, &specs_a, &a);
+    let f0_aged = effective_string_f0_hz(48, 0, Polarization::Vertical, &specs_aged, &aged);
+    assert_ne!(f0_mint.to_bits(), f0_aged.to_bits());
+    assert_eq!(
+        f0_aged.to_bits(),
+        effective_string_f0_hz(48, 0, Polarization::Vertical, &specs_aged, &aged).to_bits()
+    );
+}

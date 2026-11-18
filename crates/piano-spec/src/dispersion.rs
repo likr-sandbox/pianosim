@@ -226,7 +226,13 @@ pub fn unison_detune_cents(
         _ => 0.0,
     };
     let jitter = 0.14 * hash_to_signed_unit(str_seed);
-    (base_offset + jitter) * treble_taper * scale
+    let cond = f64::from(voicing.effective_condition());
+    let cond_drift = if cond == 0.0 {
+        0.0
+    } else {
+        1.8 * cond * hash_to_signed_unit(str_seed ^ 0x434f_4e44_554e_4953)
+    };
+    (base_offset + jitter + cond_drift) * treble_taper * scale
 }
 
 /// Deterministic frequency offset (in cents) arising from bridge boundary
@@ -265,7 +271,7 @@ fn shift_f0_cents(f0_et_hz: f64, cents: f64) -> f64 {
     }
 }
 
-/// Computes the nominal tuned key fundamental (ET + Railsback + D4 pitch offset),
+/// Computes the nominal tuned key fundamental (ET + temperament + Railsback + D4 pitch offset),
 /// preserving exact `440.0 Hz` at `A4` (`key_idx = 48`) with default voicing.
 #[must_use]
 pub fn key_tuned_f0_hz(
@@ -274,13 +280,19 @@ pub fn key_tuned_f0_hz(
     voicing: &VoicingSpec,
 ) -> f64 {
     let k = key_idx.min(NUM_KEYS - 1);
-    let cents = scaled_railsback_stretch_cents(k, specs, voicing)
+    let base_cents = scaled_railsback_stretch_cents(k, specs, voicing)
         + (voicing.effective_pitch_cents(k) as f64);
+    let temp_cents = voicing.temperament.cent_offset_for_key(k);
+    let cents = if temp_cents == 0.0 {
+        base_cents
+    } else {
+        temp_cents + base_cents
+    };
     shift_f0_cents(specs[k].f0_et_hz, cents)
 }
 
 /// Computes the exact effective fundamental frequency `F0` (Hz) for a single
-/// polarized transverse string after ET, Railsback stretch, D4 note offset,
+/// polarized transverse string after ET, temperament, Railsback stretch, D4 note offset,
 /// choir micro-detuning, and polarization anisotropy.
 #[must_use]
 pub fn effective_string_f0_hz(
@@ -292,10 +304,16 @@ pub fn effective_string_f0_hz(
 ) -> f64 {
     let k = key_idx.min(NUM_KEYS - 1);
     let choir = CHOIR_LAYOUTS[k];
-    let cents = scaled_railsback_stretch_cents(k, specs, voicing)
+    let base_cents = scaled_railsback_stretch_cents(k, specs, voicing)
         + (voicing.effective_pitch_cents(k) as f64)
         + unison_detune_cents(k, string_in_choir, choir.strings_per_key, voicing)
         + polarization_offset_cents(k, string_in_choir, polarization, voicing);
+    let temp_cents = voicing.temperament.cent_offset_for_key(k);
+    let cents = if temp_cents == 0.0 {
+        base_cents
+    } else {
+        temp_cents + base_cents
+    };
     shift_f0_cents(specs[k].f0_et_hz, cents)
 }
 
@@ -346,8 +364,14 @@ pub fn analyze_bank_mode_counts(voicing: &VoicingSpec) -> BankModeCounts {
     for (key_idx, spec) in specs.iter().enumerate() {
         let choir = CHOIR_LAYOUTS[key_idx];
         let n_str = choir.strings_per_key as usize;
-        let note_cents = stretch_table[key_idx] * stretch_scale
+        let base_cents = stretch_table[key_idx] * stretch_scale
             + (voicing.effective_pitch_cents(key_idx) as f64);
+        let temp_cents = voicing.temperament.cent_offset_for_key(key_idx);
+        let note_cents = if temp_cents == 0.0 {
+            base_cents
+        } else {
+            temp_cents + base_cents
+        };
 
         let l_modes = count_longitudinal_partials(key_idx, spec.f_long_hz, MAX_AUDIBLE_FREQ_HZ);
         l_raw += l_modes * n_str;

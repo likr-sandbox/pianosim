@@ -4,10 +4,12 @@
 
 extern crate alloc;
 
+pub mod condition;
 pub mod dispersion;
 pub mod events;
 pub mod preset_codec;
 pub mod scale_design;
+pub mod temperament;
 pub mod voicing;
 
 pub use dispersion::{
@@ -30,7 +32,8 @@ pub use scale_design::{
     A4_FREQ_MAX_HZ, A4_FREQ_MIN_HZ, CHOIR_LAYOUTS, DAMPED_KEYS, MIDI_A0, MIDI_C8, NUM_KEYS,
     STEEL_DENSITY_KG_M3, STEEL_YOUNGS_MODULUS_PA, TOTAL_STRINGS,
 };
-pub use voicing::{NoteVoicingOffset, VoicingSpec};
+pub use temperament::Temperament;
+pub use voicing::{condition_note_offset, NoteVoicingOffset, VoicingSpec};
 
 /// Pure-Rust `no_std` `f64` mathematical primitives for initialization-time scaling.
 #[allow(dead_code)]

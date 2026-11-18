@@ -22,10 +22,11 @@ pub const A4_KEY_IDX: usize = 48;
 pub const A4_MIDI: u8 = 69;
 /// Concert pitch reference frequency for `A4` in Hz.
 pub const A4_FREQ_HZ: f64 = 440.0;
-/// Minimum supported concert pitch reference frequency for `A4` in Hz (`~-1` semitone).
-pub const A4_FREQ_MIN_HZ: f64 = 415.0;
-/// Maximum supported concert pitch reference frequency for `A4` in Hz (`~+1` semitone).
-pub const A4_FREQ_MAX_HZ: f64 = 466.0;
+/// Minimum supported concert pitch reference frequency for `A4` in Hz (`~-2` semitones, French Baroque).
+pub const A4_FREQ_MIN_HZ: f64 = 392.0;
+/// Maximum supported concert pitch reference frequency for `A4` in Hz (`~+1` semitone, Chorton).
+/// Matches `f64::from(A4_FREQ_MAX)` so `466.2_f32` does not clip when widened to `f64`.
+pub const A4_FREQ_MAX_HZ: f64 = crate::voicing::A4_FREQ_MAX as f64;
 
 /// Number of bass monochord keys (`0..8`, 1 string per key).
 pub const MONOCHORD_KEYS: usize = 8;
@@ -135,7 +136,7 @@ pub fn equal_temperament_hz(key_idx: usize) -> f64 {
 }
 
 /// Computes the 12-tone equal temperament fundamental frequency in Hz for a configurable
-/// `A4` concert pitch reference (clamped to `[415.0, 466.0]` Hz; non-finite falls back to `440.0`).
+/// `A4` concert pitch reference (clamped to `[392.0, 466.2]` Hz; non-finite falls back to `440.0`).
 ///
 /// Returns `0.0` if `key_idx >= NUM_KEYS`.
 #[must_use]
@@ -402,7 +403,7 @@ mod tests {
         let base_voicing = VoicingSpec::default();
         let base_specs = build_scale_design(&base_voicing);
 
-        for &a4_hz in &[415.0_f32, 432.0, 435.0, 440.0, 442.0, 466.0] {
+        for &a4_hz in &[392.0_f32, 415.0, 432.0, 435.0, 440.0, 442.0, 466.2] {
             let v = VoicingSpec::from_globals_with_a4(0.5, 1.0, 1.0, 1.0, a4_hz);
             let specs = build_scale_design(&v);
             let ratio = f64::from(a4_hz) / A4_FREQ_HZ;
