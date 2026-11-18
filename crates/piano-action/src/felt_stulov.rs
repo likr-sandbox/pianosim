@@ -16,7 +16,7 @@ pub const EPS_FAST_BASE: f32 = 0.28;
 const MF_REF_SPEED_MPS: f64 = 1.826;
 const TAU_COMPACT_S: f64 = 5.0e-3;
 const MEM_ACCUM_GAIN: f32 = 10.0;
-const MEM_STIFFEN_GAIN: f32 = 2.6;
+const MEM_STIFFEN_GAIN: f32 = 2.8;
 
 /// Sample-rate-shared exponential relaxation factors for `FeltState`.
 #[derive(Copy, Clone, Debug)]

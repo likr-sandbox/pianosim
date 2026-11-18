@@ -224,7 +224,7 @@ pub(crate) fn populate_string_ports(
     let m_h = 0.0112 - 0.0077 * x;
     let tau_c = hammer_contact_time_s(k);
     let z_choir = (entry.choir_size as f64) * 2.0 * f0_v * m_str;
-    let i_mf = (1.55 * m_h * 1.8).min(1.45 * z_choir * tau_c * 1.8);
+    let i_mf = (1.55 * m_h * 1.8).min(3.3 * z_choir * tau_c * 1.8);
 
     let mut s_raw_sq = 0.0_f64;
     let mut s_eff_sq = 0.0_f64;
@@ -257,7 +257,7 @@ pub(crate) fn populate_string_ports(
                 let ph_raw = hs * strike_phi(k, j, spec.speaking_length_m);
                 s_raw_sq += ph_raw * ph_raw;
                 let ft = 2.0 * f_j * tau_c;
-                let sinc = 1.0 / (1.0 + ft * ft);
+                let sinc = 1.0 / sqrt_f64(1.0 + ft * ft);
                 let w = ph_raw * c_b * sinc;
                 s_eff_sq += w * w;
             }
@@ -265,10 +265,20 @@ pub(crate) fn populate_string_ports(
     }
 
     let r_raw_48k = (2.0 / (48_000.0 * m_str)) * s_raw_sq;
-    let c_port = 1.0 / sqrt_f64(1.0 + r_raw_48k / 0.025);
+    let c_cap_hi = if r_raw_48k > 0.33 {
+        sqrt_f64(0.33 / r_raw_48k)
+    } else {
+        1.0
+    };
+    let r_excess = (r_raw_48k - 0.17).max(0.0);
+    let c_cap_17 = 1.0 / sqrt_f64(1.0 + r_excess / 0.10);
+    let treble_t = ((x - 0.62) / 0.10).clamp(0.0, 1.0);
+    let smooth = treble_t * treble_t * (3.0 - 2.0 * treble_t);
+    let c_port = c_cap_hi + (c_cap_17 - c_cap_hi) * smooth;
+    s_eff_sq *= c_port * c_port;
 
     let mid_lift = sin_cos_f64(PI * x).0;
-    let target_rms = 0.060 * (1.0 + 0.72 * mid_lift * mid_lift) * (1.0 - 0.15 * x * x);
+    let target_rms = 0.068 * (1.0 + 0.62 * mid_lift * mid_lift) * (1.0 + 0.45 * x * x);
     let gamma_k = if s_eff_sq > 0.0 {
         target_rms * m_str / (i_mf * sqrt_f64(s_eff_sq))
     } else {
