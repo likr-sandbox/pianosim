@@ -455,3 +455,43 @@ fn custom_reduced_model_flush_subnormals_restores_quiescence() {
     assert_eq!(bridge.ssm_energy_joules(), 0.0);
     assert_eq!(bridge.duplex_energy_joules(), 0.0);
 }
+
+#[test]
+fn set_reduced_model_smooth_projects_active_zones_and_keeps_quiescence() {
+    let custom = custom_upright_like_preset();
+    let mut idle = BridgeBank::new(48_000.0);
+    idle.set_reduced_model_smooth(&custom.y_inf, &custom.reduced_poles);
+    assert!(idle.is_quiescent());
+    assert_eq!(idle.ssm_energy_joules(), 0.0);
+
+    let (mut hard, mut smooth) = (BridgeBank::new(48_000.0), BridgeBank::new(48_000.0));
+    let (mut b, mut z_prev) = ([0.0_f32; TOTAL_STRINGS], [0.0_f32; NUM_BRIDGE_ZONES]);
+    let mut a = [0.0_f32; TOTAL_STRINGS];
+    for n in 0..256 {
+        let t = (n as f64) / 48_000.0;
+        for k in [15_usize, 22, 27, 31, 60] {
+            let s = usize::from(CHOIR_LAYOUTS[k].first_string_idx);
+            a[s] = (0.18 * (TAU * (65.0 + 18.0 * (k as f64)) * t).sin()) as f32;
+        }
+        let _ = hard.step_bridge_sample(&a, &[0.0; NUM_BRIDGE_ZONES], &mut b, &mut z_prev);
+        let _ = smooth.step_bridge_sample(&a, &[0.0; NUM_BRIDGE_ZONES], &mut b, &mut z_prev);
+    }
+    hard.set_reduced_model(&custom.y_inf, &custom.reduced_poles);
+    smooth.set_reduced_model_smooth(&custom.y_inf, &custom.reduced_poles);
+    assert!(smooth.duplex_energy_joules() > 0.0);
+    assert_eq!(hard.duplex_energy_joules(), 0.0);
+
+    let (mut z_hard, mut z_smooth) = ([0.0_f32; NUM_BRIDGE_ZONES], [0.0_f32; NUM_BRIDGE_ZONES]);
+    let _ = hard.step_bridge_sample(&a, &[0.0; NUM_BRIDGE_ZONES], &mut b, &mut z_hard);
+    let _ = smooth.step_bridge_sample(&a, &[0.0; NUM_BRIDGE_ZONES], &mut b, &mut z_smooth);
+    let jump_hard: f32 = z_hard.iter().zip(&z_prev).map(|(x, y)| (x - y).abs()).sum();
+    let jump_smooth: f32 = z_smooth
+        .iter()
+        .zip(&z_prev)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
+    assert!(
+        jump_smooth < jump_hard * 0.15,
+        "expected smooth body projection jump ({jump_smooth}) << hard reset jump ({jump_hard})"
+    );
+}

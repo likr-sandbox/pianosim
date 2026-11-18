@@ -129,7 +129,7 @@ impl EngineCore {
     pub fn sync_to_body_if_changed(&mut self, archetype: BodyArchetype) {
         if self.body_archetype != archetype {
             let (y_inf, reduced_poles) = self.body_models.reduced_model(archetype);
-            self.bridge.set_reduced_model(y_inf, reduced_poles);
+            self.bridge.set_reduced_model_smooth(y_inf, reduced_poles);
             self.body_archetype = archetype;
         }
     }

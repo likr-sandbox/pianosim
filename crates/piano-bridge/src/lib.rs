@@ -178,6 +178,19 @@ impl BridgeBank {
         self.reset();
     }
 
+    /// Replaces the Stage 3 reduced soundboard admittance smoothly during active playback,
+    /// preserving continuous 8-zone restoring force, velocity, Hertz contact, and duplex shimmer.
+    pub fn set_reduced_model_smooth(
+        &mut self,
+        y_inf: &[f32; NUM_BRIDGE_ZONES],
+        reduced_poles: &[PresetReducedPole; NUM_REDUCED_MODES],
+    ) {
+        self.ssm.set_reduced_model_smooth(y_inf, reduced_poles);
+        self.ssm
+            .set_port_resistances(&self.r0, &self.zone_weights, self.duplex.port_resistances());
+        self.flush_subnormals();
+    }
+
     /// Applies the Stage 3 reduced soundboard admittance `(y_inf, reduced_poles)` from `preset`,
     /// resynchronizes `8x8` WDF junction matrices, and resets Stage 3 dynamic state cleanly.
     pub fn set_body_preset(&mut self, preset: &BodyPreset) {

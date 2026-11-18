@@ -14,7 +14,7 @@ pub use crate::bridge_presets::{
     NUM_REDUCED_MODES,
 };
 pub use crate::math::invert_8x8;
-use crate::math::{identity_8x8, matmul_8x8, sanitize_sample_rate};
+use crate::math::{identity_8x8, mat8_vec, matmul_8x8, sanitize_sample_rate};
 use crate::zone_proj::{ZoneWeight, NUM_BRIDGE_ZONES};
 
 /// Passive 10-mode reduced soundboard/bridge state-space admittance with exact
@@ -165,6 +165,80 @@ impl AdmittanceSsm {
     ) {
         self.apply_model(sanitize_y_inf(y_inf), sanitize_reduced_poles(reduced_poles));
         self.recompute_junction_matrices();
+    }
+
+    /// Replaces reduced soundboard poles while projecting active 8-zone restoring force and
+    /// velocity smoothly onto the new modal coordinates so live body switching does not pop.
+    pub fn set_reduced_model_smooth(
+        &mut self,
+        y_inf: &[f32; NUM_BRIDGE_ZONES],
+        reduced_poles: &[PresetReducedPole; NUM_REDUCED_MODES],
+    ) {
+        if self.is_quiescent() {
+            self.set_reduced_model(y_inf, reduced_poles);
+            return;
+        }
+        let mut v_cur = [0.0_f64; NUM_BRIDGE_ZONES];
+        let mut f_rest = [0.0_f64; NUM_BRIDGE_ZONES];
+        for m in 0..NUM_REDUCED_MODES {
+            let qd = if self.q_dot[m].is_finite() {
+                self.q_dot[m]
+            } else {
+                0.0
+            };
+            let kq = if self.q[m].is_finite() {
+                self.k_m[m] * self.q[m]
+            } else {
+                0.0
+            };
+            for z in 0..NUM_BRIDGE_ZONES {
+                let p = self.phi[m][z];
+                v_cur[z] += p * qd;
+                f_rest[z] += p * kq;
+            }
+        }
+        self.apply_model(sanitize_y_inf(y_inf), sanitize_reduced_poles(reduced_poles));
+        self.recompute_junction_matrices();
+
+        let mut g_k = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
+        let mut g_m = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
+        for m in 0..NUM_REDUCED_MODES {
+            let km = self.k_m[m];
+            let inv_mm = 1.0 / self.m_m[m].max(1.0e-9);
+            let pm = &self.phi[m];
+            for i in 0..NUM_BRIDGE_ZONES {
+                for j in 0..NUM_BRIDGE_ZONES {
+                    let pp = pm[i] * pm[j];
+                    g_k[i][j] += km * pp;
+                    g_m[i][j] += inv_mm * pp;
+                }
+            }
+        }
+        let (mut max_gk, mut max_gm) = (0.0_f64, 0.0_f64);
+        for z in 0..NUM_BRIDGE_ZONES {
+            max_gk = max_gk.max(g_k[z][z]);
+            max_gm = max_gm.max(g_m[z][z]);
+        }
+        let eps_k = 1.0e-4 * max_gk + 1.0;
+        let eps_m = 1.0e-4 * max_gm + 1.0e-9;
+        for z in 0..NUM_BRIDGE_ZONES {
+            g_k[z][z] += eps_k;
+            g_m[z][z] += eps_m;
+        }
+        let alpha = mat8_vec(&invert_8x8(&g_k), &f_rest);
+        let beta = mat8_vec(&invert_8x8(&g_m), &v_cur);
+        for m in 0..NUM_REDUCED_MODES {
+            let inv_mm = 1.0 / self.m_m[m].max(1.0e-9);
+            let (mut qm, mut qdm) = (0.0_f64, 0.0_f64);
+            for z in 0..NUM_BRIDGE_ZONES {
+                let p = self.phi[m][z];
+                qm += p * alpha[z];
+                qdm += p * beta[z];
+            }
+            let qd_val = qdm * inv_mm;
+            self.q[m] = if qm.is_finite() { qm } else { 0.0 };
+            self.q_dot[m] = if qd_val.is_finite() { qd_val } else { 0.0 };
+        }
     }
 
     fn recompute_junction_matrices(&mut self) {
