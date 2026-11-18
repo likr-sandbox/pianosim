@@ -6,7 +6,7 @@ import {
   unlockAudioEngine,
 } from './helpers/audio-diag';
 
-test.describe('E2E Concert Pitch (A4 = 415–466 Hz) Suite', () => {
+test.describe('E2E Concert Pitch (A4 = 392.0–466.2 Hz) Suite', () => {
   let assertNoErrors: () => void;
 
   test.beforeEach(async ({ page }) => {
@@ -54,20 +54,20 @@ test.describe('E2E Concert Pitch (A4 = 415–466 Hz) Suite', () => {
     expect(Number(await slider.inputValue())).toBeCloseTo(435.3, 1);
     await expect(headerBtn).toHaveText('A4 = 435.3 Hz');
 
-    // Below minimum clamps to 415.0 Hz on commit
+    // Below minimum clamps to 392.0 Hz on commit
     await numInput.fill('300');
     await numInput.dispatchEvent('change');
-    expect(Number(await slider.inputValue())).toBeCloseTo(415.0, 1);
-    expect(Number(await numInput.inputValue())).toBeCloseTo(415.0, 1);
-    await expect(page.getByTestId('voicing-a4-chip-415')).toHaveAttribute('aria-pressed', 'true');
-    await expect(headerBtn).toHaveText('A4 = 415.0 Hz');
+    expect(Number(await slider.inputValue())).toBeCloseTo(392.0, 1);
+    expect(Number(await numInput.inputValue())).toBeCloseTo(392.0, 1);
+    await expect(page.getByTestId('voicing-a4-chip-392')).toHaveAttribute('aria-pressed', 'true');
+    await expect(headerBtn).toHaveText('A4 = 392.0 Hz');
 
-    // Above maximum clamps to 466.0 Hz on commit
+    // Above maximum clamps to 466.2 Hz on commit
     await numInput.fill('520');
     await numInput.dispatchEvent('change');
-    expect(Number(await slider.inputValue())).toBeCloseTo(466.0, 1);
-    expect(Number(await numInput.inputValue())).toBeCloseTo(466.0, 1);
-    await expect(headerBtn).toHaveText('A4 = 466.0 Hz');
+    expect(Number(await slider.inputValue())).toBeCloseTo(466.2, 1);
+    expect(Number(await numInput.inputValue())).toBeCloseTo(466.2, 1);
+    await expect(headerBtn).toHaveText('A4 = 466.2 Hz');
   });
 
   test('Acoustic retuning shifts real Wasm AudioWorklet A4 fundamental across 415, 440, and 466 Hz', async ({
