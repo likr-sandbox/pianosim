@@ -19,6 +19,7 @@ pub const ADAA_DIFF_EPS: f32 = 1.0e-6;
 pub struct AdaaPowerLut {
     exponent: f32,
     x_max: f32,
+    dx: f32,
     inv_dx: f32,
     last_idx: usize,
     f_table: Box<[f32]>,
@@ -67,6 +68,7 @@ impl AdaaPowerLut {
         Some(Self {
             exponent,
             x_max,
+            dx: x_max / (last_idx as f32),
             inv_dx: (last_idx as f32) / x_max,
             last_idx,
             f_table: f_table.into_boxed_slice(),
@@ -111,7 +113,8 @@ impl AdaaPowerLut {
         sample_lut(&self.f_table, x, self.inv_dx, self.last_idx)
     }
 
-    /// Evaluates first antiderivative `F_1(x) = x^(p+1) / (p+1)` via linear interpolation.
+    /// Evaluates first antiderivative `F_1(x) = x^(p+1) / (p+1)` via C^1 cubic Hermite
+    /// interpolation using the tabulated values (`f1_table`) and slopes (`f_table`).
     ///
     /// Returns `0.0` for `x <= 0.0` and extends with constant slope `f(x_max)` for
     /// `x > x_max` so `dF_1/dx == f(x)` remains consistent above `x_max`.
@@ -126,7 +129,14 @@ impl AdaaPowerLut {
             let f1_end = self.f1_table[self.last_idx];
             return f1_end + f_end * (x - self.x_max);
         }
-        sample_lut(&self.f1_table, x, self.inv_dx, self.last_idx)
+        sample_hermite_f1(
+            &self.f1_table,
+            &self.f_table,
+            x,
+            self.inv_dx,
+            self.dx,
+            self.last_idx,
+        )
     }
 
     /// Evaluates first-order ADAA output across step `x_prev -> x`.
@@ -263,6 +273,51 @@ fn sample_lut_pair(
 }
 
 #[inline]
+fn sample_hermite_f1(
+    f1_table: &[f32],
+    f_table: &[f32],
+    x: f32,
+    inv_dx: f32,
+    dx: f32,
+    last_idx: usize,
+) -> f32 {
+    let pos = x * inv_dx;
+    let idx = (pos as usize).min(last_idx - 1);
+    let t = pos - (idx as f32);
+    let u = 1.0 - t;
+    let y0 = f1_table[idx];
+    let y1 = f1_table[idx + 1];
+    let m0 = f_table[idx] * dx;
+    let m1 = f_table[idx + 1] * dx;
+    (y0 + t * t * (3.0 - 2.0 * t) * (y1 - y0) + t * u * (u * m0 - t * m1)).max(0.0)
+}
+
+#[inline]
+fn sample_hermite_f1_pair(lo: &AdaaPowerLut, hi: &AdaaPowerLut, x: f32) -> (f32, f32) {
+    let pos = x * lo.inv_dx;
+    let idx = (pos as usize).min(lo.last_idx - 1);
+    let t = pos - (idx as f32);
+    let u = 1.0 - t;
+    let dx = lo.dx;
+    let h01 = t * t * (3.0 - 2.0 * t);
+    let tu = t * u;
+
+    let lo_y0 = lo.f1_table[idx];
+    let lo_y1 = lo.f1_table[idx + 1];
+    let lo_m0 = lo.f_table[idx] * dx;
+    let lo_m1 = lo.f_table[idx + 1] * dx;
+    let val_lo = (lo_y0 + h01 * (lo_y1 - lo_y0) + tu * (u * lo_m0 - t * lo_m1)).max(0.0);
+
+    let hi_y0 = hi.f1_table[idx];
+    let hi_y1 = hi.f1_table[idx + 1];
+    let hi_m0 = hi.f_table[idx] * dx;
+    let hi_m1 = hi.f_table[idx + 1] * dx;
+    let val_hi = (hi_y0 + h01 * (hi_y1 - hi_y0) + tu * (u * hi_m0 - t * hi_m1)).max(0.0);
+
+    (val_lo, val_hi)
+}
+
+#[inline]
 fn eval_f1_pair(lo: &AdaaPowerLut, hi: &AdaaPowerLut, x: f32) -> (f32, f32) {
     if x <= 0.0 || x.is_nan() {
         return (0.0, 0.0);
@@ -274,7 +329,7 @@ fn eval_f1_pair(lo: &AdaaPowerLut, hi: &AdaaPowerLut, x: f32) -> (f32, f32) {
             let f1_hi = hi.f1_table[hi.last_idx] + hi.f_table[hi.last_idx] * dx_over;
             return (f1_lo, f1_hi);
         }
-        sample_lut_pair(&lo.f1_table, &hi.f1_table, x, lo.inv_dx, lo.last_idx)
+        sample_hermite_f1_pair(lo, hi, x)
     } else {
         (lo.eval_f1(x), hi.eval_f1(x))
     }
