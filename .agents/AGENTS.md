@@ -6,7 +6,7 @@
 - システム設計・4ステージ物理モデル・FTO規約: `docs/ARCHITECTURE.md`
 - 段階的マイルストーン（M1〜M8）・10クレート分割マップ: `docs/ROADMAP.md`
 - 非採用要件（D1〜D8）と設計誤り時のフォールバック: `docs/DECISIONS_AND_FALLBACKS.md`
-- マルチエージェント運用・Tier 別排他検証・スイープ/Git規約: `docs/SWARM_WORKFLOW.md`
+- マルチエージェント運用・Tier 別排他検証・スイープ/Git規約: `.agents/SWARM_WORKFLOW.md`
 
 ## 2. 絶対遵守の実装・設計不変条件
 1. **1ファイル500行上限**: すべてのソースコード（`.rs`, `.ts`, `.js`, `.css`）および設計文書は **500行以下**（目標120〜350行）とする（CI の `piano-cli check-lines` で強制）。
@@ -19,11 +19,12 @@
    - ダンパーは幾何学的クリアランス入力の片側ヒステリシス接触要素（粘性係数テーブル動的書換禁止）。
    - 打弦弦・開放弦の単一縮約ブリッジ双方向連成（並列エフェクト化・倍音関係 `if-then` ダンプ判定禁止）。
    - 8ゾーン物理位置射影（グループ集約＋後段微小遅延禁止）および棚板衝撃の第9構造体ゾーン直接入力（2系統個別減衰制御禁止）。
+6. **ドキュメント同期とエージェント情報の分離**: アーキテクチャレベルの更新（クレート／モジュール構成、4ステージ物理モデル、Wasm/Worker実行境界、公開CLI/Web仕様、D1〜D8設計判断の変更）を行う際は、必ず `docs/`（`ARCHITECTURE.md`, `ROADMAP.md`, `DECISIONS_AND_FALLBACKS.md`）を最新実装に合わせて同時更新する。エージェント用の運用規約・ワークフロー・実践知は `docs/` や `README.md` には一切含めず、`.agents/` 内（`AGENTS.md`, `SWARM_WORKFLOW.md`, `rules/`, `skills/`）のみに含める。
 
 ## 3. Swarm・Worktree・Tier 別検証・Git 運用ルール
 - **着手前 `git fetch` 必須**: 各探索・Wave 開始時は `git fetch origin && git rev-list --left-right --count HEAD...origin/main` で先行コミットを確認する。
 - **所有権・ブランチ**: `author` は `workspace:"share"` で起動し、`git checkout -B m<N>/<worker>-<topic> main` で作業する（同ウェーブで同クレート／同ファイル非共有）。未コミット残存・`main` 未統合状態での `kill` は厳禁。
-- **Tier 0〜3 差分別ゲート & Step A/B 排他検証**: 5人同時 `inherit` による Cargo ロック・CPU 競合を避け、Step A（`Reviewer`＋差分/FTO専任 `Auditor`）と Step B（無競合時 `Challenger` 単独ベンチ）に分離する。`docs/**`（Tier 0）や `apps/web/e2e/**`（Tier 1）では Rust 全テスト・`bench` を再実行せず、同一ソースツリーの再検証も省略する。詳細は `docs/SWARM_WORKFLOW.md` 参照。
+- **Tier 0〜3 差分別ゲート & Step A/B 排他検証**: 5人同時 `inherit` による Cargo ロック・CPU 競合を避け、Step A（`Reviewer`＋差分/FTO専任 `Auditor`）と Step B（無競合時 `Challenger` 単独ベンチ）に分離する。`docs/**`（Tier 0）や `apps/web/e2e/**`（Tier 1）では Rust 全テスト・`bench` を再実行せず、同一ソースツリーの再検証も省略する。詳細は `.agents/SWARM_WORKFLOW.md` 参照。
 - **スイープ & タイムアウト**: 3回以上の定数調整は手動編集ループを禁じ1回のプログラムでレンジ掃引する。ワンオフ Node/ブラウザ検証は `timeout -k 5s 180s` ＋ `finally` クリーンアップを必須とする。
 - **マイルストーン単位 `push`・Single-Writer**: 途中 `push` 禁止。`.agents/AGENTS.md` 更新は `integrator` のみが行い、タグ打刻＋`push` 後は GitHub Actions `CI` 成功と Pages HTTP 200 の両方を必須確認する（イベント駆動報告・20 KiB 以内）。
 
@@ -45,6 +46,7 @@
 - **Wave 1 (`I-1..I-5`) & M1〜M8 基盤**: `BlobStreamer` 共有 `staging` 直列化＋`checked_add` ガード、`u7ToU16`/`cc7ToU16`＋`gamma=2.15`＋`Touch Curve`、`EventQueue` carryover＋`MidiPlayer` 60ms先読み、`WebMidiManager`＋連続 CC67＋Una Corda一本化、共有24点 $p$-グリッド `PGridLuts` (`384 KB`)。Stage 1〜4 基盤（`no_std` 5クレート、Exact ZOH `<=0.00257 cents`、460 V/H 片側ダンパー、Drift-regulated SAV + `8×` 局所アクション、8ゾーン+NUPOLS 0遅延 `<= -130.28 dB`、Prep Worker 8ms二重バッファ）。
 
 ## 6. 直近マイルストーン履歴
-- **Workflow Opt (2026-11-18)**: `[profile.dev] opt-level = 2, debug = 1`・`rust-cache@v2`・`deploy.yml` CI 連動・E2E `waitForTimeout` 105箇所全廃 & `check_lines.rs` 静的禁止・`waitForPrepIdle` 導入・`functional`/`perf-stability` 2レーン化（`cargo test` `12.7分 → ~23〜31s`, E2E `71/71` `4.0分 → ~2.3〜2.7m`）、`SWARM_WORKFLOW.md` Tier 0〜3・Step A/B・`git fetch`・スイープ/`timeout` 規約化。
+- **Docs Sync & `.agents/` Isolation (2026-11-19)**: `docs/ARCHITECTURE.md`・`ROADMAP.md`・`DECISIONS_AND_FALLBACKS.md`・`README.md` を M1〜M8 ＋ Wave 1〜4 ＋ Workflow Opt の最新実装へ同期し、`SWARM_WORKFLOW.md` を `.agents/` へ移動・隔離した（アーキ更新時の `docs/` 同時更新とエージェント情報の `.agents/` 限定を規約化）。
+- **Workflow Opt (2026-11-18)**: `[profile.dev] opt-level = 2, debug = 1`・`rust-cache@v2`・`deploy.yml` CI 連動・E2E `waitForTimeout` 105箇所全廃 & `check_lines.rs` 静的禁止・`waitForPrepIdle` 導入・`functional`/`perf-stability` 2レーン化（`cargo test` `12.7分 → ~23〜31s`, E2E `71/71` `4.0分 → ~2.3〜2.7m`）、`.agents/SWARM_WORKFLOW.md` Tier 0〜3・Step A/B・`git fetch`・スイープ/`timeout` 規約化。
 - **Wave 1〜4 + CI Parity Fix (`wave1..wave4`, `6c76de8`, 2026-11-18)**: 全18品質施策およびクロス CPU `.pbdy` パリティ修正を完了・公開（`272/272` Rust, `71/71` E2E, `27,807` `0xfd`, `19/19` scenarios, Pages `HTTP/2 200`）。
 - **M1〜M8 + Demo/Presets (2026-11-14..17)**: `v0.1.0-ts-dwg` アーカイブ後、10クレート純Rustエンジン・4ステージ物理モデル・Webデモ6曲/プリセットを構築。

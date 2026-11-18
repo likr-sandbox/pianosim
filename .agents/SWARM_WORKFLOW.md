@@ -2,7 +2,7 @@
 
 本ドキュメントは、本プロジェクトを `swarm`／エージェントチームで実装する際の役割分担、`workspace:"share"` worktree 運用、Tier 別検証ゲート、および `.agents/AGENTS.md` 継続学習プロトコルを定める。
 
-関連仕様: [ARCHITECTURE.md](file:///home/likr/pianosim/docs/ARCHITECTURE.md) / [ROADMAP.md](file:///home/likr/pianosim/docs/ROADMAP.md) / [DECISIONS_AND_FALLBACKS.md](file:///home/likr/pianosim/docs/DECISIONS_AND_FALLBACKS.md) / [AGENTS.md](file:///home/likr/pianosim/.agents/AGENTS.md)
+関連仕様: [ARCHITECTURE.md](../docs/ARCHITECTURE.md) / [ROADMAP.md](../docs/ROADMAP.md) / [DECISIONS_AND_FALLBACKS.md](../docs/DECISIONS_AND_FALLBACKS.md) / [AGENTS.md](AGENTS.md)
 
 ---
 
@@ -14,10 +14,10 @@
 |---|---|---|---|
 | **`coordinator`** | （調整役） | タスク分割、`swarm{action:"add"}` 配置、ボード指示、マイルストーン完了判定、イベント駆動報告 | 自らのコード編集・長時間のビルド/テスト実行・Git操作 |
 | **`author` 群**<br>（`simd`, `spec`, `strings`, `action`, `bridge`, `body-gen`, `radiator`, `web-ui` 等） | **`share`**<br>（独立 Git worktree） | 割り当てクレート／ファイルの設計・実装・対象テスト・自己ビルド、論理単位コミット、`Learnings:` 報告 | 他 `author` 所有ファイルの編集、500行超ファイル、`.agents/AGENTS.md` 直接編集、`git push` |
-| **`reviewer`** | **`inherit`**<br>（Step A 検証主体） | 該当 Tier の静的検査（`fmt`/`clippy`/`check-lines`）・Rust テスト・ビルド・Playwright E2E 実行および設計/アーキレビュー | ソース直接編集、無関係 Tier の過剰実行 |
-| **`auditor`** | **`inherit`**<br>（Step A 並行監査） | 差分・FTO 7原則・クリーンルーム・定数整合性・ワークアラウンド排除の独立監査（**Cargo/E2E を重複実行しない**） | ソース直接編集、`reviewer` と同一テストの重複実行 |
+| **`reviewer`** | **`inherit`**<br>（Step A 検証主体） | 該当 Tier の静的検査（`fmt`/`clippy`/`check-lines`）・Rust テスト・ビルド・Playwright E2E 実行、設計/アーキレビュー、アーキ変更時の `docs/` 更新整合確認 | ソース直接編集、無関係 Tier の過剰実行 |
+| **`auditor`** | **`inherit`**<br>（Step A 並行監査） | 差分・FTO 7原則・クリーンルーム・定数整合性・ワークアラウンド排除・`docs/` 同期および `.agents/` 隔離の独立監査（**Cargo/E2E を重複実行しない**） | ソース直接編集、`reviewer` と同一テストの重複実行 |
 | **`challenger`** | **`inherit`**<br>（Step B 単独計測） | Step A 合格後の**無競合アイドル CPU** 上で `scenarios` → `bench` → `bench:web` を単独実行（Tier 2/3 のみ） | Step A 中や他 Rust ビルドとの同時実行 |
-| **`integrator`** | **`inherit`**<br>（`main` 管理主体） | 検証済みブランチの `main` 統合（リベース/FF）、`.agents/AGENTS.md` 更新、タグ＋`git push`、**`CI` & Pages 両確認** | 検証承認前の強行統合、マイルストーン途中 `git push` |
+| **`integrator`** | **`inherit`**<br>（`main` 管理主体） | 検証済みブランチの `main` 統合（リベース/FF）、アーキ変更時の `docs/` 最終同期確認、`.agents/AGENTS.md` 更新、タグ＋`git push`、**`CI` & Pages 両確認** | 検証承認前の強行統合、マイルストーン途中 `git push` |
 | **`monitor`** | `inherit` | `swarm_monitor` スキルに基づく停滞検知とデッドロック解除通知 | 停滞時以外の不要な発言 |
 
 ### 1.1 クォータ枯渇・モデル切替時のルール
@@ -77,15 +77,19 @@
 
 ### 3.3 マイルストーン境界のみでの `git push` と CI ＋ Pages 両確認
 1. マイルストーン途中の `git push` は禁止。全検収通過後に `integrator` が `.agents/AGENTS.md` を更新コミットし、タグ打刻と `git push origin main --tags` を1回実行する（例：`git tag -a m<N> -m "Milestone <N> verified"`）。
-2. `git push` 後は [deploy.yml](file:///home/likr/pianosim/.github/workflows/deploy.yml) が [ci.yml](file:///home/likr/pianosim/.github/workflows/ci.yml) 成功を待って公開するため、**GitHub Actions `CI` の `success`** と **`https://likr-sandbox.github.io/pianosim/` の HTTP 200（および実ブラウザ無エラー）** の両方を完了条件とする。
+2. `git push` 後は [deploy.yml](../.github/workflows/deploy.yml) が [ci.yml](../.github/workflows/ci.yml) 成功を待って公開するため、**GitHub Actions `CI` の `success`** と **`https://likr-sandbox.github.io/pianosim/` の HTTP 200（および実ブラウザ無エラー）** の両方を完了条件とする。
 
 ---
 
-## 4. `.agents/AGENTS.md` 継続的学習プロトコル
+## 4. `.agents/AGENTS.md` 継続的学習・`docs/` 同期プロトコル
 
 1. **Single-Writer 原則**: `author` は `.agents/AGENTS.md` を直接編集せず `Learnings:` 欄で報告し、`integrator` のみが `main` 上で統合・剪定する。
 2. **上限厳守と剪定**: 常に **500行以下かつ 24,000バイト未満** を維持し、古い記述は書き換えて重複を削除する。
 3. **自動継承**: `.agents/rules/project-kb.md` により全エージェント・worktree へ自動注入される。
+
+### 4.1 `docs/` 同期義務とエージェント情報の隔離原則
+1. **アーキテクチャ変更時の `docs/` 同時更新義務**: クレート・モジュール構成、4ステージ物理モデル、Wasm/Worker/IPC 実行境界、公開 CLI/Web 機能、または D1〜D8 設計判断に関わるアーキテクチャレベルの更新を行う際は、同一変更／マイルストーン内で `docs/ARCHITECTURE.md`・`docs/ROADMAP.md`・`docs/DECISIONS_AND_FALLBACKS.md`（および必要に応じ `README.md`）を最新実装に合わせて必ず更新する（`reviewer` / `auditor` は実装と `docs/` の整合を必須確認する）。
+2. **エージェント用情報の `.agents/` 限定原則**: Swarm・マルチエージェント編成、worktree 運用、Tier 別検証手順、エージェント向け規約・蓄積知見などのエージェント用情報は `docs/` や `README.md` には一切含めず、必ず `.agents/` 配下（`AGENTS.md`, `SWARM_WORKFLOW.md`, `rules/`, `skills/`）のみに配置する。
 
 ---
 

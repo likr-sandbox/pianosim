@@ -52,7 +52,7 @@ Identify:
 ## 2. Audit Build, Test & Duplicate Verification Cost
 - **Rust Profiles**: Verify `[profile.dev]` and `[profile.test]` in `Cargo.toml` remain aligned (`opt-level = 2, debug = 1`) so `piano-cli` and `cargo test --workspace` share a single incremental graph.
 - **CI Caching & Gating**: Check `.github/workflows/{ci,deploy}.yml` for `Swatinem/rust-cache@v2`, PR `concurrency`, and `deploy.yml` `workflow_run` gating on `CI` success.
-- **Tiered Verification (`docs/SWARM_WORKFLOW.md`)**: Count redundant full-gate executions over identical git trees or Tier 0 (`docs/**`, `.agents/**`) / Tier 1 (`apps/web/e2e/**`) diffs.
+- **Tiered Verification (`.agents/SWARM_WORKFLOW.md`)**: Count redundant full-gate executions over identical git trees or Tier 0 (`docs/**`, `.agents/**`) / Tier 1 (`apps/web/e2e/**`) diffs.
 
 ## 3. Audit E2E Synchronization & Execution Lanes
 - Run `export PATH="$HOME/.cargo/bin:$PATH" && cargo run -p piano-cli -- check-lines` to verify zero `waitForTimeout` calls in `apps/web/e2e/` and `<= 500` line limits.

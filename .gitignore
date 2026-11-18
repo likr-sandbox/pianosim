@@ -37,6 +37,7 @@ Thumbs.db
 # Track project knowledge base while ignoring ephemeral agent artifacts
 .agents/*
 !.agents/AGENTS.md
+!.agents/SWARM_WORKFLOW.md
 !.agents/rules/
 !.agents/rules/**
 !.agents/skills/
