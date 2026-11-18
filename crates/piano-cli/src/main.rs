@@ -18,7 +18,26 @@ use piano_spec::{u7_to_u16, EventKind, PedalKind, SampleEvent, VoicingSpec};
 
 use check_lines::{check_repo, find_repo_root};
 use wasm_check::inspect_wasm_simd;
-use wav_writer::{analyze_stereo, write_stereo_pcm16_wav};
+use wav_writer::{
+    analyze_stereo, write_stereo_f32_wav, write_stereo_pcm16_wav, write_stereo_pcm24_tpdf_wav,
+};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum WavFormat {
+    Pcm16,
+    Pcm24,
+    F32,
+}
+
+impl WavFormat {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Pcm16 => "pcm16",
+            Self::Pcm24 => "pcm24",
+            Self::F32 => "f32",
+        }
+    }
+}
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -39,7 +58,7 @@ fn main() {
 
 fn usage() -> String {
     String::from(
-        "Usage:\n  piano-cli bench\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli render-wav <out.wav> [--a4 <415..466>]\n  piano-cli scenarios [--json] [--markdown]",
+        "Usage:\n  piano-cli bench\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli render-wav <out.wav> [--a4 <392..466.2>] [--format <pcm16|pcm24|f32>]\n  piano-cli scenarios [--json] [--markdown]",
     )
 }
 
@@ -95,7 +114,9 @@ fn cmd_check_wasm_simd(args: &[String]) -> Result<(), String> {
 
 fn parse_a4_hz(raw: &str) -> Result<f32, String> {
     let val: f32 = raw.parse().map_err(|_| {
-        format!("invalid --a4 frequency '{raw}' (expected number in 415.0..=466.0)")
+        format!(
+            "invalid --a4 frequency '{raw}' (expected number in {A4_FREQ_MIN:.1}..={A4_FREQ_MAX:.1})"
+        )
     })?;
     if !val.is_finite() || !(A4_FREQ_MIN..=A4_FREQ_MAX).contains(&val) {
         return Err(format!(
@@ -105,9 +126,21 @@ fn parse_a4_hz(raw: &str) -> Result<f32, String> {
     Ok(val)
 }
 
-fn parse_render_wav_args(args: &[String]) -> Result<(PathBuf, f32), String> {
+fn parse_wav_format(raw: &str) -> Result<WavFormat, String> {
+    match raw {
+        "pcm16" => Ok(WavFormat::Pcm16),
+        "pcm24" => Ok(WavFormat::Pcm24),
+        "f32" => Ok(WavFormat::F32),
+        _ => Err(format!(
+            "invalid --format '{raw}' (expected pcm16, pcm24, or f32)"
+        )),
+    }
+}
+
+fn parse_render_wav_args(args: &[String]) -> Result<(PathBuf, f32, WavFormat), String> {
     let mut out_path: Option<PathBuf> = None;
     let mut a4_hz = A4_FREQ_DEFAULT;
+    let mut format = WavFormat::Pcm16;
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -117,6 +150,13 @@ fn parse_render_wav_args(args: &[String]) -> Result<(PathBuf, f32), String> {
             i += 2;
         } else if let Some(rest) = arg.strip_prefix("--a4=") {
             a4_hz = parse_a4_hz(rest)?;
+            i += 1;
+        } else if arg == "--format" {
+            let next = args.get(i + 1).ok_or_else(usage)?;
+            format = parse_wav_format(next)?;
+            i += 2;
+        } else if let Some(rest) = arg.strip_prefix("--format=") {
+            format = parse_wav_format(rest)?;
             i += 1;
         } else if arg.starts_with('-') {
             return Err(usage());
@@ -128,11 +168,11 @@ fn parse_render_wav_args(args: &[String]) -> Result<(PathBuf, f32), String> {
         }
     }
     let path = out_path.ok_or_else(usage)?;
-    Ok((path, a4_hz))
+    Ok((path, a4_hz, format))
 }
 
 fn cmd_render_wav(args: &[String]) -> Result<(), String> {
-    let (out_path, a4_hz) = parse_render_wav_args(args)?;
+    let (out_path, a4_hz, format) = parse_render_wav_args(args)?;
     let out_path = Path::new(&out_path);
     let sample_rate = 48_000_u32;
     let total_frames = 96_000_usize; // 2.0s @ 48 kHz
@@ -187,10 +227,15 @@ fn cmd_render_wav(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    write_stereo_pcm16_wav(out_path, sample_rate, &out_l, &out_r)?;
+    match format {
+        WavFormat::Pcm16 => write_stereo_pcm16_wav(out_path, sample_rate, &out_l, &out_r)?,
+        WavFormat::Pcm24 => write_stereo_pcm24_tpdf_wav(out_path, sample_rate, &out_l, &out_r)?,
+        WavFormat::F32 => write_stereo_f32_wav(out_path, sample_rate, &out_l, &out_r)?,
+    }
     println!(
-        "render-wav OK: {} ({} frames @ {} Hz, A4={:.1} Hz, peak_l={:.4}, peak_r={:.4}, rms={:.4}, non_finite=0)",
+        "render-wav OK: {} [{}] ({} frames @ {} Hz, A4={:.1} Hz, peak_l={:.4}, peak_r={:.4}, rms={:.4}, non_finite=0)",
         out_path.display(),
+        format.label(),
         metrics.frames,
         sample_rate,
         a4_hz,
@@ -295,29 +340,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_render_wav_args_supports_default_and_custom_a4() {
+    fn parse_render_wav_args_supports_default_custom_a4_and_formats() {
         let args = vec![String::from("out.wav")];
-        let (path, a4) = parse_render_wav_args(&args).expect("default a4");
+        let (path, a4, fmt) = parse_render_wav_args(&args).expect("default a4 and format");
         assert_eq!(path, PathBuf::from("out.wav"));
         assert_eq!(a4, 440.0);
+        assert_eq!(fmt, WavFormat::Pcm16);
 
         let args_space = vec![
             String::from("out.wav"),
             String::from("--a4"),
             String::from("442.0"),
+            String::from("--format"),
+            String::from("pcm24"),
         ];
-        assert_eq!(parse_render_wav_args(&args_space).unwrap().1, 442.0);
+        let parsed = parse_render_wav_args(&args_space).expect("space flags");
+        assert_eq!(parsed.1, 442.0);
+        assert_eq!(parsed.2, WavFormat::Pcm24);
 
-        let args_eq = vec![String::from("--a4=415.0"), String::from("baroque.wav")];
-        let (path_eq, a4_eq) = parse_render_wav_args(&args_eq).expect("baroque a4");
+        let args_eq = vec![
+            String::from("--a4=392.0"),
+            String::from("--format=f32"),
+            String::from("baroque.wav"),
+        ];
+        let (path_eq, a4_eq, fmt_eq) = parse_render_wav_args(&args_eq).expect("baroque f32");
         assert_eq!(path_eq, PathBuf::from("baroque.wav"));
-        assert_eq!(a4_eq, 415.0);
+        assert_eq!(a4_eq, 392.0);
+        assert_eq!(fmt_eq, WavFormat::F32);
+
+        let args_chorton = vec![String::from("--a4=466.2"), String::from("chorton.wav")];
+        assert_eq!(parse_render_wav_args(&args_chorton).unwrap().1, 466.2);
 
         assert!(
-            parse_render_wav_args(&[String::from("out.wav"), String::from("--a4=399.0")]).is_err()
+            parse_render_wav_args(&[String::from("out.wav"), String::from("--a4=380.0")]).is_err()
         );
         assert!(
             parse_render_wav_args(&[String::from("out.wav"), String::from("--a4=480.0")]).is_err()
+        );
+        assert!(
+            parse_render_wav_args(&[String::from("out.wav"), String::from("--format=pcm32")])
+                .is_err()
         );
     }
 }
