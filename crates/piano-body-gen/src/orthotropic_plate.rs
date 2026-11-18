@@ -5,11 +5,15 @@ use crate::linalg::solve_generalized_symmetric_eigen;
 use crate::plate_assembly::{assemble_ritz_matrices, build_1d_sine_table};
 pub use crate::plate_assembly::{QUAD_NX, QUAD_NY, RITZ_N, RITZ_NX, RITZ_NY};
 use crate::presets::{body_plate_t60_s, body_spec, BodyArchetype, BodySpec};
-use crate::ribs_rim::rim_signed_distance_for;
+use crate::ribs_rim::{bridge_zone_tangents_normals, rim_signed_distance_for};
 use crate::types::{det_unit_f64, t60_to_zeta, ModeSource, SolvedBodyMode, MAX_BODY_MODE_HZ};
 use piano_bridge::NUM_BRIDGE_ZONES;
 use piano_spec::{PRESET_RADIATOR_ZONES, PRESET_RAD_COEFFS};
 use std::f64::consts::PI;
+
+const ROCKING_ALPHA: f64 = 0.35;
+const GL_SQRT_3_5: f64 = 0.774_596_669_241_483_4;
+const GL_WEIGHTS: [f64; 3] = [5.0 / 18.0, 8.0 / 18.0, 5.0 / 18.0];
 
 /// Longitudinal Sitka spruce Young's modulus along grain for Concert Grand [Pa].
 pub const SPRUCE_E_L_PA: f64 = 11.5e9;
@@ -37,7 +41,7 @@ pub struct PlateSolveStats {
 pub fn solve_soundboard_modes_for(spec: &BodySpec) -> (Vec<SolvedBodyMode>, PlateSolveStats) {
     let bx = build_1d_sine_table(RITZ_NX, QUAD_NX, spec.domain_lx_m);
     let by = build_1d_sine_table(RITZ_NY, QUAD_NY, spec.domain_ly_m);
-    let (k_mat, m_mat, m_int_mat) = assemble_ritz_matrices(spec, &bx, &by);
+    let (k_mat, m_mat, m_int_mat, integrals) = assemble_ritz_matrices(spec, &bx, &by);
 
     let (eigvals, eigvecs) =
         solve_generalized_symmetric_eigen(RITZ_N, &k_mat, &m_mat).expect("SPD mass matrix");
@@ -50,18 +54,43 @@ pub fn solve_soundboard_modes_for(spec: &BodySpec) -> (Vec<SolvedBodyMode>, Plat
     }
 
     let norm_xy = (2.0 / spec.domain_lx_m).sqrt() * (2.0 / spec.domain_ly_m).sqrt();
+    let tangents = bridge_zone_tangents_normals(&spec.zone_pos_m);
     let mut zone_basis = [[0.0_f64; RITZ_N]; NUM_BRIDGE_ZONES];
     for (z, zb) in zone_basis.iter_mut().enumerate().take(NUM_BRIDGE_ZONES) {
-        let zx = (spec.zone_pos_m[z][0] as f64) - spec.x_min_m;
-        let zy = spec.zone_pos_m[z][1] as f64;
+        let (t, n, half_seg) = tangents[z];
+        let h_br = (spec.zone_pos_m[z][2] as f64).max(0.02);
+        let xc = spec.zone_pos_m[z][0] as f64;
+        let yc = spec.zone_pos_m[z][1] as f64;
+        let zx_c = (xc - spec.x_min_m).clamp(0.01, spec.domain_lx_m - 0.01);
+        let zy_c = yc.clamp(0.01, spec.domain_ly_m - 0.01);
+
+        let offs = [-GL_SQRT_3_5 * half_seg, 0.0, GL_SQRT_3_5 * half_seg];
+        for (q, &s_off) in offs.iter().enumerate() {
+            let zx = ((xc + s_off * t[0]) - spec.x_min_m).clamp(0.01, spec.domain_lx_m - 0.01);
+            let zy = (yc + s_off * t[1]).clamp(0.01, spec.domain_ly_m - 0.01);
+            let w_q = GL_WEIGHTS[q] * norm_xy;
+            for ix in 0..RITZ_NX {
+                let sx = (bx.k[ix] * zx).sin();
+                for iy in 0..RITZ_NY {
+                    let sy = (by.k[iy] * zy).sin();
+                    zb[ix * RITZ_NY + iy] += w_q * sx * sy;
+                }
+            }
+        }
         for ix in 0..RITZ_NX {
-            let sx = ((ix + 1) as f64 * PI * zx / spec.domain_lx_m).sin();
+            let kx = bx.k[ix];
+            let (sx_c, cx_c) = (kx * zx_c).sin_cos();
             for iy in 0..RITZ_NY {
-                let sy = ((iy + 1) as f64 * PI * zy / spec.domain_ly_m).sin();
-                zb[ix * RITZ_NY + iy] = norm_xy * sx * sy;
+                let ky = by.k[iy];
+                let (sy_c, cy_c) = (ky * zy_c).sin_cos();
+                let dpsi_dn = norm_xy * (n[0] * kx * cx_c * sy_c + n[1] * ky * sx_c * cy_c);
+                zb[ix * RITZ_NY + iy] += ROCKING_ALPHA * h_br * dpsi_dn;
             }
         }
     }
+
+    let area_in = integrals.inside_area_m2.max(1.0e-6);
+    let mean_rho_a = (integrals.inside_mass_kg / area_in).max(1.0);
 
     let h_avg = spec.thickness_min_m + 0.533 * spec.thickness_span_m;
     let d_avg_approx = h_avg.powi(3) / 12.0 * (spec.spruce_e_l_pa * spec.spruce_e_r_pa).sqrt();
@@ -129,6 +158,19 @@ pub fn solve_soundboard_modes_for(spec: &BodySpec) -> (Vec<SolvedBodyMode>, Plat
                 0.0018 * (det_unit_f64(0x5100 + r as u64) - 0.5) * (360.0 - freq_hz) / 360.0;
         }
 
+        let int_w2_in = (ke_int / ke_tot) / mean_rho_a;
+        let denom_vol = (area_in * int_w2_in).sqrt().max(1.0e-12);
+        let (mut vr, mut mxr, mut myr) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for (p, &cv) in col_vec.iter().enumerate() {
+            let cp = mass_scale * cv;
+            vr += cp * integrals.int_w[p];
+            mxr += cp * integrals.int_xw[p];
+            myr += cp * integrals.int_yw[p];
+        }
+        let plate_vol_norm = (vr / denom_vol).clamp(-1.0, 1.0);
+        let plate_dx_norm = (mxr / (0.55 * denom_vol)).clamp(-1.0, 1.0);
+        let plate_dy_norm = (myr / (0.65 * denom_vol)).clamp(-1.0, 1.0);
+
         min_ritz_hz = min_ritz_hz.min(freq_hz);
         max_ritz_hz = max_ritz_hz.max(freq_hz);
 
@@ -140,6 +182,10 @@ pub fn solve_soundboard_modes_for(spec: &BodySpec) -> (Vec<SolvedBodyMode>, Plat
             rad_coeffs: [0.0; PRESET_RAD_COEFFS],
             cavity_flag: 0,
             source: ModeSource::PlateRitz,
+            plate_vol_norm,
+            plate_dx_norm,
+            plate_dy_norm,
+            has_plate_moments: true,
         });
     }
 
@@ -171,6 +217,7 @@ fn extend_statistical_rayleigh_modes(
     let h_avg = spec.thickness_min_m + 0.533 * spec.thickness_span_m;
     let d_eff = (spec.spruce_e_l_pa * spec.spruce_e_r_pa).sqrt() * h_avg.powi(3) / 12.0;
     let m_avg = spec.spruce_rho * 0.01;
+    let tangents = bridge_zone_tangents_normals(&spec.zone_pos_m);
 
     for idx in 0..count {
         let u = (idx as f64 + 0.5) / (count as f64);
@@ -189,7 +236,7 @@ fn extend_statistical_rayleigh_modes(
         let phi_x = det_unit_f64(0x6300 + idx as u64) * 2.0 * PI;
         let phi_y = det_unit_f64(0x6400 + idx as u64) * 2.0 * PI;
 
-        let hf_taper = (2_200.0 / (freq_hz + 900.0)).powf(0.18);
+        let hf_taper = (2_200.0 / (freq_hz + 900.0)).powf(0.38);
         let modal_gain = spec.stat_gain * hf_taper;
 
         let mut zone_drive = [0.0_f64; PRESET_RADIATOR_ZONES];
@@ -204,8 +251,20 @@ fn extend_statistical_rayleigh_modes(
             } else {
                 1.0
             };
-            let psi = (kx * x + phi_x).sin() * (ky * y + phi_y).sin();
-            zone_drive[z] = modal_gain * boundary_fade * treble_focus * psi;
+            let (t, n, half_seg) = tangents[z];
+            let kt_l = (kx * t[0] + ky * t[1]) * half_seg;
+            let sinc_line = if kt_l.abs() < 1.0e-5 {
+                1.0 - kt_l * kt_l / 6.0
+            } else {
+                kt_l.sin() / kt_l
+            };
+            let (sx, cx) = (kx * x + phi_x).sin_cos();
+            let (sy, cy) = (ky * y + phi_y).sin_cos();
+            let psi = sx * sy;
+            let dpsi_dn = n[0] * kx * cx * sy + n[1] * ky * sx * cy;
+            let h_br = (pos[2] as f64).max(0.02);
+            let rock = (ROCKING_ALPHA * h_br * dpsi_dn).clamp(-0.5, 0.5);
+            zone_drive[z] = modal_gain * boundary_fade * treble_focus * (psi * sinc_line + rock);
         }
 
         modes.push(SolvedBodyMode {
@@ -216,6 +275,10 @@ fn extend_statistical_rayleigh_modes(
             rad_coeffs: [0.0; PRESET_RAD_COEFFS],
             cavity_flag: 0,
             source: ModeSource::PlateStatistical,
+            plate_vol_norm: 0.0,
+            plate_dx_norm: 0.0,
+            plate_dy_norm: 0.0,
+            has_plate_moments: false,
         });
     }
 }

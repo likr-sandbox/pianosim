@@ -142,6 +142,10 @@ pub fn synthesize_air_cavity_modes_for(spec: &BodySpec) -> Vec<SolvedBodyMode> {
             rad_coeffs: [0.0; PRESET_RAD_COEFFS],
             cavity_flag: 1,
             source: ModeSource::AirCavity,
+            plate_vol_norm: 0.0,
+            plate_dx_norm: 0.0,
+            plate_dy_norm: 0.0,
+            has_plate_moments: false,
         });
     }
     modes
@@ -157,6 +161,9 @@ pub fn synthesize_air_cavity_modes() -> Vec<SolvedBodyMode> {
 pub fn populate_radiation_multipoles_for(spec: &BodySpec, modes: &mut [SolvedBodyMode]) {
     let x_center = 0.0;
     let y_center = spec.multipole_y_center_m;
+    let area_est = spec.domain_lx_m * spec.domain_ly_m * 0.72;
+    let h_avg = spec.thickness_min_m + 0.533 * spec.thickness_span_m;
+    let crown_shell = (0.045 * area_est / (spec.crown_radius_m * h_avg)).clamp(0.0, 0.85);
 
     for (idx, mode) in modes.iter_mut().enumerate() {
         let f = mode.freq_hz.max(20.0);
@@ -176,9 +183,29 @@ pub fn populate_radiation_multipoles_for(spec: &BodySpec, modes: &mut [SolvedBod
         } else {
             0.0
         };
-        let mono_proj = (net * inv_n).clamp(-1.0, 1.0);
-        let dx_proj = (mx * inv_n / 0.55).clamp(-1.0, 1.0);
-        let dy_proj = (my * inv_n / 0.65).clamp(-1.0, 1.0);
+        let (mono_proj, dx_proj, dy_proj, sign_z) = if mode.has_plate_moments {
+            let sgn = if mode.plate_vol_norm.abs() > 1.0e-4 {
+                mode.plate_vol_norm.signum()
+            } else if net >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
+            (
+                mode.plate_vol_norm,
+                mode.plate_dx_norm,
+                mode.plate_dy_norm,
+                sgn,
+            )
+        } else {
+            let sgn = if net >= 0.0 { 1.0 } else { -1.0 };
+            (
+                (net * inv_n).clamp(-1.0, 1.0),
+                (mx * inv_n / 0.55).clamp(-1.0, 1.0),
+                (my * inv_n / 0.65).clamp(-1.0, 1.0),
+                sgn,
+            )
+        };
 
         let coinc_ratio = (f / spec.plate_coincidence_hz).clamp(0.02, 4.0);
         let sigma_rad = (0.20 + 0.80 * coinc_ratio.powf(1.15) / (1.0 + coinc_ratio.powf(1.15)))
@@ -189,11 +216,17 @@ pub fn populate_radiation_multipoles_for(spec: &BodySpec, modes: &mut [SolvedBod
 
         let coeffs = match mode.source {
             ModeSource::PlateRitz | ModeSource::PlateStatistical => {
-                let base_mono = 0.28 * mono_proj + 0.14 * (if net >= 0.0 { 1.0 } else { -1.0 });
-                let monopole = base_mono * (0.45 + 0.55 * sigma_rad);
+                let lf_weight = 1.0 / (1.0 + (f / spec.plate_coincidence_hz).powi(2));
+                let monopole = if mode.has_plate_moments {
+                    let base_mono = 0.42 * mono_proj + 0.06 * sign_z;
+                    let shell_boost = 1.0 + crown_shell * lf_weight * mono_proj.abs();
+                    base_mono * shell_boost * (0.72 + 0.28 * sigma_rad) / (1.0 + 0.18 * coinc_ratio)
+                } else {
+                    let base_mono = 0.28 * mono_proj + 0.14 * sign_z;
+                    base_mono * (0.72 + 0.28 * sigma_rad) / (1.0 + 0.20 * coinc_ratio)
+                };
                 let dipole_x = 0.24 * dx_proj * (0.40 + 0.60 * helmholtz_eff);
                 let dipole_y = 0.20 * dy_proj * (0.40 + 0.60 * helmholtz_eff);
-                let sign_z = if net >= 0.0 { 1.0 } else { -1.0 };
                 let dipole_z = sign_z * 0.26 * (1.0 - 0.58 * sigma_rad);
                 let mid_band =
                     (f / 260.0) / (1.0 + (f / 260.0)) * (1.0 / (1.0 + (f / 10_500.0).powi(2)));
@@ -225,7 +258,7 @@ pub fn populate_radiation_multipoles_for(spec: &BodySpec, modes: &mut [SolvedBod
             ModeSource::AirCavity => {
                 let is_upper = mode.modal_mass_kg > 0.28;
                 let sign = if net >= 0.0 { 1.0 } else { -1.0 };
-                let monopole = sign * 0.22 * (0.55 + 0.45 * helmholtz_eff);
+                let monopole = sign * 0.28 * (0.75 + 0.25 * helmholtz_eff);
                 let dipole_x = 0.15 * dx_proj;
                 let dipole_y = 0.14 * dy_proj;
                 let dipole_z = if is_upper { sign * 0.12 } else { -sign * 0.20 };

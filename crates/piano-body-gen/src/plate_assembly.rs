@@ -108,10 +108,20 @@ struct YContractedTensors {
     s_d22: Vec<f64>,
     s_mel: Vec<f64>,
     s_min: Vec<f64>,
+    integrals: PlateSurfaceIntegrals,
+}
+
+pub(crate) struct PlateSurfaceIntegrals {
+    pub int_w: [f64; RITZ_N],
+    pub int_xw: [f64; RITZ_N],
+    pub int_yw: [f64; RITZ_N],
+    pub inside_area_m2: f64,
+    pub inside_mass_kg: f64,
 }
 
 fn build_y_contracted_tensors(
     spec: &BodySpec,
+    bx: &SineBasis1D,
     by: &SineBasis1D,
     dx: f64,
     dy: f64,
@@ -131,6 +141,12 @@ fn build_y_contracted_tensors(
     let mut s_mel = vec![0.0_f64; total];
     let mut s_min = vec![0.0_f64; total];
 
+    let mut int_w = [0.0_f64; RITZ_N];
+    let mut int_xw = [0.0_f64; RITZ_N];
+    let mut int_yw = [0.0_f64; RITZ_N];
+    let mut inside_area_m2 = 0.0_f64;
+    let mut inside_mass_kg = 0.0_f64;
+
     let mut y0_row = [0.0_f64; RITZ_NY];
     let mut y1_row = [0.0_f64; RITZ_NY];
     let mut y2_row = [0.0_f64; RITZ_NY];
@@ -138,6 +154,8 @@ fn build_y_contracted_tensors(
     for qx in 0..QUAD_NX {
         let x = spec.x_min_m + ((qx as f64) + 0.5) * dx;
         let q_off = qx * stride_q;
+        let mut sum_y0 = [0.0_f64; RITZ_NY];
+        let mut sum_yy = [0.0_f64; RITZ_NY];
         for qy in 0..QUAD_NY {
             let y = ((qy as f64) + 0.5) * dy;
             let site = evaluate_plate_site_for(spec, x, y);
@@ -170,6 +188,17 @@ fn build_y_contracted_tensors(
                 y2_row[iy] = by.d2[idx];
             }
 
+            if inside > 0.0 {
+                inside_area_m2 += d_area;
+                inside_mass_kg += m_in;
+                let y_rel = y - spec.multipole_y_center_m;
+                for iy in 0..RITZ_NY {
+                    let w_y = y0_row[iy] * d_area;
+                    sum_y0[iy] += w_y;
+                    sum_yy[iy] += y_rel * w_y;
+                }
+            }
+
             for iy1 in 0..RITZ_NY {
                 let (a0, a1, a2) = (y0_row[iy1], y1_row[iy1], y2_row[iy1]);
                 let row = q_off + iy1 * RITZ_NY;
@@ -187,6 +216,18 @@ fn build_y_contracted_tensors(
                 }
             }
         }
+
+        for ix in 0..RITZ_NX {
+            let px = bx.val[ix * QUAD_NX + qx];
+            let p_base = ix * RITZ_NY;
+            for iy in 0..RITZ_NY {
+                let p = p_base + iy;
+                let sy0 = px * sum_y0[iy];
+                int_w[p] += sy0;
+                int_xw[p] += x * sy0;
+                int_yw[p] += px * sum_yy[iy];
+            }
+        }
     }
 
     YContractedTensors {
@@ -198,6 +239,13 @@ fn build_y_contracted_tensors(
         s_d22,
         s_mel,
         s_min,
+        integrals: PlateSurfaceIntegrals {
+            int_w,
+            int_xw,
+            int_yw,
+            inside_area_m2,
+            inside_mass_kg,
+        },
     }
 }
 
@@ -205,10 +253,10 @@ pub(crate) fn assemble_ritz_matrices(
     spec: &BodySpec,
     bx: &SineBasis1D,
     by: &SineBasis1D,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, PlateSurfaceIntegrals) {
     let dx = spec.domain_lx_m / (QUAD_NX as f64);
     let dy = spec.domain_ly_m / (QUAD_NY as f64);
-    let t = build_y_contracted_tensors(spec, by, dx, dy);
+    let t = build_y_contracted_tensors(spec, bx, by, dx, dy);
 
     let mut k_mat = vec![0.0_f64; RITZ_N * RITZ_N];
     let mut m_mat = vec![0.0_f64; RITZ_N * RITZ_N];
@@ -284,5 +332,5 @@ pub(crate) fn assemble_ritz_matrices(
         }
     }
 
-    (k_mat, m_mat, m_int_mat)
+    (k_mat, m_mat, m_int_mat, t.integrals)
 }

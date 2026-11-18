@@ -48,6 +48,14 @@ pub struct SolvedBodyMode {
     pub cavity_flag: u8,
     /// Originating physical subsystem.
     pub source: ModeSource,
+    /// Full 2D normalized volume displacement integral `iint w dA / sqrt(A * iint w^2 dA)`.
+    pub(crate) plate_vol_norm: f64,
+    /// Full 2D normalized x-dipole moment integral.
+    pub(crate) plate_dx_norm: f64,
+    /// Full 2D normalized y-dipole moment integral.
+    pub(crate) plate_dy_norm: f64,
+    /// True when full 2D plate surface moments were populated by `PlateRitz`.
+    pub(crate) has_plate_moments: bool,
 }
 
 /// Converts a 60 dB decay time `t60_s` at `freq_hz` into viscous damping ratio `zeta`.

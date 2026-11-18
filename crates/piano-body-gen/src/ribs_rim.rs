@@ -158,6 +158,35 @@ fn point_to_segment(x: f64, y: f64, ax: f64, ay: f64, bx: f64, by: f64) -> (f64,
     (dist, dy.atan2(dx))
 }
 
+/// Returns `(tangent_unit, normal_unit, half_segment_m)` along the bass bridge (`0..=1`)
+/// and long bridge (`2..=7`), keeping the two bridges strictly separated.
+pub(crate) fn bridge_zone_tangents_normals(
+    zone_pos_m: &[[f32; 3]; PRESET_RADIATOR_ZONES],
+) -> [([f64; 2], [f64; 2], f64); NUM_BRIDGE_ZONES] {
+    let mut out = [([1.0, 0.0], [0.0, 1.0], 0.04); NUM_BRIDGE_ZONES];
+    for (z, slot) in out.iter_mut().enumerate() {
+        let (a, b, half_seg) = if z <= 1 {
+            (0_usize, 1_usize, 0.045)
+        } else {
+            let half = if z >= 6 { 0.025 } else { 0.040 };
+            if z == 2 {
+                (2, 3, half)
+            } else if z == NUM_BRIDGE_ZONES - 1 {
+                (NUM_BRIDGE_ZONES - 2, NUM_BRIDGE_ZONES - 1, half)
+            } else {
+                (z - 1, z + 1, half)
+            }
+        };
+        let dx = f64::from(zone_pos_m[b][0]) - f64::from(zone_pos_m[a][0]);
+        let dy = f64::from(zone_pos_m[b][1]) - f64::from(zone_pos_m[a][1]);
+        let norm = dx.hypot(dy).max(1.0e-6);
+        let t = [dx / norm, dy / norm];
+        let n = [-t[1], t[0]];
+        *slot = (t, n, half_seg);
+    }
+    out
+}
+
 /// Evaluates local soundboard thickness, ribs, bridges, and rim collar at `(x, y)` for `spec`.
 #[must_use]
 pub fn evaluate_plate_site_for(spec: &BodySpec, x: f64, y: f64) -> PlateSiteProps {
@@ -279,6 +308,10 @@ pub fn synthesize_rim_keybed_modes_for(spec: &BodySpec) -> Vec<SolvedBodyMode> {
             rad_coeffs: [0.0; PRESET_RAD_COEFFS],
             cavity_flag: 0,
             source: ModeSource::RimKeybed,
+            plate_vol_norm: 0.0,
+            plate_dx_norm: 0.0,
+            plate_dy_norm: 0.0,
+            has_plate_moments: false,
         });
     }
     modes
@@ -321,6 +354,10 @@ pub fn synthesize_cast_iron_frame_modes_for(spec: &BodySpec) -> Vec<SolvedBodyMo
             rad_coeffs: [0.0; PRESET_RAD_COEFFS],
             cavity_flag: 0,
             source: ModeSource::CastIronFrame,
+            plate_vol_norm: 0.0,
+            plate_dx_norm: 0.0,
+            plate_dy_norm: 0.0,
+            has_plate_moments: false,
         });
     }
     modes

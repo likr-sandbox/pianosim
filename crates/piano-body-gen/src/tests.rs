@@ -429,3 +429,67 @@ fn linalg_generalized_eigen_and_complex_invert_and_qr_match_exact() {
         assert!(dot_j.abs() > 0.999_999_999);
     }
 }
+
+#[test]
+fn f4_plate_2d_integrals_bridge_tangents_and_lf_crown_monopole() {
+    use crate::air_cavity::populate_radiation_multipoles_for;
+    use crate::orthotropic_plate::solve_soundboard_modes_for;
+    use crate::presets::{body_spec, BodyArchetype};
+    use crate::ribs_rim::bridge_zone_tangents_normals;
+    use crate::types::ModeSource;
+
+    let spec = body_spec(BodyArchetype::ConcertGrand);
+    let tangents = bridge_zone_tangents_normals(&spec.zone_pos_m);
+    for (z, &(t, n, half_seg)) in tangents.iter().enumerate() {
+        let t_norm = t[0].hypot(t[1]);
+        let n_norm = n[0].hypot(n[1]);
+        let dot = t[0] * n[0] + t[1] * n[1];
+        assert!((t_norm - 1.0).abs() < 1.0e-10, "zone {z} tangent");
+        assert!((n_norm - 1.0).abs() < 1.0e-10, "zone {z} normal");
+        assert!(dot.abs() < 1.0e-10, "zone {z} orthogonality");
+        assert!(half_seg > 0.01 && half_seg <= 0.05);
+    }
+    // Bass bridge tangent (0..=1) must match p[1]-p[0], strictly separate from long bridge (2..=7).
+    assert!((tangents[0].0[0] - tangents[1].0[0]).abs() < 1.0e-12);
+    assert!((tangents[0].0[1] - tangents[1].0[1]).abs() < 1.0e-12);
+
+    let (mut modes, _) = solve_soundboard_modes_for(&spec);
+    populate_radiation_multipoles_for(&spec, &mut modes);
+    let ritz: Vec<_> = modes
+        .iter()
+        .filter(|m| m.source == ModeSource::PlateRitz)
+        .collect();
+    assert!(!ritz.is_empty());
+    assert!(ritz.iter().all(|m| m.has_plate_moments));
+
+    // Fundamental dome mode (~34-42 Hz) has strong 2D volume displacement and boosted LF monopole.
+    let dome = ritz
+        .iter()
+        .min_by(|a, b| a.freq_hz.total_cmp(&b.freq_hz))
+        .expect("lowest Ritz mode");
+    assert!(
+        dome.plate_vol_norm.abs() > 0.50,
+        "expected dome plate_vol_norm > 0.50, got {}",
+        dome.plate_vol_norm
+    );
+    assert!(
+        dome.rad_coeffs[0].abs() > 0.30,
+        "expected LF crown monopole > 0.30, got {}",
+        dome.rad_coeffs[0]
+    );
+    // At least one low mode (< 160 Hz) must be dipole-dominated (small volume, larger dipole moment).
+    assert!(
+        ritz.iter().any(|m| m.freq_hz < 160.0
+            && m.plate_vol_norm.abs() < 0.25
+            && m.plate_dx_norm.abs() > 0.15),
+        "expected antisymmetric dipole-dominated low Ritz mode"
+    );
+
+    for arch in BodyArchetype::ALL {
+        let s = body_spec(arch);
+        assert!(s
+            .direct_zone_gain
+            .iter()
+            .all(|&g| (0.02..=0.08).contains(&g)));
+    }
+}
