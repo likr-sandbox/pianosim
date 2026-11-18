@@ -1,25 +1,23 @@
-//! Concert-grand geometry, spruce ribs, bridge heterogeneity, laminated beech
+//! Body geometry, spruce ribs, bridge heterogeneity, laminated beech
 //! rim boundary impedance, Zone 8 wooden keybed coupling, and cast-iron harp frame.
 
-use crate::types::{det_unit_f64, sitka_spruce_t60_s, t60_to_zeta, ModeSource, SolvedBodyMode};
+use crate::presets::{body_plate_t60_s, body_spec, BodyArchetype, BodySpec};
+use crate::types::{det_unit_f64, t60_to_zeta, ModeSource, SolvedBodyMode};
 use piano_bridge::{KEYBED_ZONE_IDX, NUM_BRIDGE_ZONES};
 use piano_spec::{PRESET_RADIATOR_ZONES, PRESET_RAD_COEFFS};
 
-/// Rectangular Ritz integration domain width [m] (`x in [-0.76, 0.76]`).
+/// Rectangular Ritz integration domain width [m] (`x in [-0.76, 0.76]`) for Concert Grand.
 pub const SOUNDBOARD_LX_M: f64 = 1.52;
-/// Rectangular Ritz integration domain length [m] (`y in [0.0, 1.98]`).
+/// Rectangular Ritz integration domain length [m] (`y in [0.0, 1.98]`) for Concert Grand.
 pub const SOUNDBOARD_LY_M: f64 = 1.98;
-/// Left boundary of Ritz domain [m].
+/// Left boundary of Ritz domain [m] for Concert Grand.
 pub const SOUNDBOARD_X_MIN_M: f64 = -0.5 * SOUNDBOARD_LX_M;
-/// Number of transverse Sitka spruce ribs under the soundboard.
+/// Number of transverse Sitka spruce ribs under the concert-grand soundboard.
 pub const NUM_SPRUCE_RIBS: usize = 14;
-/// Spruce grain angle relative to keyboard x-axis [rad] (~32 deg).
+/// Spruce grain angle relative to keyboard x-axis [rad] (~32 deg) for Concert Grand.
 pub const SPRUCE_GRAIN_ANGLE_RAD: f64 = 32.0 * std::f64::consts::PI / 180.0;
 
 /// 3D physical positions [m] of the 8 bridge zones + Zone 8 keybed (`KEYBED_ZONE_IDX`).
-///
-/// Bass zones 0-1 lie on the left (`x < 0`) and treble zones 6-7 on the right (`x > 0`),
-/// aligned with `zone_stereo_pan` and Stage 4 binaural HRTF lateralization.
 pub const CONCERT_ZONE_POS_M: [[f32; 3]; PRESET_RADIATOR_ZONES] = [
     [-0.44, 1.24, 0.042], // Zone 0: Sub-bass / bass overstrung bridge end
     [-0.28, 1.08, 0.040], // Zone 1: Upper bass overstrung bridge
@@ -35,11 +33,11 @@ pub const CONCERT_ZONE_POS_M: [[f32; 3]; PRESET_RADIATOR_ZONES] = [
 /// Local orthotropic plate material & boundary properties at a quadrature point `(x, y)`.
 #[derive(Clone, Copy, Debug)]
 pub struct PlateSiteProps {
-    /// Positive distance inside grand soundboard rim (`< 0` outside active planform) [m].
+    /// Positive distance inside soundboard rim (`< 0` outside active planform) [m].
     pub rim_signed_dist_m: f64,
-    /// Soundboard thickness `h(x, y)` tapering 7.5..9.0 mm [m].
+    /// Soundboard thickness `h(x, y)` [m].
     pub thickness_m: f64,
-    /// Effective areal mass density (spruce + ribs + bridge maple, attenuated on outer collar) [kg/m^2].
+    /// Effective areal mass density (spruce + ribs + bridge maple, attenuated on collar) [kg/m^2].
     pub areal_mass_kg_m2: f64,
     /// Additional cross-grain bending stiffness from spruce ribs [N*m].
     pub rib_bending_nm: f64,
@@ -57,58 +55,72 @@ fn smoothstep(t: f64) -> f64 {
     u * u * (3.0 - 2.0 * u)
 }
 
-/// Right bentside contour `x_right(y)` and left spine contour `x_left(y)` for `y in [0.06, 1.88]`.
-fn planform_x_bounds(y: f64) -> Option<(f64, f64)> {
-    const Y_MIN: f64 = 0.06;
-    const Y_JOIN: f64 = 1.40;
-    const Y_MAX: f64 = 1.88;
-    if !(Y_MIN..=Y_MAX).contains(&y) {
+fn planform_x_bounds(spec: &BodySpec, y: f64) -> Option<(f64, f64)> {
+    if !(spec.y_min_m..=spec.y_max_m).contains(&y) {
         return None;
     }
-    if y <= Y_JOIN {
-        let u = (y - Y_MIN) / (Y_JOIN - Y_MIN);
+    if spec.is_upright_liner {
+        let u = ((y - spec.y_join_m) / (spec.y_max_m - spec.y_join_m).max(1.0e-3)).clamp(0.0, 1.0);
+        let x_right =
+            spec.x_right_front_m * (1.0 - smoothstep(u)) + spec.x_right_join_m * smoothstep(u);
+        return Some((spec.x_left_m, x_right));
+    }
+    if y <= spec.y_join_m {
+        let u = (y - spec.y_min_m) / (spec.y_join_m - spec.y_min_m);
         let s = smoothstep(u);
-        let waist_pull = 0.06 * (std::f64::consts::PI * u).sin().powi(2);
-        let x_right = 0.70 * (1.0 - s) + 0.28 * s - waist_pull;
-        Some((-0.68, x_right))
+        let waist_pull = spec.waist_pull_m * (std::f64::consts::PI * u).sin().powi(2);
+        let x_right = spec.x_right_front_m * (1.0 - s) + spec.x_right_join_m * s - waist_pull;
+        Some((spec.x_left_m, x_right))
     } else {
-        // Semicircular tail centered at (-0.20, 1.40) with radius 0.48 joining [-0.68, +0.28].
-        let dy = y - Y_JOIN;
-        let r_sq = 0.48 * 0.48 - dy * dy;
+        let dy = y - spec.y_join_m;
+        let r_sq = spec.tail_r_m * spec.tail_r_m - dy * dy;
         if r_sq <= 0.0 {
             return None;
         }
         let dx = r_sq.sqrt();
-        Some((-0.20 - dx, -0.20 + dx))
+        Some((spec.tail_cx_m - dx, spec.tail_cx_m + dx))
     }
 }
 
-/// Signed distance to the laminated beech rim perimeter (`> 0` inside active soundboard) [m].
-pub fn rim_signed_distance_m(x: f64, y: f64) -> f64 {
-    const Y_MIN: f64 = 0.06;
-    const Y_JOIN: f64 = 1.40;
-    const Y_MAX: f64 = 1.88;
-    if y <= Y_MIN {
-        let clamped_x = x.clamp(-0.68, 0.70);
-        return -((x - clamped_x).hypot(Y_MIN - y));
+/// Signed distance to the laminated rim perimeter for an arbitrary [`BodySpec`] (`> 0` inside) [m].
+#[must_use]
+pub fn rim_signed_distance_for(spec: &BodySpec, x: f64, y: f64) -> f64 {
+    if y <= spec.y_min_m {
+        let clamped_x = x.clamp(spec.x_left_m, spec.x_right_front_m);
+        return -((x - clamped_x).hypot(spec.y_min_m - y));
     }
-    if y >= Y_MAX {
-        return -((x + 0.20).hypot(y - 1.40) - 0.48);
+    if spec.is_upright_liner {
+        if y >= spec.y_max_m {
+            let clamped_x = x.clamp(spec.x_left_m, spec.x_right_join_m);
+            return -((x - clamped_x).hypot(y - spec.y_max_m));
+        }
+        let Some((xl, xr)) = planform_x_bounds(spec, y) else {
+            return -0.2;
+        };
+        let d_x = (x - xl).min(xr - x);
+        let d_y = (y - spec.y_min_m).min(spec.y_max_m - y);
+        return if d_x >= 0.0 {
+            d_x.min(d_y)
+        } else {
+            d_x.max(-0.5)
+        };
     }
-    let Some((xl, xr)) = planform_x_bounds(y) else {
+    if y >= spec.y_max_m {
+        return -((x - spec.tail_cx_m).hypot(y - spec.y_join_m) - spec.tail_r_m);
+    }
+    let Some((xl, xr)) = planform_x_bounds(spec, y) else {
         return -0.2;
     };
     let d_x = (x - xl).min(xr - x);
-    let d_front = y - Y_MIN;
-    let d_tail = if y > Y_JOIN - 0.35 {
-        0.48 - (x + 0.20).hypot(y - Y_JOIN)
+    let d_front = y - spec.y_min_m;
+    let d_tail = if y > spec.y_join_m - 0.35 {
+        spec.tail_r_m - (x - spec.tail_cx_m).hypot(y - spec.y_join_m)
     } else {
         1.0
     };
     if d_x >= 0.0 && d_front >= 0.0 && d_tail >= 0.0 {
         d_x.min(d_front).min(d_tail)
     } else {
-        // Negative distance outside contour.
         let out_x = if x < xl {
             xl - x
         } else if x > xr {
@@ -116,8 +128,8 @@ pub fn rim_signed_distance_m(x: f64, y: f64) -> f64 {
         } else {
             0.0
         };
-        let out_tail = if y > Y_JOIN {
-            ((x + 0.20).hypot(y - Y_JOIN) - 0.48).max(0.0)
+        let out_tail = if y > spec.y_join_m {
+            ((x - spec.tail_cx_m).hypot(y - spec.y_join_m) - spec.tail_r_m).max(0.0)
         } else {
             0.0
         };
@@ -125,7 +137,12 @@ pub fn rim_signed_distance_m(x: f64, y: f64) -> f64 {
     }
 }
 
-/// Minimum distance from `(x, y)` to a line segment `a -> b` and its tangent unit vector.
+/// Signed distance to the concert-grand beech rim perimeter (`> 0` inside active soundboard) [m].
+#[must_use]
+pub fn rim_signed_distance_m(x: f64, y: f64) -> f64 {
+    rim_signed_distance_for(&body_spec(BodyArchetype::ConcertGrand), x, y)
+}
+
 fn point_to_segment(x: f64, y: f64, ax: f64, ay: f64, bx: f64, by: f64) -> (f64, f64) {
     let dx = bx - ax;
     let dy = by - ay;
@@ -141,67 +158,61 @@ fn point_to_segment(x: f64, y: f64, ax: f64, ay: f64, bx: f64, by: f64) -> (f64,
     (dist, dy.atan2(dx))
 }
 
-/// Evaluates local soundboard thickness, 14 transverse ribs, bridges, and beech rim collar at `(x, y)`.
-pub fn evaluate_plate_site(x: f64, y: f64) -> PlateSiteProps {
-    const SPRUCE_RHO: f64 = 435.0;
+/// Evaluates local soundboard thickness, ribs, bridges, and rim collar at `(x, y)` for `spec`.
+#[must_use]
+pub fn evaluate_plate_site_for(spec: &BodySpec, x: f64, y: f64) -> PlateSiteProps {
     const MAPLE_RHO: f64 = 705.0;
-    const SPRUCE_E_L: f64 = 11.5e9;
     const MAPLE_E: f64 = 12.6e9;
 
-    let signed_dist = rim_signed_distance_m(x, y);
+    let signed_dist = rim_signed_distance_for(spec, x, y);
     let edge_taper = (signed_dist.max(0.0) / 0.28).clamp(0.0, 1.0);
-    // Double-crowned spruce taper: 7.5 mm near rim up to 9.0 mm across belly center.
-    let thickness_m = 0.0075 + 0.0015 * smoothstep(edge_taper);
+    let thickness_m = spec.thickness_min_m + spec.thickness_span_m * smoothstep(edge_taper);
 
-    // 14 transverse spruce ribs oriented perpendicular to grain (`u_g` spacing across [-0.32, 1.48]).
-    let cos_g = SPRUCE_GRAIN_ANGLE_RAD.cos();
-    let sin_g = SPRUCE_GRAIN_ANGLE_RAD.sin();
+    let cos_g = spec.grain_angle_rad.cos();
+    let sin_g = spec.grain_angle_rad.sin();
     let u_grain = x * cos_g + y * sin_g;
-    let rib_pitch = 1.80 / (NUM_SPRUCE_RIBS as f64);
+    let rib_pitch = spec.rib_u_span_m / (spec.num_ribs as f64);
     let mut rib_weight = 0.0;
-    for r in 0..NUM_SPRUCE_RIBS {
-        let u_center = -0.30 + (r as f64 + 0.5) * rib_pitch;
+    for r in 0..spec.num_ribs {
+        let u_center = spec.rib_u_min_m + (r as f64 + 0.5) * rib_pitch;
         let du = u_grain - u_center;
-        // Effective Gaussian rib footprint width (~24 mm + bending apron).
         rib_weight += (-0.5 * (du / 0.028).powi(2)).exp();
     }
     let feather = smoothstep((signed_dist / 0.14).clamp(0.0, 1.0));
-    let rib_height = 0.017 + 0.007 * feather;
-    let rib_width = 0.022;
-    let rib_i = rib_width * rib_height.powi(3) / 12.0;
-    let rib_area_density = (rib_width * rib_height * SPRUCE_RHO / 0.056) * rib_weight * feather;
-    let rib_bending_nm = (SPRUCE_E_L * rib_i / 0.056) * rib_weight * feather;
+    let rib_height = spec.rib_height_base_m + spec.rib_height_belly_m * feather;
+    let rib_i = spec.rib_width_m * rib_height.powi(3) / 12.0;
+    let rib_area_density =
+        (spec.rib_width_m * rib_height * spec.spruce_rho / 0.056) * rib_weight * feather;
+    let rib_bending_nm = (spec.spruce_e_l_pa * rib_i / 0.056) * rib_weight * feather;
 
-    // Bass bridge (zones 0..1) and rock-maple long bridge (zones 2..7).
     let (d_bass, ang_bass) = point_to_segment(
         x,
         y,
-        CONCERT_ZONE_POS_M[0][0] as f64,
-        CONCERT_ZONE_POS_M[0][1] as f64,
-        CONCERT_ZONE_POS_M[1][0] as f64,
-        CONCERT_ZONE_POS_M[1][1] as f64,
+        spec.zone_pos_m[0][0] as f64,
+        spec.zone_pos_m[0][1] as f64,
+        spec.zone_pos_m[1][0] as f64,
+        spec.zone_pos_m[1][1] as f64,
     );
     let (d_long, ang_long) = point_to_segment(
         x,
         y,
-        CONCERT_ZONE_POS_M[2][0] as f64,
-        CONCERT_ZONE_POS_M[2][1] as f64,
-        CONCERT_ZONE_POS_M[7][0] as f64,
-        CONCERT_ZONE_POS_M[7][1] as f64,
+        spec.zone_pos_m[2][0] as f64,
+        spec.zone_pos_m[2][1] as f64,
+        spec.zone_pos_m[7][0] as f64,
+        spec.zone_pos_m[7][1] as f64,
     );
     let w_bass = (-0.5 * (d_bass / 0.036).powi(2)).exp();
     let w_long = (-0.5 * (d_long / 0.032).powi(2)).exp();
-    let bridge_mass = MAPLE_RHO * (0.028 * w_bass + 0.024 * w_long);
+    let bridge_mass = MAPLE_RHO * spec.bridge_mass_scale * (0.028 * w_bass + 0.024 * w_long);
     let bridge_i_eff = 0.032 * 0.026_f64.powi(3) / 12.0 / 0.055;
-    let bridge_bending_nm = MAPLE_E * bridge_i_eff * (1.10 * w_bass + w_long);
+    let bridge_bending_nm =
+        MAPLE_E * bridge_i_eff * spec.bridge_stiff_scale * (1.10 * w_bass + w_long);
     let bridge_angle_rad = if w_bass > w_long { ang_bass } else { ang_long };
 
-    // Beech rim collar penalty: smooth ramp across +-4 cm around rim boundary.
-    // Peak k_rim = 1.15e8 N/m^3 with reduced exterior inertia keeps condition number well-bounded.
     let inside_mask = smoothstep((signed_dist + 0.025) / 0.065);
     let rim_collar = 1.0 - smoothstep((signed_dist - 0.005) / 0.055);
-    let rim_stiffness_n_m3 = 1.15e8 * rim_collar;
-    let interior_mass = SPRUCE_RHO * thickness_m + rib_area_density + bridge_mass;
+    let rim_stiffness_n_m3 = spec.rim_stiffness_n_m3 * rim_collar;
+    let interior_mass = spec.spruce_rho * thickness_m + rib_area_density + bridge_mass;
     let areal_mass_kg_m2 = interior_mass * (0.14 + 0.86 * inside_mask);
 
     PlateSiteProps {
@@ -215,21 +226,26 @@ pub fn evaluate_plate_site(x: f64, y: f64) -> PlateSiteProps {
     }
 }
 
-/// Generates laminated beech rim & Zone 8 (`KEYBED_ZONE_IDX = 8`) wooden keybed thud modes (`40..380 Hz`).
-///
-/// All modes use pure damped 2nd-order modal physics (`T60 = 0.05..0.18 s`, zero separate
-/// envelope decay). `zone_drive[8]` couples directly to physical keybed bottom-out force.
-pub fn synthesize_rim_keybed_modes() -> Vec<SolvedBodyMode> {
+/// Evaluates local concert-grand soundboard properties at `(x, y)`.
+#[must_use]
+pub fn evaluate_plate_site(x: f64, y: f64) -> PlateSiteProps {
+    evaluate_plate_site_for(&body_spec(BodyArchetype::ConcertGrand), x, y)
+}
+
+/// Generates laminated rim & Zone 8 wooden keybed thud modes for `spec`.
+#[must_use]
+pub fn synthesize_rim_keybed_modes_for(spec: &BodySpec) -> Vec<SolvedBodyMode> {
     const COUNT: usize = 32;
     let mut modes = Vec::with_capacity(COUNT);
+    let x_span = (spec.x_right_front_m - spec.x_left_m).max(0.5);
     for idx in 0..COUNT {
         let u = (idx as f64 + 0.35) / (COUNT as f64);
-        // Cluster lower modes firmly in the wooden keybed thud band (40..380 Hz).
         let jitter = (det_unit_f64(0x91A0 + idx as u64) - 0.5) * 4.5;
-        let freq_hz = (42.0 + 334.0 * u.powf(1.22) + jitter).clamp(40.0, 380.0);
-        // Keybed / rim laminated beech damping: natural fast wooden thud decay (55..175 ms).
-        let t60_s =
-            (0.175 - 0.115 * u + 0.015 * det_unit_f64(0x92B0 + idx as u64)).clamp(0.052, 0.185);
+        let freq_hz = (spec.rim_f_min + spec.rim_f_span * u.powf(1.22) + jitter)
+            .clamp(35.0, spec.rim_f_min + spec.rim_f_span + 10.0);
+        let t60_s = (spec.rim_t60_base - spec.rim_t60_drop * u
+            + 0.015 * det_unit_f64(0x92B0 + idx as u64))
+        .clamp(0.042, 0.215);
         let zeta = t60_to_zeta(freq_hz, t60_s);
 
         let kx_n = ((idx % 4) + 1) as f64;
@@ -237,18 +253,18 @@ pub fn synthesize_rim_keybed_modes() -> Vec<SolvedBodyMode> {
         let phi_center = (kx_n * 0.5 * std::f64::consts::PI).sin().abs().max(0.25);
 
         let mut zone_drive = [0.0_f64; PRESET_RADIATOR_ZONES];
-        // Direct structural coupling into Zone 8 keybed-to-rim cheek blocks.
-        let keybed_gain =
-            0.016 * phi_center * (1.0 - 0.42 * u) * (0.8 + 0.4 * det_unit_f64(0x93C0 + idx as u64));
+        let keybed_gain = spec.rim_keybed_gain
+            * phi_center
+            * (1.0 - 0.42 * u)
+            * (0.8 + 0.4 * det_unit_f64(0x93C0 + idx as u64));
         zone_drive[KEYBED_ZONE_IDX] = if idx % 2 == 0 {
             keybed_gain
         } else {
             -keybed_gain
         };
 
-        // Sympathetic rim cheek-block transmission into bridge zones (stronger near bass/treble rim).
-        for (z, pos) in CONCERT_ZONE_POS_M.iter().enumerate().take(NUM_BRIDGE_ZONES) {
-            let x_norm = ((pos[0] as f64) + 0.68) / 1.38;
+        for (z, pos) in spec.zone_pos_m.iter().enumerate().take(NUM_BRIDGE_ZONES) {
+            let x_norm = ((pos[0] as f64) - spec.x_left_m) / x_span;
             let rim_prox = 0.5 + 0.5 * (kx_n * std::f64::consts::PI * x_norm).cos();
             let front_prox = (-1.15 * (pos[1] as f64)).exp();
             let sign = if ((idx + z) % 2) == 0 { 1.0 } else { -1.0 };
@@ -268,27 +284,31 @@ pub fn synthesize_rim_keybed_modes() -> Vec<SolvedBodyMode> {
     modes
 }
 
-/// Generates weakly coupled cast-iron harp frame structural modes (`180..2,800 Hz`).
-pub fn synthesize_cast_iron_frame_modes() -> Vec<SolvedBodyMode> {
+/// Generates concert-grand laminated beech rim & Zone 8 wooden keybed thud modes.
+#[must_use]
+pub fn synthesize_rim_keybed_modes() -> Vec<SolvedBodyMode> {
+    synthesize_rim_keybed_modes_for(&body_spec(BodyArchetype::ConcertGrand))
+}
+
+/// Generates weakly coupled cast-iron harp frame structural modes for `spec`.
+#[must_use]
+pub fn synthesize_cast_iron_frame_modes_for(spec: &BodySpec) -> Vec<SolvedBodyMode> {
     const COUNT: usize = 40;
     let mut modes = Vec::with_capacity(COUNT);
     for idx in 0..COUNT {
         let u = (idx as f64 + 0.5) / (COUNT as f64);
         let jitter = (det_unit_f64(0xA110 + idx as u64) - 0.5) * 18.0;
-        let freq_hz = (185.0 * (2_750.0_f64 / 185.0).powf(u) + jitter).clamp(180.0, 2_800.0);
-        // Cast-iron frame damped by felt/leather shims & rim bolts, well within spruce/wood envelope.
-        let t60_s = (sitka_spruce_t60_s(freq_hz) * 0.92).clamp(0.055, 0.36);
+        let freq_hz = (spec.frame_f_min * (spec.frame_f_max / spec.frame_f_min).powf(u) + jitter)
+            .clamp(spec.frame_f_min - 5.0, spec.frame_f_max + 50.0);
+        let t60_s = (body_plate_t60_s(spec, freq_hz) * 0.92).clamp(0.045, 0.36);
         let zeta = t60_to_zeta(freq_hz, t60_s);
 
         let mut zone_drive = [0.0_f64; PRESET_RADIATOR_ZONES];
-        for (z, pos) in CONCERT_ZONE_POS_M.iter().enumerate().take(NUM_BRIDGE_ZONES) {
-            // Frame agraffes/struts sit closest to Zones 0, 2, 5, 7 along hitch & capo bars.
+        for (z, pos) in spec.zone_pos_m.iter().enumerate().take(NUM_BRIDGE_ZONES) {
             let phase = (idx as f64 * 0.71 + (pos[0] as f64) * 3.1 + (pos[1] as f64) * 2.4).sin();
             let strut_w = 0.55 + 0.45 * ((pos[0] as f64 * 2.7).cos()).abs();
-            // Weakly coupled relative to spruce soundboard modes (O(0.0005..0.0022)).
-            zone_drive[z] = 0.0014 * strut_w * phase * (1.0 - 0.25 * u);
+            zone_drive[z] = spec.frame_gain * strut_w * phase * (1.0 - 0.25 * u);
         }
-        // Very weak low-frequency mechanical path from keybed cheek bolts into lower frame struts.
         if freq_hz < 360.0 {
             zone_drive[KEYBED_ZONE_IDX] = 0.00045 * (det_unit_f64(0xA220 + idx as u64) - 0.5);
         }
@@ -304,4 +324,10 @@ pub fn synthesize_cast_iron_frame_modes() -> Vec<SolvedBodyMode> {
         });
     }
     modes
+}
+
+/// Generates concert-grand cast-iron harp frame structural modes.
+#[must_use]
+pub fn synthesize_cast_iron_frame_modes() -> Vec<SolvedBodyMode> {
+    synthesize_cast_iron_frame_modes_for(&body_spec(BodyArchetype::ConcertGrand))
 }

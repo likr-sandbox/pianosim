@@ -1,11 +1,9 @@
-//! Deterministic concert-grand Layer 1A body preset baker and diagnostic builder.
+//! Deterministic Layer 1A multi-body preset baker and diagnostic builder.
 
-use crate::air_cavity::{populate_radiation_multipoles, synthesize_air_cavity_modes};
-use crate::orthotropic_plate::{solve_soundboard_modes, PlateSolveStats};
-use crate::pole_cancel::{extract_stage3_reduced_model, CALIBRATED_DIRECT_ZONE_GAIN};
-use crate::ribs_rim::{
-    synthesize_cast_iron_frame_modes, synthesize_rim_keybed_modes, CONCERT_ZONE_POS_M,
-};
+use crate::air_cavity::{populate_radiation_multipoles_for, synthesize_air_cavity_modes_for};
+use crate::orthotropic_plate::{solve_soundboard_modes_for, PlateSolveStats};
+use crate::presets::{body_spec, BodyArchetype};
+use crate::ribs_rim::{synthesize_cast_iron_frame_modes_for, synthesize_rim_keybed_modes_for};
 use crate::types::{zeta_to_t60, ModeSource};
 use piano_spec::{BodyModeRecord, BodyPreset};
 
@@ -34,14 +32,15 @@ pub struct BakeDiagnostics {
     pub encoded_bytes: usize,
 }
 
-/// Runs the pure-Rust Layer 1A structural-acoustic concert-grand solver and returns
+/// Runs the pure-Rust Layer 1A structural-acoustic solver for `archetype` and returns
 /// the calibrated [`BodyPreset`] along with solver diagnostics.
 #[must_use]
-pub fn bake_concert_grand_with_diagnostics() -> (BodyPreset, BakeDiagnostics) {
-    let (mut modes, plate_stats) = solve_soundboard_modes();
-    let rim_modes = synthesize_rim_keybed_modes();
-    let frame_modes = synthesize_cast_iron_frame_modes();
-    let cavity_modes = synthesize_air_cavity_modes();
+pub fn bake_body_with_diagnostics(archetype: BodyArchetype) -> (BodyPreset, BakeDiagnostics) {
+    let spec = body_spec(archetype);
+    let (mut modes, plate_stats) = solve_soundboard_modes_for(&spec);
+    let rim_modes = synthesize_rim_keybed_modes_for(&spec);
+    let frame_modes = synthesize_cast_iron_frame_modes_for(&spec);
+    let cavity_modes = synthesize_air_cavity_modes_for(&spec);
 
     let rim_count = rim_modes.len();
     let frame_count = frame_modes.len();
@@ -52,9 +51,7 @@ pub fn bake_concert_grand_with_diagnostics() -> (BodyPreset, BakeDiagnostics) {
     modes.extend(cavity_modes);
 
     modes.sort_by(|a, b| a.freq_hz.total_cmp(&b.freq_hz));
-    populate_radiation_multipoles(&mut modes);
-
-    let (y_inf, reduced_poles) = extract_stage3_reduced_model();
+    populate_radiation_multipoles_for(&spec, &mut modes);
 
     let mut min_freq_hz = f64::MAX;
     let mut max_freq_hz = 0.0_f64;
@@ -80,10 +77,10 @@ pub fn bake_concert_grand_with_diagnostics() -> (BodyPreset, BakeDiagnostics) {
     }
 
     let preset = BodyPreset {
-        y_inf,
-        direct_zone_gain: CALIBRATED_DIRECT_ZONE_GAIN,
-        zone_pos_m: CONCERT_ZONE_POS_M,
-        reduced_poles,
+        y_inf: spec.y_inf,
+        direct_zone_gain: spec.direct_zone_gain,
+        zone_pos_m: spec.zone_pos_m,
+        reduced_poles: spec.reduced_poles,
         modes: records,
     };
 
@@ -103,8 +100,21 @@ pub fn bake_concert_grand_with_diagnostics() -> (BodyPreset, BakeDiagnostics) {
     (preset, diag)
 }
 
+/// Deterministic Layer 1A structural-acoustic preset generator for `archetype`.
+#[must_use]
+pub fn bake_body_preset(archetype: BodyArchetype) -> BodyPreset {
+    bake_body_with_diagnostics(archetype).0
+}
+
+/// Runs the pure-Rust Layer 1A structural-acoustic concert-grand solver and returns
+/// the calibrated [`BodyPreset`] along with solver diagnostics.
+#[must_use]
+pub fn bake_concert_grand_with_diagnostics() -> (BodyPreset, BakeDiagnostics) {
+    bake_body_with_diagnostics(BodyArchetype::ConcertGrand)
+}
+
 /// Deterministic concert-grand Layer 1A structural-acoustic preset generator.
 #[must_use]
 pub fn bake_concert_grand_preset() -> BodyPreset {
-    bake_concert_grand_with_diagnostics().0
+    bake_body_preset(BodyArchetype::ConcertGrand)
 }

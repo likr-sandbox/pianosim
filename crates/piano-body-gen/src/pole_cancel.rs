@@ -3,6 +3,8 @@
 //! and full-body zero double-resonance verification across `20..16,000 Hz`.
 
 use crate::linalg::{invert_8x8_complex, real_eigenvalues_qr, Complex64};
+pub use crate::pole_cancel_sim::InverseReducedBridge;
+use crate::pole_cancel_sim::ReducedAdmittanceSim;
 use piano_bridge::{AdmittanceSsm, DEFAULT_Y_INF, NUM_BRIDGE_ZONES, NUM_REDUCED_MODES};
 use piano_spec::{
     BodyModeRecord, BodyPreset, PresetReducedPole, PRESET_BRIDGE_ZONES, PRESET_RADIATOR_ZONES,
@@ -161,105 +163,6 @@ pub fn max_inverse_pole_real_part(
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
-/// Exact trapezoidal discrete inverse `Z_red_norm` paired with `AdmittanceSsm`.
-pub struct InverseReducedBridge {
-    y_inf: [f32; PRESET_BRIDGE_ZONES],
-    poles: [PresetReducedPole; PRESET_REDUCED_POLES],
-    sample_rate: f64,
-    q: [f64; NUM_REDUCED_MODES],
-    q_dot: [f64; NUM_REDUCED_MODES],
-    a_br_inv: [[f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES],
-}
-
-impl InverseReducedBridge {
-    /// Initializes exact discrete trapezoidal inverse matching `AdmittanceSsm::new(sample_rate)`.
-    pub fn from_preset(preset: &BodyPreset, sample_rate: f32) -> Self {
-        let sr = sample_rate as f64;
-        let h = 0.5 / sr;
-        let mut a_br = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
-        for (z, &yi) in preset.y_inf.iter().enumerate() {
-            a_br[z][z] = yi as f64;
-        }
-        for p in &preset.reduced_poles {
-            let m = p.modal_mass_kg as f64;
-            let w = 2.0 * PI * (p.freq_hz as f64);
-            let c = 2.0 * (p.zeta as f64) * w * m;
-            let k = m * w * w;
-            let y_m = 1.0 / (m / h + c + h * k);
-            for (row_a, &gr_f) in a_br.iter_mut().zip(p.zone_gains.iter()) {
-                let gr = gr_f as f64;
-                for (cell_a, &gc_f) in row_a.iter_mut().zip(p.zone_gains.iter()) {
-                    *cell_a += y_m * gr * (gc_f as f64);
-                }
-            }
-        }
-        let a_br_c: [[Complex64; 8]; 8] =
-            std::array::from_fn(|r| std::array::from_fn(|c| Complex64::new(a_br[r][c], 0.0)));
-        let inv_c = invert_8x8_complex(&a_br_c).expect("SPD A_br matrix");
-        let a_br_inv = std::array::from_fn(|r| std::array::from_fn(|c| inv_c[r][c].re));
-
-        Self {
-            y_inf: preset.y_inf,
-            poles: preset.reduced_poles,
-            sample_rate: sr,
-            q: [0.0; NUM_REDUCED_MODES],
-            q_dot: [0.0; NUM_REDUCED_MODES],
-            a_br_inv,
-        }
-    }
-
-    /// Steps one sample: given Stage 3 midpoint velocity `v`, returns `y_norm = diag(y_inf) * f_recovered`.
-    pub fn step(&mut self, v: &[f64; NUM_BRIDGE_ZONES]) -> [f64; NUM_BRIDGE_ZONES] {
-        let ts = 1.0 / self.sample_rate;
-        let inv_h = 2.0 * self.sample_rate;
-        let h = 0.5 * ts;
-        let mut y_m = [0.0_f64; NUM_REDUCED_MODES];
-        let mut qd_free_m = [0.0_f64; NUM_REDUCED_MODES];
-        let mut v_free_z = [0.0_f64; NUM_BRIDGE_ZONES];
-
-        for (i, p) in self.poles.iter().enumerate() {
-            let m = p.modal_mass_kg as f64;
-            let w = 2.0 * PI * (p.freq_hz as f64);
-            let c = 2.0 * (p.zeta as f64) * w * m;
-            let k = m * w * w;
-            let ym = 1.0 / (m * inv_h + c + h * k);
-            y_m[i] = ym;
-            let rhs = (m * inv_h) * self.q_dot[i] - k * self.q[i];
-            let qdf = ym * rhs;
-            qd_free_m[i] = qdf;
-            for (z, &g) in p.zone_gains.iter().enumerate() {
-                v_free_z[z] += (g as f64) * qdf;
-            }
-        }
-
-        let mut dv = [0.0_f64; NUM_BRIDGE_ZONES];
-        for z in 0..NUM_BRIDGE_ZONES {
-            dv[z] = v[z] - v_free_z[z];
-        }
-        let mut f_rec = [0.0_f64; NUM_BRIDGE_ZONES];
-        for (f_slot, row_inv) in f_rec.iter_mut().zip(self.a_br_inv.iter()) {
-            let mut sum = 0.0;
-            for (&a_rc, &dv_c) in row_inv.iter().zip(dv.iter()) {
-                sum += a_rc * dv_c;
-            }
-            *f_slot = sum;
-        }
-
-        for (i, p) in self.poles.iter().enumerate() {
-            let mut f_m = 0.0;
-            for (z, &g) in p.zone_gains.iter().enumerate() {
-                f_m += (g as f64) * f_rec[z];
-            }
-            let qd_mid = qd_free_m[i] + y_m[i] * f_m;
-            let qd_next = 2.0 * qd_mid - self.q_dot[i];
-            self.q[i] += ts * qd_mid;
-            self.q_dot[i] = qd_next;
-        }
-
-        std::array::from_fn(|z| (self.y_inf[z] as f64) * f_rec[z])
-    }
-}
-
 /// Evaluates the full body transfer vector `H_body(j*w)` (8 bridge inputs -> monopole output).
 fn eval_body_transfer_vec(
     direct_zone_gain: &[f32; PRESET_RADIATOR_ZONES],
@@ -286,19 +189,9 @@ fn eval_body_transfer_vec(
     h
 }
 
-/// Verifies minimum-phase inverse stability, matrix identity, and zero double-resonance excess peaking.
+/// Verifies minimum-phase inverse stability, matrix identity, and zero double-resonance excess peaking
+/// against Stage 3 admittance defined by `preset.y_inf` and `preset.reduced_poles`.
 pub fn verify_pole_cancellation(preset: &BodyPreset, sample_rate: f32) -> PoleCancelReport {
-    let ssm_poles_ref = AdmittanceSsm::new(sample_rate);
-    let mut ssm_poles = [PresetReducedPole::default(); PRESET_REDUCED_POLES];
-    for (i, p) in ssm_poles_ref.poles().iter().enumerate() {
-        ssm_poles[i] = PresetReducedPole {
-            freq_hz: p.freq_hz,
-            zeta: p.zeta,
-            modal_mass_kg: p.modal_mass_kg,
-            zone_gains: p.zone_gains,
-        };
-    }
-
     let max_inverse_pole_real = max_inverse_pole_real_part(&preset.y_inf, &preset.reduced_poles);
 
     // Dense frequency grid: 180 log points (20..16,000 Hz) + tight clustering around all 10 reduced poles.
@@ -322,7 +215,7 @@ pub fn verify_pole_cancellation(preset: &BodyPreset, sample_rate: f32) -> PoleCa
     let mut max_cancelled_excess_db = 0.0_f64;
 
     for &f in &freqs {
-        let y_red = eval_y_red_freq(ssm_poles_ref.y_inf(), &ssm_poles, f);
+        let y_red = eval_y_red_freq(&preset.y_inf, &preset.reduced_poles, f);
         let z_norm = eval_z_red_norm_freq(&preset.y_inf, &preset.reduced_poles, f)
             .expect("invertible Y_red");
 
@@ -376,8 +269,8 @@ pub fn verify_pole_cancellation(preset: &BodyPreset, sample_rate: f32) -> PoleCa
         }
     }
 
-    // Also run discrete sample-domain cascade through AdmittanceSsm -> InverseReducedBridge at sample_rate.
-    let mut ssm = AdmittanceSsm::new(sample_rate);
+    // Also run discrete sample-domain cascade through Stage 3 reduced admittance -> InverseReducedBridge.
+    let mut ssm = ReducedAdmittanceSim::from_preset(preset, sample_rate);
     let mut inv = InverseReducedBridge::from_preset(preset, sample_rate);
     let mut max_discrete_err = 0.0_f64;
     for n in 0..512 {
@@ -389,7 +282,7 @@ pub fn verify_pole_cancellation(preset: &BodyPreset, sample_rate: f32) -> PoleCa
         let mut v_out = v_free;
         for (r, vr) in v_out.iter_mut().enumerate() {
             for (c, &fc) in f_in.iter().enumerate() {
-                *vr += ssm.a_br()[r][c] * fc;
+                *vr += ssm.a_br[r][c] * fc;
             }
         }
         ssm.commit_step(&qd_free, &f_in);

@@ -1,16 +1,23 @@
 //! Comprehensive Layer 1A solver, physics, Zone 8 keybed, pole-cancellation, and codec tests.
 
-use crate::bake::bake_concert_grand_with_diagnostics;
-use crate::bake_concert_grand_preset;
+use crate::bake::{bake_concert_grand_with_diagnostics, BakeDiagnostics};
 use crate::linalg::{
-    invert_8x8_complex, real_eigenvalues_qr, solve_generalized_symmetric_eigen, Complex64,
+    householder_tridiagonal_ql, invert_8x8_complex, jacobi_symmetric_eigen, real_eigenvalues_qr,
+    solve_generalized_symmetric_eigen, Complex64,
 };
+use crate::orthotropic_plate::{QUAD_NX, QUAD_NY, RITZ_N, RITZ_NX, RITZ_NY};
 use crate::pole_cancel::verify_pole_cancellation;
 use crate::ribs_rim::{evaluate_plate_site, rim_signed_distance_m, CONCERT_ZONE_POS_M};
 use crate::types::{zeta_to_t60, MAX_MODAL_T60_S};
 use piano_bridge::{AdmittanceSsm, DEFAULT_Y_INF, KEYBED_ZONE_IDX, NUM_BRIDGE_ZONES};
 use piano_spec::{BodyModeRecord, BodyPreset, PRESET_RAD_COEFFS};
 use std::f64::consts::PI;
+use std::sync::OnceLock;
+
+pub(crate) fn cached_concert_grand() -> &'static (BodyPreset, BakeDiagnostics) {
+    static CACHE: OnceLock<(BodyPreset, BakeDiagnostics)> = OnceLock::new();
+    CACHE.get_or_init(bake_concert_grand_with_diagnostics)
+}
 
 /// Runs a pure second-order modal bank over `modes` for a scalar drive sequence `x[n]`,
 /// outputting monopole-summed time series (zero separate envelope decay).
@@ -76,8 +83,11 @@ fn band_power_dft(signal: &[f64], sample_rate: f64, f_lo: f64, f_hi: f64, bins: 
 
 #[test]
 fn mode_count_span_and_determinism() {
-    let (preset_a, diag) = bake_concert_grand_with_diagnostics();
-    let preset_b = bake_concert_grand_preset();
+    let (preset_a, diag) = cached_concert_grand();
+    let (preset_b, _) = bake_concert_grand_with_diagnostics();
+
+    assert_eq!((RITZ_NX, RITZ_NY, RITZ_N), (15, 20, 300));
+    assert_eq!((QUAD_NX, QUAD_NY), (48, 64));
 
     assert!(
         (1_000..=2_000).contains(&diag.total_modes),
@@ -116,13 +126,13 @@ fn mode_count_span_and_determinism() {
         }
     }
 
-    assert_eq!(preset_a, preset_b);
+    assert_eq!(preset_a, &preset_b);
     assert_eq!(preset_a.encode(), preset_b.encode());
 }
 
 #[test]
 fn physical_t60_bounds_and_half_second_natural_decay() {
-    let (preset, diag) = bake_concert_grand_with_diagnostics();
+    let (preset, diag) = cached_concert_grand();
     assert!(
         diag.max_t60_s <= MAX_MODAL_T60_S,
         "max T60 {} s exceeds 0.42 s",
@@ -201,7 +211,7 @@ fn zone_geometry_planform_and_bridge_rib_heterogeneity() {
 
 #[test]
 fn zone8_keybed_low_freq_resonance_vs_silence_and_no_drive() {
-    let preset = bake_concert_grand_preset();
+    let (preset, _) = cached_concert_grand();
     let sr = 48_000.0;
     let len = 24_000; // 0.5 s
 
@@ -253,7 +263,7 @@ fn zone8_keybed_low_freq_resonance_vs_silence_and_no_drive() {
 
 #[test]
 fn minimum_phase_pole_cancellation_and_zero_double_resonance() {
-    let preset = bake_concert_grand_preset();
+    let (preset, _) = cached_concert_grand();
     let ssm = AdmittanceSsm::new(48_000.0);
     assert_eq!(preset.y_inf, DEFAULT_Y_INF);
     for (p, s) in preset.reduced_poles.iter().zip(ssm.poles().iter()) {
@@ -300,7 +310,7 @@ fn minimum_phase_pole_cancellation_and_zero_double_resonance() {
 
 #[test]
 fn binary_encoding_budget_and_lossless_roundtrip() {
-    let preset = bake_concert_grand_preset();
+    let (preset, _) = cached_concert_grand();
     let bytes = preset.encode();
     assert!(
         bytes.len() < 500 * 1024,
@@ -385,5 +395,37 @@ fn linalg_generalized_eigen_and_complex_invert_and_qr_match_exact() {
     for p in poles {
         assert!((p.re - (-z * w)).abs() < 1.0e-10);
         assert!((p.im.abs() - w * (1.0 - z * z).sqrt()).abs() < 1.0e-10);
+    }
+
+    // Verify Householder+QL matches cyclic Jacobi on a 16x16 dense symmetric matrix.
+    let n = 16;
+    let mut sym = vec![0.0_f64; n * n];
+    for i in 0..n {
+        for j in i..n {
+            let v = if i == j {
+                5.0 + (i as f64) * 0.7
+            } else {
+                0.25 * (((i * 7 + j * 13) as f64).sin())
+            };
+            sym[i * n + j] = v;
+            sym[j * n + i] = v;
+        }
+    }
+    let (ej, vj) = jacobi_symmetric_eigen(n, &sym);
+    let (eh, vh) = householder_tridiagonal_ql(n, &sym);
+    for col in 0..n {
+        assert!((ej[col] - eh[col]).abs() < 1.0e-11);
+        let mut res_sq = 0.0;
+        for row in 0..n {
+            let mut av = 0.0;
+            for k in 0..n {
+                av += sym[row * n + k] * vh[k * n + col];
+            }
+            let diff = av - eh[col] * vh[row * n + col];
+            res_sq += diff * diff;
+        }
+        assert!(res_sq.sqrt() < 1.0e-11, "col {col} residual {res_sq}");
+        let dot_j: f64 = (0..n).map(|r| vj[r * n + col] * vh[r * n + col]).sum();
+        assert!(dot_j.abs() > 0.999_999_999);
     }
 }
