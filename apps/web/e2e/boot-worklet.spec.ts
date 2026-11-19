@@ -5,6 +5,7 @@ import {
   setupErrorMonitoring,
   unlockAudioEngine,
   waitAudioBlocks,
+  waitForAudioRms,
 } from './helpers/audio-diag';
 
 test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
@@ -125,7 +126,7 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
             return d ? `${d.status}:${d.contextState}` : 'missing';
           });
         },
-        { timeout: 15_000 },
+        { timeout: 15_000, intervals: [25] },
       )
       .toBe('ready:running');
 
@@ -135,10 +136,12 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
     await expect
       .poll(async () => parseInt((await page.getByTestId('hud-voices').textContent()) ?? '0', 10), {
         timeout: 3000,
+        intervals: [25],
       })
       .toBeGreaterThanOrEqual(1);
 
-    await waitAudioBlocks(page, 48);
+    await waitForAudioRms(page, 0.002, 4000, { minFreq: 400, maxFreq: 500 });
+    await waitAudioBlocks(page, 16);
     const audio = await sampleDestinationAudio(page, 400, 500);
     expect(audio.nonFiniteCount).toBe(0);
     expect(audio.peak).toBeLessThanOrEqual(1.0);
@@ -148,12 +151,15 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
 
     // Verify HUD Peak Hold / RMS / SPL calibration (-18 dBFS == 82.0 dB SPL) and true max/overrun fields.
     await expect
-      .poll(async () => {
-        return page.evaluate(() => {
-          const d = window.__PIANO_DIAG__;
-          return d && Number.isFinite(d.splDb) && d.peakHoldDbfs > -60 ? 1 : 0;
-        });
-      })
+      .poll(
+        async () => {
+          return page.evaluate(() => {
+            const d = window.__PIANO_DIAG__;
+            return d && Number.isFinite(d.splDb) && d.peakHoldDbfs > -60 ? 1 : 0;
+          });
+        },
+        { timeout: 3000, intervals: [25] },
+      )
       .toBe(1);
 
     const hudCheck = await page.evaluate(() => {
@@ -189,7 +195,7 @@ test.describe('Wasm AudioWorklet Boot & Baseline Suite', () => {
     expect(Number.isInteger(hudCheck.overruns) && hudCheck.overruns >= 0).toBe(true);
     expect(hudCheck.isClipping).toBe(false);
 
-    // Confirm auto-release after 750ms pulse decays audio cleanly.
+    // Confirm auto-release after 2000ms pulse decays audio cleanly.
     await expectAudioDecay(page, audio.rms, 0.25, 3000);
     assertNoErrors();
   });

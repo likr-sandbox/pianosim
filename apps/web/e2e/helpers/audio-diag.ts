@@ -274,12 +274,13 @@ export async function waitForAudioRms(
   page: Page,
   minRms = 0.002,
   timeoutMs = 4000,
+  options?: AudioSampleOptions,
 ): Promise<AudioSampleStats> {
   let last: AudioSampleStats | null = null;
   await expect
     .poll(
       async () => {
-        last = await sampleDestinationAudio(page);
+        last = await sampleDestinationAudio(page, options);
         expect(last.nonFiniteCount).toBe(0);
         expect(last.peak).toBeLessThanOrEqual(1.0);
         return last.rms;
