@@ -6,21 +6,23 @@
 
 ---
 
-## D1：Web単一スレッド `AudioWorklet` ＋ 専用 Prep Web Worker ＋ エネルギー地平線縮退
+## D1：Web 2系統実行（`PerfProfile` 19ノブ＋`Full` オフライン逐次 MIDI＋`Balanced`/`Realtime` ライブ試奏）
 
-1. **現在の採用判断（確定構成）**:
-   - M6/M7 初期までの「全2.6万モード無条件毎サンプル更新＋Worklet内同期IR合成＋`+relaxed-simd`」は、実測で D1 検知シグナル（予算 `1.87 ms` 超過、非 `relaxed-simd` 環境での `fmaf` 低速化、`set_space`/`set_voicing` による数十 ms 停止）を踏んだため、D1 第1段階フォールバックおよび D3 第2段階フォールバックを発動・統合した。
-   - **確定構成**: `COOP/COEP` ヘッダ不要の単一スレッド `AudioWorklet`（`48 kHz` 固定、`+simd128` 単一バイナリ、`+relaxed-simd`・`fmaf` 不使用）＋ **専用 Prep Web Worker（`SpacePrepContext` / `VoicingPrepContext` + `BlobStreamer` 共有ステージング＋`Transferable ArrayBuffer`）** を採用する。品質ティア切替は行わず全88鍵・230本・約2.6万モードの物理定義を維持した上で、① ビット完全一致のゼロスキップ、② 物理エネルギー地平線（`-115〜-120 dB`）による有効モード縮退（FTO #4/#7準拠：倍音関係の条件分岐なし）、③ サステイン踏下中の減衰済み鍵の受動共鳴降格、④ SAV ループ融合＋`-55 dB` 平滑休眠を実施する。
+1. **現在の採用判断（改訂構成）**:
+   - 当初は単一プロファイルのまま全約2.6万モードを Web `AudioWorklet` 上で常時実時間再生する方針を採っていたが、実測で `Balanced` 20音持続ですら最適化前の Chromium `AudioWorklet` 上で `p99 = 2,343.8 us > 1,866.7 us`（D1 予算 70% 超過）に達し、単一スレッドのブラウザ実時間制約下では `Full` 物理品質の稠密なポリフォニー再生と両立しないことが判明した。
+   - このため `COOP/COEP` ヘッダ不要の単一スレッド `AudioWorklet`（`48 kHz` 固定、`+simd128` 単一バイナリ、`+relaxed-simd`・`fmaf` 不使用）＋ Prep Web Worker の基盤を維持した上で、以下の3本柱へ改訂した：
+     1. **19パラメータ POD `PerfProfile`（`Full` / `Balanced` / `Realtime`）**: Stage 1〜4 の計算密度と簡略化を明示的にパラメータ化。
+     2. **Case B 逐次ストリーミング・オフライン MIDI 再生**: デモおよびユーザー `.mid` ファイル再生は専用 `offline-render-worker.ts` ＋ `OfflineStreamPlayer`（`1.5 s` 初回＋`0.75 s` チャンク）で **`Full` プロファイル** にて生成・再生・WAV 出力し、`AudioWorklet` は既定 **`Balanced`** でのライブ鍵盤／Web MIDI 試奏に専念する。
+     3. **ゼロスパイク転送＆RTホットパス最適化**: `BlobStreamer` の `2,048` float 転送と `piano_space_chunk_ptr` スタンバイ直接書き込み＋16分割遅延クリア、11ブロック漸進 `VoicingCommitState`、`464`-SoA 間引き `DamperPadBank`、自弦内モード次数別エネルギー地平線（`1..=8` vs `>8`）を適用する。
 2. **引き続き見送る選択肢**:
-   - ① 品質プロファイル切替（`Ultra / Standard / Eco`）による物理モデル上限・音質ティア分割
-   - ② 倍音関係に基づく選択的共鳴計算（FTO #7 抵触リスク）
-   - ③ `SharedArrayBuffer` ＋ Wasm Threads マルチスレッド弦並列化（静的ホストで `coi-serviceworker` が必要）
-3. **判断理由**: 静的ホスト互換（`COOP/COEP` 不要）と全主要ブラウザ（Chrome/Edge/Firefox/Safari 16.4+）単一バイナリ動作を維持しつつ、`AudioWorklet` の D1 予算内（48 kHz `128` サンプル `2.67 ms` の 70%＝`1.87 ms` 未満）へ収めるため。なお `96 kHz` ネイティブ駆動はオフライン CLI 検証専用とし、Web 版は `48 kHz` 固定で OS/ブラウザのリサンプラへ委ねる。
+   - ① 倍音関係に基づく他鍵間の選択的共鳴計算（FTO #7 抵触リスク）
+   - ② `SharedArrayBuffer` ＋ Wasm Threads マルチスレッド弦並列化（静的ホストで `coi-serviceworker` が必要）
+3. **判断理由**: 静的ホスト互換（`COOP/COEP` 不要）と主要ブラウザ単一バイナリ動作を守りながら、デモ・書き出し音源では `Full` の音響品質を一切妥協せず、ライブ試奏でも `Realtime` 構成で `bench:web` アンダーラン／ストール 0 件（`p99 < 1.87 ms`）を安定達成するため。
 4. **さらなる判断誤りの検知シグナル**:
-   - 上記構成でも 48 kHz `AudioWorklet` で `p99 > 1.87 ms`（70%超過）またはアンダーランが再現する場合、あるいはモバイル端末で常時 30% 超となる場合。
+   - ライブ鍵盤試奏の `Realtime` プロファイルでも 48 kHz `AudioWorklet` で `p99 > 1.87 ms` または連続アンダーランが再現する場合、あるいは `Full` プロファイルでのポリフォニー Web ライブ演奏が必須要件となった場合。
 5. **残存リカバリ移行手順**:
    - **事前仕込み**: `piano-strings::modal_soa` は4モード（`F32x4`）境界＋弦単位レンジ境界整列を維持し、全モードの物理状態・係数・エネルギー地平線が完全に独立並列更新可能なレイアウトを保つ。
-   - **第2段階フォールバック（マルチコア解放）**: `apps/web` に `coi-serviceworker` を追加して `COOP/COEP` を有効化し、Wasm Threads によって 230本の弦 SoA レンジを複数 Worker へ分割並列化する。
+   - **マルチコア解放シーム**: `apps/web` に `coi-serviceworker` を追加して `COOP/COEP` を有効化し、Wasm Threads によって 230本の弦 SoA レンジを複数 Worker へ分割並列化する。
 
 ---
 
@@ -36,39 +38,39 @@
 
 ---
 
-## D3：ビルド時構造モード同梱＋Prep Web Worker 非同期 IR・FFT 事前計算
+## D3：ビルド時構造モード同梱＋Prep / Offline Worker 非同期計算
 
-1. **現在の採用判断（Wave 3 拡張反映版）**: ビルド時に `piano-body-gen`（`15×20` 直交異方性 Ritz ソルバ＋~16.5 kHz 統計的 Rayleigh モード）で3種の `.pbdy` アセット（`1,305〜1,372` モード）を算出し同梱。Web 実行時は `AudioContext` 固定 `48 kHz` に合わせて **Prep Web Worker** で9ゾーン×L/R（18経路、0.5秒 IR＋`3.8 kHz` HPF 統計ベルベット拡散テール＋NUPOLS 事前 FFT スペクトル）および重い調律変更計算を非同期実行し、`Transferable ArrayBuffer` でゼロコピー転送して 8 ms 二乗余弦クロスフェードで切り替える（`hammer_hardness` 単体変更と `HallFdn` リバーブパラメータは Worklet 内で即時更新）。CLI・単体テストは任意レート（44.1 / 48 / 96 kHz）同期構築を用いる。
+1. **現在の採用判断（`v0.3.0` 反映版）**: ビルド時に `piano-body-gen`（`15×20` 直交異方性 Ritz ソルバ＋~16.5 kHz 統計的 Rayleigh モード）で3種の `.pbdy` アセット（`1,287〜1,338` モード、各 `< 65 KB`）を算出し同梱。Web 実行時は `AudioContext` 固定 `48 kHz` に合わせて **Prep Web Worker** が9ゾーン×L/R（最大0.5秒 IR＋`3.8 kHz` HPF ベルベットテール＋可変 NUPOLS / `BlockFftHead` 用スペクトルを収めた **`SpaceBlob` v2 `SPACE_BLOB_MAGIC_V2`**）および `VoicingBlob` を非同期生成し、`BlobStreamer`（`2,048` float）が `piano_space_chunk_ptr` へのスタンバイ直接書き込み（8 ms 二乗余弦クロスフェード）および `11` ブロック `VoicingCommitState` でゼロスパイク適用する。またオフライン MIDI 再生は **`offline-render-worker.ts`** へオフロードする（`hammer_hardness` 単体と `HallFdn` は Worklet 内即時反映）。
 2. **今回見送った選択肢**:
    - ① 48 kHz 基準の長尺 IR 波形バイナリ（数MB〜十数MB）をビルド時レンダリングして配信し、他サンプルレート時はリサンプリングする方式
    - ② ブラウザ起動時に毎回2次元異方性板・空気室の数値シミュレーションから直接 IR を計算する方式
    - ③ `AudioWorklet` 内で空間変更・調律変更時に同期再計算する方式（初期実装でスパイクを起こし棄却）
-3. **判断理由**: 小容量配信（各 `.pbdy < 500 KB`）・任意空間リアルタイム変更を維持しつつ、`AudioWorklet` コールバック内の合成スパイク（`0 ms`）を完全に排除するため。
+3. **判断理由**: 小容量配信（各 `.pbdy < 65 KB`）・任意空間リアルタイム変更を維持しつつ、`AudioWorklet` コールバック内の合成・コミットスパイク（`0 ms`）を完全に排除するため。
 4. **検知シグナルと対処済み内容**:
-   - `AudioWorklet` 上での同期合成による音声ドロップは Prep Web Worker 化で解消済み。
-   - 高域（`> 3.5 kHz`）の拡散残響密度不足に対しては、Wave 3 にて `ir_synth` の `3.8 kHz` HPF ベルベットテールおよび Stage 4 後段の `HallFdn`（3D ER + 8×8 Hadamard FDN）を導入し解消した。
+   - `AudioWorklet` 上での同期合成および最終チャンク一括コミットによる `4〜5 ms` スパイクは、Prep Worker ＋ `piano_space_chunk_ptr` スタンバイ直接書き込み＋11ブロック `VoicingCommitState` で解消済み。
+   - 高域（`> 3.5 kHz`）拡散残響不足は `ir_synth` の `3.8 kHz` HPF ベルベットテールと Stage 4 `HallFdn` で解消済み。
 5. **残存する拡張境界**:
-   - `piano-radiator::ir_synth` / `partitioned_fft` と `PianoEngine` の境界は POD 事前計算ブロブ（`SpaceBlob` / `VoicingBlob`）渡しとして分離されており、Worker 転送・ネイティブ同期双方でビット同一の結果を得る。さらなる高域／空間拡張時は `piano-body-gen` の極追加または `HallFdn` 拡張で対応可能。
+   - `piano-radiator::ir_synth` / `partitioned_fft` と `PianoEngine` の境界は POD 事前計算ブロブ（`SpaceBlob` v2 / `VoicingBlob`）渡しとして分離されており、Worker 転送・ネイティブ同期双方でビット同一の結果を得る。さらなる高域／空間拡張時は `piano-body-gen` の極追加または `HallFdn` 拡張で対応可能。
 
 ---
 
 ## D4：9ゾーン×ステレオ出力＋4聴取視点＋マクロボイシング／調律編集
 
-1. **現在の採用判断（Wave 3/4 拡張反映版）**: 空間出力は8ブリッジゾーン＋1棚板ゾーンのステレオ 2ch 畳み込み（18経路）＋`HallFdn` に統一し、3ボディ（`ConcertGrand` / `UprightStudio` / `VintageSaloon`）、4聴取視点（`Player` / `CloseStereo` / `ConcertHall` / `BinauralHrtf`）、大屋根3状態（`Closed` / `Half` / `Open`）、ホール残響（`decay` / `mix`）、およびマクロボイシング／調律（ハンマー硬度・ユニゾン揺らぎ・ストレッチ調律・弦長・A4 ピッチ `392.0..466.2 Hz`・古典4音律・経年変化 `Condition`・4音色プリセット・3種 Touch Curve）を提供する。
+1. **現在の採用判断（`PerfProfile` 拡張反映版）**: 空間出力は8ブリッジゾーン＋1棚板ゾーンのステレオ 2ch 畳み込み（18経路、必要に応じ `spatial_tail_split_tap` 以降をステレオ2ch集約）＋`HallFdn` に統一し、3ボディ（`ConcertGrand` / `UprightStudio` / `VintageSaloon`）、4聴取視点（`Player` / `CloseStereo` / `ConcertHall` / `BinauralHrtf`）、大屋根3状態（`Closed` / `Half` / `Open`）、ホール残響（`decay` / `mix`）、マクロボイシング／調律（ハンマー硬度・ユニゾン揺らぎ・ストレッチ調律・弦長・A4 ピッチ `392.0..466.2 Hz`・古典4音律・経年変化 `Condition`・4音色プリセット・3種 Touch Curve）、および `PerfPanel`（3プリセット・19ノブ）を提供する。
 2. **引き続き見送る選択肢**:
    - ① 3D 空間内での最大8本仮想マイクの自由配置（座標・指向性可変ミキサー）とマルチチャンネル出力
    - ② 88鍵個別（ノート単位）の手動 GUI ボイシングエディタ
-3. **不採用とした理由**: Web 構成における計算経路数（18経路 vs 64経路以上）と UI 複雑性を適切に制御するため。
+3. **不採用とした理由**: Web 構成における計算経路数と UI 複雑性を適切に制御するため。
 4. **判断誤りの検知シグナル**: 将来の DAW プラグイン化において、自由マイクワーク（マルチチャンネル出力）や特定鍵のみの整音 UI が要求された場合。
 5. **事前仕込みとリカバリ移行手順**:
-   - **事前仕込み**: `piano-spec::voicing` のデータ型は「グローバル基準値 ＋ `NoteVoicingOffset[88]`（初期値ゼロ、現在 `Condition` マクロで実利用済み）」として設計されており、`piano-radiator::ir_synth` の視点射影も3D座標・指向性重み関数として抽象化されている。
+   - **事前仕込み**: `piano-spec::voicing` のデータ型は「グローバル基準値 ＋ `NoteVoicingOffset[88]`（初期値ゼロ、`Condition` マクロで実利用済み）」として設計されており、`piano-radiator::ir_synth` の視点射影も3D座標・指向性重み関数として抽象化されている。
    - **移行手順**: コア物理エンジンを壊さず、出力バス配列の拡張とノート別エディタパネルの追加のみで段階的に機能解放する。
 
 ---
 
-## D5：Webアプリ＋ネイティブ CLI（ベンチ／シナリオ／WAV書き出し）構成（単体アプリ・DAW プラグインは将来枠）
+## D5：Webアプリ＋ネイティブ CLI（ベンチ／音響診断／WAV書き出し）構成
 
-1. **現在の採用判断**: コアエンジン（`piano-engine`）はサンプル正確・MIDI 2.0 16bit 対応のアロケーションフリー API として設計し、実装対象は Web スタジオアプリ（`apps/web`、24-bit TPDF / 32-bit float WAV 録音含む）とネイティブ検証・ベンチマーク・WAV 書き出し CLI（`piano-cli`）に限定する。
+1. **現在の採用判断**: コアエンジン（`piano-engine`）はサンプル正確・MIDI 2.0 16bit 対応のアロケーションフリー API として設計し、実装対象は Web スタジオアプリ（`apps/web`、逐次オフライン MIDI 再生・WAV 録画含む）とネイティブ検証・ベンチマーク・診断・WAV 書き出し CLI（`piano-cli`：`bench` [`bench_prep.rs` マイクロ秒分離含む]・`scenarios`・`render-wav`・`render-demos`・`diag-{radiator,bridge,hammer,buzz}`）に限定する。
 2. **今回見送った選択肢**: `cpal`＋`midir` によるネイティブリアルタイム単体アプリ、または `nih-plug` による VST3 / CLAP プラグインの同時開発。
 3. **不採用とした理由**: ブラウザ実稼働とオフライン物理検証までの最短距離を確保するため。
 4. **判断誤りの検知シグナル**: ブラウザ固有の `128` サンプル `AudioWorklet` 量子や Web MIDI の OS ドライバジッタにより、超低遅延（`64` サンプル＝`1.33 ms` 以下）での実機検証が阻害される場合。
@@ -97,7 +99,7 @@
 
 ## D8：録音波形を一切使わない純粋物理モデリング単独方式
 
-1. **現在の採用判断（Wave 2 拡張反映版）**: サンプル波形や録音メカノイズを一切使用せず、楽音からダンパー段階剥離（`MAX_PEEL_SLOTS = 24`）および棚板打鍵・離鍵衝撃（`KeybedBank` → Zone 8）までを純粋物理演算で生成する。
+1. **現在の採用判断（`v0.3.0` 拡張反映版）**: サンプル波形や録音メカノイズを一切使用せず、アグラフ短弦反射リップル（`AgraffeDelayLine`）、`damper_phi` 高域粘弾性ロールオフ＋位相不変半踏テール、ダンパー段階剥離（`MAX_PEEL_SLOTS = 24`）、および棚板打鍵・離鍵衝撃（`KeybedBank` → Zone 8）までを純粋物理演算で生成する。
 2. **今回見送った選択肢**: マルチサンプリング波形または録音された機構ノイズを併用するハイブリッド方式。
 3. **不採用とした理由**: 連続ダイナミクス・無制限再打弦・極小容量・クリーンルーム FTO を純粋物理で完結させるため。
 4. **判断誤りの検知シグナル**: ダンパーフェルトの離着摩擦音やペダルロッドの作動音など、非楽音メカノイズの表現をさらに拡張したい場合。
