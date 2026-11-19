@@ -15,8 +15,12 @@ pub(crate) fn snap_control_decim(decim: u8) -> u8 {
         1
     } else if decim <= 3 {
         2
-    } else {
+    } else if decim <= 6 {
         4
+    } else if decim <= 12 {
+        8
+    } else {
+        16
     }
 }
 
@@ -26,9 +30,20 @@ pub(crate) fn alpha_for_decim(alpha_1x: f32, decim: u8) -> f32 {
     match decim {
         1 => alpha_1x,
         2 => 1.0 - one_m * one_m,
+        4 => {
+            let p2 = one_m * one_m;
+            1.0 - p2 * p2
+        }
+        8 => {
+            let p2 = one_m * one_m;
+            let p4 = p2 * p2;
+            1.0 - p4 * p4
+        }
         _ => {
-            let sq = one_m * one_m;
-            1.0 - sq * sq
+            let p2 = one_m * one_m;
+            let p4 = p2 * p2;
+            let p8 = p4 * p4;
+            1.0 - p8 * p8
         }
     }
 }
@@ -41,10 +56,11 @@ fn alpha_for_step(alpha_1x: f32, step: usize) -> f32 {
         1 => alpha_1x,
         2 => 1.0 - one_m * one_m,
         3 => 1.0 - one_m * one_m * one_m,
-        _ => {
+        4 => {
             let sq = one_m * one_m;
             1.0 - sq * sq
         }
+        _ => 1.0 - crate::damper_pad_symp::pow_usize(one_m, step),
     }
 }
 

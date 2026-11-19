@@ -30,6 +30,10 @@ fn full_profile_preserves_exact_d2dab9c_baseline_parity() {
     assert_eq!(full.sanitized(), full);
     assert!(full.is_full_mode_counts());
     assert!(!full.is_dead_mode_pruning_enabled());
+    assert_eq!(
+        full.low_order_energy_horizon_sq().to_bits(),
+        1.0e-18_f32.to_bits()
+    );
     assert_eq!(full.energy_horizon_sq().to_bits(), 1.0e-18_f32.to_bits());
     assert_eq!(full.sav_dormancy_ratio().to_bits(), 1.581e-6_f64.to_bits());
     assert_eq!(full.action_oversample, 8);
@@ -53,8 +57,12 @@ fn balanced_and_realtime_thresholds_convert_accurately() {
     assert_eq!(bal.sanitized(), bal);
     assert!(bal.is_dead_mode_pruning_enabled());
     assert!(!bal.is_full_mode_counts());
+    assert_eq!(bal.damper_control_decim, 8);
+    let bal_low = bal.low_order_energy_horizon_sq();
+    let expected_bal_low = 10.0_f64.powf((-112.0 - 60.0) / 10.0) as f32;
+    assert!((bal_low - expected_bal_low).abs() <= 1e-6 * expected_bal_low);
     let bal_eh = bal.energy_horizon_sq();
-    let expected_bal_eh = 10.0_f64.powf((-92.0 - 60.0) / 10.0) as f32;
+    let expected_bal_eh = 10.0_f64.powf((-96.0 - 60.0) / 10.0) as f32;
     assert!((bal_eh - expected_bal_eh).abs() <= 1e-6 * expected_bal_eh);
     let bal_sav = bal.sav_dormancy_ratio();
     let expected_bal_sav = 0.5 * 10.0_f64.powf(-42.0 / 10.0);
@@ -64,8 +72,12 @@ fn balanced_and_realtime_thresholds_convert_accurately() {
     assert_eq!(rt.sanitized(), rt);
     assert!(rt.is_dead_mode_pruning_enabled());
     assert!(!rt.is_full_mode_counts());
+    assert_eq!(rt.damper_control_decim, 16);
+    let rt_low = rt.low_order_energy_horizon_sq();
+    let expected_rt_low = 10.0_f64.powf((-108.0 - 60.0) / 10.0) as f32;
+    assert!((rt_low - expected_rt_low).abs() <= 1e-6 * expected_rt_low);
     let rt_eh = rt.energy_horizon_sq();
-    let expected_rt_eh = 10.0_f64.powf((-88.0 - 60.0) / 10.0) as f32;
+    let expected_rt_eh = 10.0_f64.powf((-84.0 - 60.0) / 10.0) as f32;
     assert!((rt_eh - expected_rt_eh).abs() <= 1e-6 * expected_rt_eh);
     let rt_sav = rt.sav_dormancy_ratio();
     let expected_rt_sav = 0.5 * 10.0_f64.powf(-38.0 / 10.0);
@@ -77,6 +89,7 @@ fn sanitized_clamps_bounds_replaces_nan_and_snaps_discrete_fields() {
     let dirty = PerfProfile {
         horiz_max_hz: f32::NAN,
         dead_mode_prune_db: -5.0,
+        low_order_energy_horizon_db: f32::NAN,
         energy_horizon_db: f32::NAN,
         sav_dormancy_db: -999.0,
         sav_max_key_idx: 87,
@@ -97,6 +110,7 @@ fn sanitized_clamps_bounds_replaces_nan_and_snaps_discrete_fields() {
     let clean = dirty.sanitized();
     assert_eq!(clean.horiz_max_hz, 20_000.0);
     assert_eq!(clean.dead_mode_prune_db, -20.0);
+    assert_eq!(clean.low_order_energy_horizon_db, -120.0);
     assert_eq!(clean.energy_horizon_db, -120.0);
     assert_eq!(clean.sav_dormancy_db, -80.0);
     assert_eq!(clean.sav_max_key_idx, 52);
@@ -108,6 +122,43 @@ fn sanitized_clamps_bounds_replaces_nan_and_snaps_discrete_fields() {
     assert_eq!(clean.action_oversample, 4);
     assert_eq!(clean.damper_control_decim, 2);
     assert_eq!(clean.active_bridge_poles, 4);
+
+    // Verify damper_control_decim snaps to {1, 2, 4, 8, 16}.
+    for &(raw, expected) in &[
+        (0_u8, 1_u8),
+        (1, 1),
+        (2, 2),
+        (3, 2),
+        (4, 4),
+        (6, 4),
+        (7, 8),
+        (8, 8),
+        (12, 8),
+        (13, 16),
+        (16, 16),
+        (255, 16),
+    ] {
+        let p = PerfProfile {
+            damper_control_decim: raw,
+            ..PerfProfile::full()
+        }
+        .sanitized();
+        assert_eq!(p.damper_control_decim, expected, "raw={raw}");
+    }
+
+    // Verify low_order_energy_horizon_db clamps to [-120.0, -40.0].
+    let lo_clamp = PerfProfile {
+        low_order_energy_horizon_db: -200.0,
+        ..PerfProfile::full()
+    }
+    .sanitized();
+    assert_eq!(lo_clamp.low_order_energy_horizon_db, -120.0);
+    let hi_clamp = PerfProfile {
+        low_order_energy_horizon_db: -10.0,
+        ..PerfProfile::full()
+    }
+    .sanitized();
+    assert_eq!(hi_clamp.low_order_energy_horizon_db, -40.0);
 
     // Check Copy semantics.
     fn assert_copy<T: Copy>() {}

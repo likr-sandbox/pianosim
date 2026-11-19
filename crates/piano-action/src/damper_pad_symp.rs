@@ -4,9 +4,10 @@
 use piano_spec::{DAMPED_KEYS, TOTAL_STRINGS};
 
 use crate::damper_pad::{
-    DamperPadBank, ENGAGE_ONSET_M, EPS_DAMP_HYST, HYST_DAMP_GAIN, INV_ENGAGE_HALF_M,
-    MAX_PASSIVE_PORT_RATIO, MIN_CLOSED_LINEAR_CLEAR_M,
+    DamperPadBank, DAMPER_PAD_SLOTS, ENGAGE_ONSET_M, EPS_DAMP_HYST, HYST_DAMP_GAIN,
+    INV_ENGAGE_HALF_M, MAX_PASSIVE_PORT_RATIO, MIN_CLOSED_LINEAR_CLEAR_M,
 };
+use crate::pedals::CLEARANCE_OPEN_M;
 
 /// Smooth `C^2`-continuous Hunt-Crossley wool-fiber engagement curve (`g = g' = g'' = 0` at `3 um`),
 /// preventing `1x` host-rate corner buzzing during half-pedal grazing contact.
@@ -47,27 +48,47 @@ pub(crate) fn passive_damp_force(c_raw: f32, safe_r: f32, v_mps: f32) -> f32 {
     (-c_eff * v_mps) / (1.0 + 0.5 * safe_r * c_eff)
 }
 
+#[inline(always)]
+pub(crate) fn passive_damp_gain(c_raw: f32, safe_r: f32) -> f32 {
+    let c_eff = if c_raw * safe_r > MAX_PASSIVE_PORT_RATIO && safe_r > 0.0 {
+        MAX_PASSIVE_PORT_RATIO / safe_r
+    } else {
+        c_raw
+    };
+    -c_eff / (1.0 + 0.5 * safe_r * c_eff)
+}
+
 impl DamperPadBank {
     /// Relaxes damper felt hysteresis states `(z_pos, z_neg)` across `sub` contact-free samples
     /// when positive damper clearance (`y_clear > 0`) exceeds string excursion.
     #[inline]
     pub fn relax_open_gap_chunk(&mut self, str_idx: usize, sub: usize) {
         let sv_idx = str_idx * 2;
-        if sv_idx + 2 > self.slots.len() {
+        if sv_idx + 2 > DAMPER_PAD_SLOTS {
             return;
         }
-        let [sv, sh] = &mut self.slots[sv_idx..sv_idx + 2] else {
-            return;
-        };
-        sv.adaa_pos.sync_x(0.0);
-        sv.adaa_neg.sync_x(0.0);
-        sh.adaa_pos.sync_x(0.0);
-        sh.adaa_neg.sync_x(0.0);
-        if sv.z_pos != 0.0 || sv.z_neg != 0.0 || sh.z_pos != 0.0 || sh.z_neg != 0.0 {
+        let sh_idx = sv_idx + 1;
+        self.soa.adaa_pos_x[sv_idx] = 0.0;
+        self.soa.adaa_neg_x[sv_idx] = 0.0;
+        self.soa.adaa_pos_x[sh_idx] = 0.0;
+        self.soa.adaa_neg_x[sh_idx] = 0.0;
+        self.soa.yc_cached[sv_idx] = CLEARANCE_OPEN_M;
+        self.soa.yc_cached[sh_idx] = CLEARANCE_OPEN_M;
+        self.soa.mode_linear[sv_idx] = 0.0;
+        self.soa.mode_linear[sh_idx] = 0.0;
+        self.soa.decim_phase[sv_idx] = 0;
+        self.soa.decim_phase[sh_idx] = 0;
+        let zv_p = self.soa.z_pos[sv_idx];
+        let zv_n = self.soa.z_neg[sv_idx];
+        let zh_p = self.soa.z_pos[sh_idx];
+        let zh_n = self.soa.z_neg[sh_idx];
+        if zv_p != 0.0 || zv_n != 0.0 || zh_p != 0.0 || zh_n != 0.0 {
             let a_pow = pow_usize(self.a_damp_felt, sub);
             let flush = |z: f32| if z.abs() < 1.0e-20 { 0.0 } else { z };
-            (sv.z_pos, sv.z_neg) = (flush(sv.z_pos * a_pow), flush(sv.z_neg * a_pow));
-            (sh.z_pos, sh.z_neg) = (flush(sh.z_pos * a_pow), flush(sh.z_neg * a_pow));
+            self.soa.z_pos[sv_idx] = flush(zv_p * a_pow);
+            self.soa.z_neg[sv_idx] = flush(zv_n * a_pow);
+            self.soa.z_pos[sh_idx] = flush(zh_p * a_pow);
+            self.soa.z_neg[sh_idx] = flush(zh_n * a_pow);
         }
     }
 
@@ -95,21 +116,20 @@ impl DamperPadBank {
         let u_eq = -y_clear_m * 1000.0_f32;
         let phi_eq = self.lut.eval_f(u_eq);
         let sv_idx = str_idx * 2;
-        let [sv, sh] = &mut self.slots[sv_idx..sv_idx + 2] else {
-            return None;
-        };
-        if (sv.z_pos - phi_eq).abs() > 1.0e-5
-            || (sv.z_neg - phi_eq).abs() > 1.0e-5
-            || (sh.z_pos - phi_eq).abs() > 1.0e-5
-            || (sh.z_neg - phi_eq).abs() > 1.0e-5
+        let sh_idx = sv_idx + 1;
+        let zv = self.soa.z_pos[sv_idx];
+        let zh = self.soa.z_pos[sh_idx];
+        if (zv - phi_eq).abs() > 1.0e-5
+            || (self.soa.z_neg[sv_idx] - phi_eq).abs() > 1.0e-5
+            || (zh - phi_eq).abs() > 1.0e-5
+            || (self.soa.z_neg[sh_idx] - phi_eq).abs() > 1.0e-5
         {
             return None;
         }
-        sv.adaa_pos.sync_x(u_eq);
-        sv.adaa_neg.sync_x(u_eq);
-        sh.adaa_pos.sync_x(u_eq);
-        sh.adaa_neg.sync_x(u_eq);
-        let (zv, zh) = (sv.z_pos, sh.z_pos);
+        self.soa.adaa_pos_x[sv_idx] = u_eq;
+        self.soa.adaa_neg_x[sv_idx] = u_eq;
+        self.soa.adaa_pos_x[sh_idx] = u_eq;
+        self.soa.adaa_neg_x[sh_idx] = u_eq;
         Some(self.eval_symp_linear_gains(key_idx, r_dv, r_dh, y_clear_m, phi_eq, zv, zh))
     }
 
@@ -147,16 +167,15 @@ impl DamperPadBank {
         let phi_avg = (p0 + 4.0 * pm + p1) * (1.0 / 6.0);
         let a_pow = pow_usize(self.a_damp_felt, sub);
         let one_m_ap = 1.0 - a_pow;
-        let [sv, sh] = &mut self.slots[str_idx * 2..str_idx * 2 + 2] else {
-            return None;
-        };
-        let (zv0, zh0) = (sv.z_pos, sh.z_pos);
+        let sv_idx = str_idx * 2;
+        let sh_idx = sv_idx + 1;
+        let (zv0, zh0) = (self.soa.z_pos[sv_idx], self.soa.z_pos[sh_idx]);
         let (zv1, zh1) = (
             a_pow * zv0 + one_m_ap * phi_avg,
             a_pow * zh0 + one_m_ap * phi_avg,
         );
-        sv.reset_to_preload(-c1 * 1000.0, zv1);
-        sh.reset_to_preload(-c1 * 1000.0, zh1);
+        self.soa.reset_slot(sv_idx, -c1 * 1000.0, zv1, c1);
+        self.soa.reset_slot(sh_idx, -c1 * 1000.0, zh1, c1);
         let (gv0, gh0) = self.eval_symp_linear_gains(key_idx, r_dv, r_dh, c0, p0, zv0, zh0);
         let (gvm, ghm) = self.eval_symp_linear_gains(
             key_idx,

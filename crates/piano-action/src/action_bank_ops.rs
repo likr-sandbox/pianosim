@@ -103,10 +103,11 @@ impl ActionBank {
             p_grid,
             decimation_fir: DecimationFir::for_oversample(perf.action_oversample),
             pedals: PedalBank::new_with_decim(sr, perf.damper_control_decim),
-            damper_pad: DamperPadBank::new(sr, voicing),
+            damper_pad: DamperPadBank::new_with_decim(sr, voicing, perf.damper_control_decim),
             keybed: KeybedBank::new(sr),
             keys: keys.into_boxed_slice(),
             hammer_voicing: voicing.sanitized(),
+            scale_specs: specs,
             key_hardness_applied: [voicing.effective_global_hammer_hardness(); NUM_KEYS],
         }
     }
@@ -131,6 +132,7 @@ impl ActionBank {
         }
         self.perf.damper_control_decim = p.damper_control_decim;
         self.pedals.set_control_decim(p.damper_control_decim);
+        self.damper_pad.set_control_decim(p.damper_control_decim);
         self.perf.polynomial_adaa = if self.p_grid.is_some() {
             p.polynomial_adaa
         } else {
@@ -155,7 +157,6 @@ impl ActionBank {
         if p.action_oversample != self.perf.action_oversample {
             let os = p.action_oversample;
             let sr_f64 = f64::from(self.sample_rate);
-            let specs = build_scale_design(&self.hammer_voicing);
             self.felt_coeffs = FeltSharedCoeffs::new_oversampled(sr_f64, os);
             self.decimation_fir = DecimationFir::for_oversample(os);
             for (k, slot) in self.keys.iter_mut().enumerate() {
@@ -168,7 +169,7 @@ impl ActionBank {
                 );
                 slot.poly_adaa = PolyPowerApprox::new(slot.felt_spec.exponent_p);
                 slot.agraffe
-                    .set_oversample(os, k, sr_f64, &self.hammer_voicing, &specs);
+                    .set_oversample(os, k, sr_f64, &self.hammer_voicing, &self.scale_specs);
                 if usize::from(os) < slot.hammer.prev_sub_forces.len() {
                     slot.hammer.prev_sub_forces[usize::from(os)..].fill(0.0);
                 }
@@ -291,13 +292,50 @@ impl ActionBank {
         }
     }
 
+    /// Preloads sanitized voicing and precomputed 88-key physical parameters prior to
+    /// incremental [`Self::update_voicing_key`] commits, avoiding any duplicate `build_scale_design`.
+    pub fn set_voicing_scale_specs(
+        &mut self,
+        spec: &VoicingSpec,
+        specs: &[StringPhysicalParams; NUM_KEYS],
+    ) {
+        self.hammer_voicing = spec.sanitized();
+        self.scale_specs = *specs;
+    }
+
+    /// Updates felt stiffness/scaling, agraffe delay, and damper pad impedance in-place for a
+    /// single key `k` from precomputed `phys` without calling `build_scale_design`.
+    pub fn update_voicing_key(
+        &mut self,
+        k: usize,
+        spec: &VoicingSpec,
+        phys: &StringPhysicalParams,
+    ) {
+        if k >= NUM_KEYS {
+            return;
+        }
+        let sr = f64::from(self.sample_rate);
+        let os = self.perf.action_oversample;
+        self.hammer_voicing = spec.sanitized();
+        self.scale_specs[k] = *phys;
+        self.key_hardness_applied[k] = self.hammer_voicing.hammer_hardness;
+        if let Some(slot) = self.keys.get_mut(k) {
+            slot.felt_spec
+                .update_voicing_in_place_oversampled(k, sr, &self.hammer_voicing, os);
+            slot.poly_adaa = PolyPowerApprox::new(slot.felt_spec.exponent_p);
+            slot.agraffe
+                .update_voicing(k, sr, &self.hammer_voicing, &self.scale_specs);
+        }
+        self.damper_pad.update_voicing_key(k, phys);
+    }
+
     /// Updates felt stiffness/scaling and damper pad impedance smoothly in-place
     /// for `voicing` with zero heap allocations, zero locks, and zero panics.
     pub fn update_voicing_in_place(&mut self, voicing: &VoicingSpec) {
         let sr = f64::from(self.sample_rate);
         let os = self.perf.action_oversample;
         self.hammer_voicing = voicing.sanitized();
-        let specs = build_scale_design(&self.hammer_voicing);
+        self.scale_specs = build_scale_design(&self.hammer_voicing);
         self.key_hardness_applied
             .fill(self.hammer_voicing.hammer_hardness);
         for (key_idx, slot) in self.keys.iter_mut().enumerate() {
@@ -309,9 +347,9 @@ impl ActionBank {
             );
             slot.poly_adaa = PolyPowerApprox::new(slot.felt_spec.exponent_p);
             slot.agraffe
-                .update_voicing(key_idx, sr, &self.hammer_voicing, &specs);
+                .update_voicing(key_idx, sr, &self.hammer_voicing, &self.scale_specs);
         }
         self.damper_pad
-            .update_voicing_in_place(&self.hammer_voicing);
+            .update_voicing_in_place_from_specs(&self.scale_specs);
     }
 }

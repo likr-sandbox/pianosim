@@ -202,7 +202,7 @@ fn smooth_c2_engagement_suppresses_hf_grazing_buzz_and_shallow_preload_gains_mat
         let _ =
             b_step.step_damper_pair(39, s_idx, 1.0e-6, 0.001, 0.08, 1.0e-6, 0.001, 0.06, 5.0e-5);
     }
-    assert!((b_chunk.slots[s_idx * 2].z_pos - b_step.slots[s_idx * 2].z_pos).abs() < 1.0e-6);
+    assert!((b_chunk.soa.z_pos[s_idx * 2] - b_step.soa.z_pos[s_idx * 2]).abs() < 1.0e-6);
 }
 
 #[test]
@@ -218,8 +218,8 @@ fn engage_gates_felt_hysteresis_below_onset_and_across_lin_lim() {
         let _ = bank.step_damper_sample(39, slot_v, -1.5e-3, -1.0, 0.08, -3.0e-4);
         let _ = bank.step_damper_sample(39, slot_h, 1.5e-3, 1.0, 0.06, -3.0e-4);
     }
-    assert!(bank.slots[slot_v].z_pos > 1.0e-5);
-    assert!(bank.slots[slot_v].z_neg > 1.0e-5);
+    assert!(bank.soa.z_pos[slot_v] > 1.0e-5);
+    assert!(bank.soa.z_neg[slot_v] > 1.0e-5);
 
     // 1. s_sum = 2.9 um <= ENGAGE_ONSET_M (3 um) must yield exact 0.0 even with primed hysteresis.
     let f_sub_onset = bank.step_damper_sample(39, slot_v, 4.29e-5, 0.25, 0.08, 4.0e-5);
@@ -265,4 +265,218 @@ fn engage_gates_felt_hysteresis_below_onset_and_across_lin_lim() {
         rel_jump < 1.0e-3,
         "lin_lim discontinuity: f_below={f_below}, f_above={f_above}, rel={rel_jump}"
     );
+}
+
+#[test]
+fn soa_buffers_are_64_byte_aligned_464_padded_and_decim_8_16_preserve_fto3_passivity() {
+    use crate::damper_pad_simd::{DAMPER_PAD_LANES, DAMPER_PAD_PADDED};
+
+    let bank = DamperPadBank::new_with_decim(48_000.0, &VoicingSpec::default(), 8);
+    assert_eq!(bank.control_decim(), 8);
+    assert_eq!(DAMPER_PAD_PADDED, 464);
+    assert_eq!(DAMPER_PAD_LANES, 116);
+    for buf in [
+        &bank.soa.c_nom,
+        &bank.soa.f_scale,
+        &bank.soa.yc_cached,
+        &bank.soa.engage_cached,
+        &bank.soa.g_eff_cached,
+        &bank.soa.c_hyst_cached,
+        &bank.soa.f_bias_cached,
+        &bank.soa.adaa_pos_x,
+        &bank.soa.adaa_neg_x,
+        &bank.soa.z_pos,
+        &bank.soa.z_neg,
+        &bank.soa.r_cached,
+        &bank.soa.mode_linear,
+        &bank.soa.active_mask,
+    ] {
+        assert_eq!(buf.len(), 464);
+        assert_eq!(buf.padded_len(), 464);
+        assert_eq!(buf.lane_vec_len(), 116);
+        assert_eq!(buf.as_ptr() as usize % 64, 0);
+    }
+    assert!(bank.soa.active_mask[..352].iter().all(|&m| m == 1.0));
+    assert!(bank.soa.active_mask[352..].iter().all(|&m| m == 0.0));
+
+    // Verify FTO #3 unilateral contact, passivity, and smooth grazing under decim 8 and 16.
+    let s_idx = usize::from(key_choir(39).unwrap().first_string_idx);
+    let slot_v = s_idx * 2;
+    let w0 = TAU * 261.63;
+    for &decim in &[2_u8, 4, 8, 16] {
+        let mut b = DamperPadBank::new_with_decim(48_000.0, &VoicingSpec::default(), decim);
+        b.lift_key_open(39);
+        // Step 0 primes yc_cached = +4e-5 in air gap, then substeps 1..decim must stay 0 in air gap
+        // and engage smoothly as soon as |y| > yc_cached + 3 um.
+        for i in 0..512 {
+            let t = (i as f64) / 48_000.0;
+            let y = (8.0e-5 * (w0 * t).sin()) as f32;
+            let v = (8.0e-5 * w0 * (w0 * t).cos()) as f32;
+            let f = b.step_damper_sample(39, slot_v, y, v, 0.08, 4.0e-5);
+            assert!(f.is_finite());
+            // Strict passivity: f * v <= 0.0.
+            assert!(
+                f * v <= 0.0,
+                "passivity fail decim={decim} step={i}: f={f} v={v}"
+            );
+            // Strict FTO #3 air-gap isolation: |y| <= yc + 3 um => exact 0.0.
+            if y.abs() <= 4.3e-5 {
+                assert_eq!(f, 0.0, "air-gap leak decim={decim} step={i}: y={y} f={f}");
+            }
+        }
+        // Closed-linear preload under decim must match steady-state damping within 0.5%.
+        b.reset();
+        let f_decim = b.step_damper_sample(39, slot_v, 1.0e-6, 0.2, 0.08, -3.0e-4);
+        let f_decim_sub = b.step_damper_sample(39, slot_v, 1.0e-6, 0.2, 0.08, -3.0e-4);
+        let mut b_ref = DamperPadBank::new(48_000.0, &VoicingSpec::default());
+        let f_ref = b_ref.step_damper_sample(39, slot_v, 1.0e-6, 0.2, 0.08, -3.0e-4);
+        assert!((f_decim - f_ref).abs() / f_ref.abs() < 5.0e-3);
+        assert!((f_decim_sub - f_ref).abs() / f_ref.abs() < 5.0e-3);
+    }
+}
+
+#[test]
+fn batch_simd_damper_matches_scalar_and_handles_decim_8_16() {
+    use crate::damper_pad_simd::DAMPER_PAD_PADDED;
+
+    let voicing = VoicingSpec::default();
+    let mut bank_simd = DamperPadBank::new_with_decim(48_000.0, &voicing, 1);
+    let mut bank_ref = DamperPadBank::new_with_decim(48_000.0, &voicing, 1);
+    let mut yd = [0.0_f32; DAMPER_PAD_PADDED];
+    let mut vd = [0.0_f32; DAMPER_PAD_PADDED];
+    let mut rp = [0.08_f32; DAMPER_PAD_PADDED];
+    let mut yc = [4.0e-5_f32; DAMPER_PAD_PADDED];
+    let mut out = [0.0_f32; DAMPER_PAD_PADDED];
+
+    let s39 = usize::from(key_choir(39).unwrap().first_string_idx) * 2;
+    let s0 = usize::from(key_choir(0).unwrap().first_string_idx) * 2;
+    bank_simd.lift_key_open(39);
+    bank_ref.lift_key_open(39);
+    bank_simd.lift_key_open(0);
+    bank_ref.lift_key_open(0);
+
+    for step in 0..64 {
+        let ph = (step as f32) * 0.09;
+        yd[s39] = 1.4e-4 * ph.sin();
+        vd[s39] = 0.6 * ph.cos();
+        yd[s0] = -1.8e-4 * (ph * 0.7).cos();
+        vd[s0] = 0.4 * (ph * 0.7).sin();
+        rp[s39] = 0.08;
+        rp[s0] = 0.12;
+        yc[s39] = 3.5e-5;
+        yc[s0] = -2.0e-5;
+
+        bank_simd.step_damper_batch_simd(&yd, &vd, &rp, &yc, &mut out, step);
+        let ref_39 = bank_ref.step_damper_sample(39, s39, yd[s39], vd[s39], rp[s39], yc[s39]);
+        let ref_0 = bank_ref.step_damper_sample(0, s0, yd[s0], vd[s0], rp[s0], yc[s0]);
+        assert!(
+            (out[s39] - ref_39).abs() <= 1.0e-5 * ref_39.abs().max(1.0e-6),
+            "step={step} s39 simd={} ref={ref_39}",
+            out[s39]
+        );
+        assert!(
+            (out[s0] - ref_0).abs() <= 1.0e-3 * ref_0.abs().max(1.0e-6),
+            "step={step} s0 simd={} ref={ref_0}",
+            out[s0]
+        );
+        assert!(out[352..].iter().all(|&x| x == 0.0));
+    }
+
+    for &decim in &[8_u8, 16] {
+        let mut b = DamperPadBank::new_with_decim(48_000.0, &voicing, decim);
+        b.lift_key_open(39);
+        for step in 0..64 {
+            let ph = (step as f32) * 0.12;
+            yd[s39] = 6.0e-5 * ph.sin();
+            vd[s39] = 0.4 * ph.cos();
+            yc[s39] = 4.0e-5;
+            b.step_damper_batch_simd(&yd, &vd, &rp, &yc, &mut out, step);
+            assert!(out[s39].is_finite() && out[s39] * vd[s39] <= 0.0);
+            if yd[s39].abs() <= 4.3e-5 {
+                assert_eq!(out[s39], 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn pedal_decim_8_16_and_action_update_voicing_key_match_full_in_place() {
+    use crate::pedals::PedalBank;
+    use crate::ActionBank;
+    use piano_spec::{build_scale_design, PedalKind, PerfProfile, NUM_KEYS};
+
+    // 1. PedalBank control_decim 8 and 16 preserve half-pedal settle and peel pulse parity.
+    let run_pedal = |decim: u8| -> (f32, f32) {
+        let mut p = PedalBank::new_with_decim(48_000.0, decim);
+        assert_eq!(p.control_decim(), decim);
+        let (mut clears, mut peels) = ([0.0_f32; 8], [0.0_f32; 8]);
+        p.note_on(39);
+        p.set_pedal(PedalKind::Sustain, 32_768);
+        p.note_off(39, 32_768);
+        for _ in 0..800 {
+            let _ = p.step_key_clearance_tile_with_peel(39, 8, &mut clears, &mut peels);
+        }
+        let hp = p.damper_clearance_m(39);
+        p.set_pedal(PedalKind::Sustain, 0);
+        for _ in 0..800 {
+            let _ = p.step_key_clearance_tile_with_peel(39, 8, &mut clears, &mut peels);
+        }
+        p.set_pedal(PedalKind::Sustain, u16::MAX);
+        let mut peak = 0.0_f32;
+        for _ in 0..300 {
+            let _ = p.step_key_clearance_tile_with_peel(39, 8, &mut clears, &mut peels);
+            for &v in &peels {
+                peak = peak.max(v);
+            }
+        }
+        (hp, peak)
+    };
+    let (hp1, pk1) = run_pedal(1);
+    for decim in [8_u8, 16] {
+        let (hpd, pkd) = run_pedal(decim);
+        assert!((hpd - hp1).abs() < 3.0e-6, "decim={decim}: {hpd} vs {hp1}");
+        assert!(
+            (5.0e-4..=2.0e-3).contains(&pkd) && (pkd - pk1).abs() / pk1 < 0.12,
+            "decim={decim}: {pkd} vs {pk1}"
+        );
+    }
+
+    // 2. ActionBank::update_voicing_key matches update_voicing_in_place across all 88 keys.
+    let base = VoicingSpec::default();
+    let mut alt = VoicingSpec {
+        a4_freq_hz: 444.0,
+        hammer_hardness: 0.78,
+        string_length_scale: 1.06,
+        stretch_amount: 0.90,
+        ..VoicingSpec::default()
+    };
+    alt.note_offsets[39].hammer_hardness_offset = -0.15;
+    alt.note_offsets[39].pitch_cents = 7.0;
+    alt.note_offsets[39].inharmonicity_scale = -0.15;
+
+    let mut bank_bulk = ActionBank::new_with_profile(48_000.0, &base, &PerfProfile::full());
+    let mut bank_key = ActionBank::new_with_profile(48_000.0, &base, &PerfProfile::full());
+    bank_bulk.update_voicing_in_place(&alt);
+
+    let specs = build_scale_design(&alt);
+    bank_key.set_voicing_scale_specs(&alt, &specs);
+    for (k, phys) in specs.iter().enumerate().take(NUM_KEYS) {
+        bank_key.update_voicing_key(k, &alt, phys);
+    }
+
+    for k in [0_usize, 24, 39, 48, 69, 87] {
+        bank_bulk.note_on(k, 48_000);
+        bank_key.note_on(k, 48_000);
+        for _ in 0..64 {
+            let fb = bank_bulk.step_hammer_sample(k, 0.0, 0.0, 0.05);
+            let fk = bank_key.step_hammer_sample(k, 0.0, 0.0, 0.05);
+            assert_eq!(fb.to_bits(), fk.to_bits(), "hammer mismatch k={k}");
+        }
+    }
+    for k in [0_usize, 24, 39, 48, 69] {
+        let slot = usize::from(key_choir(k).unwrap().first_string_idx) * 2;
+        let fb = bank_bulk.step_damper_sample(k, slot, 1.5e-4, 0.35, 0.08, -3.0e-4);
+        let fk = bank_key.step_damper_sample(k, slot, 1.5e-4, 0.35, 0.08, -3.0e-4);
+        assert_eq!(fb.to_bits(), fk.to_bits(), "damper mismatch k={k}");
+    }
 }

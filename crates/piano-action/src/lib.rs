@@ -8,12 +8,13 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
-use piano_spec::{PerfProfile, VoicingSpec, CHOIR_LAYOUTS, NUM_KEYS};
+use piano_spec::{PerfProfile, StringPhysicalParams, VoicingSpec, CHOIR_LAYOUTS, NUM_KEYS};
 
 mod action_bank_ops;
 pub mod agraffe_delay;
 pub mod borin_k;
 pub mod damper_pad;
+mod damper_pad_simd;
 mod damper_pad_symp;
 pub mod decimation_fir;
 pub mod felt_stulov;
@@ -65,6 +66,7 @@ pub struct ActionBank {
     pub(crate) keybed: KeybedBank,
     pub(crate) keys: Box<[KeyActionSlot]>,
     pub(crate) hammer_voicing: VoicingSpec,
+    pub(crate) scale_specs: [StringPhysicalParams; NUM_KEYS],
     pub(crate) key_hardness_applied: [f32; NUM_KEYS],
 }
 

@@ -39,7 +39,11 @@ pub struct PerfProfile {
     pub horiz_max_hz: f32,
     /// Tail mode pruning threshold (dB relative to fundamental excitation); `<= -120.0` disables.
     pub dead_mode_prune_db: f32,
-    /// Post-Stage-4 modal amplitude horizon (dB) below which decaying modes truncate to zero.
+    /// Post-Stage-4 modal amplitude horizon (dB) below which decaying low-order modes (`1..=8`)
+    /// truncate to zero.
+    pub low_order_energy_horizon_db: f32,
+    /// Post-Stage-4 modal amplitude horizon (dB) below which decaying high-order modes (`> 8`)
+    /// truncate to zero.
     pub energy_horizon_db: f32,
     /// Nonlinear SAV energy ratio threshold (dB) below which SAV enters smooth dormancy.
     pub sav_dormancy_db: f32,
@@ -69,7 +73,7 @@ pub struct PerfProfile {
     pub polynomial_adaa: bool,
     /// Enables Timoshenko flexible hammer shank bending dynamics.
     pub shank_flex_enabled: bool,
-    /// Damper pad clearance control decimation factor (`1`, `2`, or `4`).
+    /// Damper pad clearance control decimation factor (`1`, `2`, `4`, `8`, or `16`).
     pub damper_control_decim: u8,
 
     // Stage 3: Bridge
@@ -86,6 +90,7 @@ impl PerfProfile {
         Self {
             horiz_max_hz: 20_000.0,
             dead_mode_prune_db: -120.0,
+            low_order_energy_horizon_db: -120.0,
             energy_horizon_db: -120.0,
             sav_dormancy_db: -55.0,
             sav_max_key_idx: 52,
@@ -111,7 +116,8 @@ impl PerfProfile {
         Self {
             horiz_max_hz: 3_500.0,
             dead_mode_prune_db: -50.0,
-            energy_horizon_db: -92.0,
+            low_order_energy_horizon_db: -112.0,
+            energy_horizon_db: -96.0,
             sav_dormancy_db: -42.0,
             sav_max_key_idx: 39,
             bass_phantom_sparse: true,
@@ -124,7 +130,7 @@ impl PerfProfile {
             action_oversample: 4,
             polynomial_adaa: true,
             shank_flex_enabled: true,
-            damper_control_decim: 2,
+            damper_control_decim: 8,
             hertz_nonlinear: false,
             active_bridge_poles: 8,
         }
@@ -136,7 +142,8 @@ impl PerfProfile {
         Self {
             horiz_max_hz: 2_800.0,
             dead_mode_prune_db: -45.0,
-            energy_horizon_db: -88.0,
+            low_order_energy_horizon_db: -108.0,
+            energy_horizon_db: -84.0,
             sav_dormancy_db: -38.0,
             sav_max_key_idx: 26,
             bass_phantom_sparse: true,
@@ -149,7 +156,7 @@ impl PerfProfile {
             action_oversample: 4,
             polynomial_adaa: true,
             shank_flex_enabled: false,
-            damper_control_decim: 4,
+            damper_control_decim: 16,
             hertz_nonlinear: false,
             active_bridge_poles: 8,
         }
@@ -177,6 +184,12 @@ impl PerfProfile {
                 full.dead_mode_prune_db,
                 -120.0,
                 -20.0,
+            ),
+            low_order_energy_horizon_db: sanitize_clamp(
+                self.low_order_energy_horizon_db,
+                full.low_order_energy_horizon_db,
+                -120.0,
+                -40.0,
             ),
             energy_horizon_db: sanitize_clamp(
                 self.energy_horizon_db,
@@ -223,17 +236,21 @@ impl PerfProfile {
         self.dead_mode_prune_db > -120.0
     }
 
+    /// Converts `low_order_energy_horizon_db` into Stage 2 modal `(u^2 + v^2)` horizon threshold
+    /// for low-order modes (`1..=8`).
+    ///
+    /// Returns exact `1.0e-18` when `low_order_energy_horizon_db <= -120.0`.
+    #[must_use]
+    pub fn low_order_energy_horizon_sq(&self) -> f32 {
+        energy_horizon_db_to_sq(self.low_order_energy_horizon_db)
+    }
+
     /// Converts `energy_horizon_db` into Stage 2 modal `(u^2 + v^2)` horizon threshold.
     ///
     /// Returns exact `1.0e-18` when `energy_horizon_db <= -120.0`.
     #[must_use]
     pub fn energy_horizon_sq(&self) -> f32 {
-        let db = sanitize_clamp(self.energy_horizon_db, -120.0, -120.0, -40.0);
-        if db <= -120.0 {
-            1.0e-18
-        } else {
-            exp_f64(((f64::from(db) - 60.0) / 10.0) * LN_10) as f32
-        }
+        energy_horizon_db_to_sq(self.energy_horizon_db)
     }
 
     /// Converts `sav_dormancy_db` into the `E_nl / (2 * E_lin)` SAV dormancy ratio.
@@ -308,13 +325,27 @@ const fn snap_action_oversample(v: u8) -> u8 {
 }
 
 #[inline]
+fn energy_horizon_db_to_sq(raw_db: f32) -> f32 {
+    let db = sanitize_clamp(raw_db, -120.0, -120.0, -40.0);
+    if db <= -120.0 {
+        1.0e-18
+    } else {
+        exp_f64(((f64::from(db) - 60.0) / 10.0) * LN_10) as f32
+    }
+}
+
+#[inline]
 const fn snap_damper_control_decim(v: u8) -> u8 {
     if v <= 1 {
         1
     } else if v <= 3 {
         2
-    } else {
+    } else if v <= 6 {
         4
+    } else if v <= 12 {
+        8
+    } else {
+        16
     }
 }
 
