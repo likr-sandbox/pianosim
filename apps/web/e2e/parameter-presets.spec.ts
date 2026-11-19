@@ -5,6 +5,7 @@ import {
   setupErrorMonitoring,
   unlockAudioEngine,
   waitAudioBlocks,
+  waitForAudioRms,
   waitForPrepIdle,
   waitForSilence,
 } from './helpers/audio-diag';
@@ -107,24 +108,22 @@ test.describe('E2E Parameter Presets Suite', () => {
   test('Preset switching during a sounding chord causes zero NaNs, clicks, or dropouts', async ({
     page,
   }) => {
-    // Hold sustain pedal down
+    // Hold sustain pedal down and use forte strike velocity
+    await setSlider(page, 'velocity-slider', 112);
     await setSlider(page, 'sustain-slider', 1.0);
 
-    // Strike C major triad (C4=60, E4=64, G4=67)
-    for (const key of [60, 64, 67]) {
-      const keyEl = page.locator(`[data-midi="${key}"]`);
-      await keyEl.dispatchEvent('pointerdown', { buttons: 1 });
-      await waitAudioBlocks(page, 16);
-      await keyEl.dispatchEvent('pointerup', { buttons: 0 });
-    }
-
-    await waitAudioBlocks(page, 48);
-    const initialStats = await sampleDestinationAudio(page);
-    expect(initialStats.rms).toBeGreaterThan(0.003);
-
-    // Rapidly cycle through presets while chord rings out
+    // Strike/re-strike [48, 60, 64, 67] right before each preset swap so each swap
+    // measures one PrepWorker transition without cumulative decay across 4 presets.
     const presetIds = ['intimate-upright', 'bright-pop', 'vintage-saloon', 'concert-grand'];
     for (const pid of presetIds) {
+      for (const key of [48, 60, 64, 67]) {
+        const keyEl = page.locator(`[data-midi="${key}"]`);
+        await keyEl.dispatchEvent('pointerdown', { buttons: 1 });
+        await keyEl.dispatchEvent('pointerup', { buttons: 0 });
+      }
+      await waitAudioBlocks(page, 16);
+      await waitForAudioRms(page, 0.003);
+
       await page.getByTestId(`preset-${pid}`).click();
       await waitForPrepIdle(page);
 

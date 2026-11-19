@@ -287,17 +287,34 @@ export async function runDirectWasmBench(page, repoRoot, wasmPath, presetId) {
           return { ...d, blob: copyPrepBlob(len) };
         });
 
-        const CHUNK = 8192;
+        const CHUNK = 2048;
         const streamSpace = (sp, rec) => {
           let off = 0;
           while (off < sp.blob.length) {
             const n = Math.min(CHUNK, sp.blob.length - off);
             const t0 = performance.now();
-            const ptr = wasm.piano_staging_ptr(ctx, n) >>> 0;
+            const ptr = wasm.piano_space_chunk_ptr(ctx) >>> 0;
+            if (ptr === 0) throw new Error('piano_space_chunk_ptr returned null');
             new Float32Array(wasm.memory.buffer).set(sp.blob.subarray(off, off + n), ptr >>> 2);
-            wasm.piano_stage_body_space_chunk(ctx, sp.body, sp.persp, sp.lid, off, n, sp.blob.length);
+            const stageRc = wasm.piano_stage_body_space_chunk(
+              ctx,
+              sp.body,
+              sp.persp,
+              sp.lid,
+              off,
+              n,
+              sp.blob.length,
+            );
+            if (stageRc !== 0) {
+              throw new Error(`piano_stage_body_space_chunk failed with rc=${stageRc} at off=${off}`);
+            }
             const isLast = off + n >= sp.blob.length;
-            if (isLast) wasm.piano_commit_body_space(ctx, sp.body, sp.persp, sp.lid);
+            if (isLast) {
+              const commitRc = wasm.piano_commit_body_space(ctx, sp.body, sp.persp, sp.lid);
+              if (commitRc !== 0) {
+                throw new Error(`piano_commit_body_space failed with rc=${commitRc}`);
+              }
+            }
             const us = (performance.now() - t0) * 1000.0;
             if (rec) {
               if (isLast) rec.commit.push(us);
@@ -321,18 +338,31 @@ export async function runDirectWasmBench(page, repoRoot, wasmPath, presetId) {
           while (off < vc.blob.length) {
             const n = Math.min(CHUNK, vc.blob.length - off);
             const ptr = wasm.piano_staging_offset_ptr(ctx, off, n) >>> 0;
+            if (ptr === 0) {
+              throw new Error(`piano_staging_offset_ptr returned null at off=${off}, n=${n}`);
+            }
             new Float32Array(wasm.memory.buffer).set(vc.blob.subarray(off, off + n), ptr >>> 2);
             off += n;
           }
           const memUs = (performance.now() - tMem0) * 1000.0;
           const tApp0 = performance.now();
-          wasm.piano_apply_voicing_blob_ex(
+          const rc = wasm.piano_apply_voicing_blob_ex(
             ctx, vc.h, vc.u, vc.st, vc.sc, vc.a4, vc.t, vc.c, vc.blob.length,
           );
           const appUs = (performance.now() - tApp0) * 1000.0;
+          if (rc !== 0) {
+            throw new Error(`piano_apply_voicing_blob_ex failed with rc=${rc}`);
+          }
           const tRen0 = performance.now();
           wasm.piano_render(ctx, 128);
           const renUs = (performance.now() - tRen0) * 1000.0;
+          let drainGuard = 0;
+          while (wasm.piano_is_voicing_applying(ctx) !== 0) {
+            if (++drainGuard > 64) {
+              throw new Error('piano_is_voicing_applying did not drain within 64 blocks');
+            }
+            wasm.piano_render(ctx, 128);
+          }
           if (rec) {
             rec.memcpy.push(memUs);
             rec.apply.push(appUs);
