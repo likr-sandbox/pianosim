@@ -42,7 +42,7 @@ test.describe('E2E MIDI & SMF Playback Suite (Offline Render + Live Web MIDI)', 
     await page.getByTestId('transport-stop').click();
     await expect(page.getByTestId('offline-render-status')).toHaveText('Ready');
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000, intervals: [25] })
       .toBeLessThan(1e-4);
     await expect(page.getByTestId('hud-voices')).toHaveText('0');
   });
@@ -57,14 +57,14 @@ test.describe('E2E MIDI & SMF Playback Suite (Offline Render + Live Web MIDI)', 
     await page.getByTestId('transport-pause').click();
     await expect(page.getByTestId('offline-render-status')).toHaveText('Paused');
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000, intervals: [25] })
       .toBeLessThan(initial.rms * 0.25);
 
     // Cached instant resume without re-rendering
     await page.getByTestId('transport-play').click();
     await expect(page.getByTestId('offline-render-status')).toHaveText('Playing');
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000, intervals: [25] })
       .toBeGreaterThan(0.005);
 
     await page.getByTestId('transport-stop').click();
@@ -93,7 +93,7 @@ test.describe('E2E MIDI & SMF Playback Suite (Offline Render + Live Web MIDI)', 
     await expect(page.getByTestId('hud-voices')).toHaveText('0');
     await expect(page.getByTestId('offline-render-status')).toHaveText('Ready');
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000, intervals: [25] })
       .toBeLessThan(1e-4);
     const stats = await sampleDestinationAudio(page);
     expect(stats.nonFiniteCount).toBe(0);
@@ -195,7 +195,7 @@ test.describe('E2E MIDI & SMF Playback Suite (Offline Render + Live Web MIDI)', 
     expect(dampedRms).toBeLessThan(onsetRms * 0.15);
 
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000, intervals: [25] })
       .toBeLessThan(0.001);
     await page.getByTestId('transport-stop').click();
   });
@@ -274,7 +274,7 @@ test.describe('E2E MIDI & SMF Playback Suite (Offline Render + Live Web MIDI)', 
 
     await dispatchMockMidi(page, [0xb0, 64, 0]);
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000, intervals: [25] })
       .toBeLessThan(0.0005);
   });
 
@@ -330,7 +330,7 @@ test.describe('E2E MIDI & SMF Playback Suite (Offline Render + Live Web MIDI)', 
     await expect(page.getByTestId('transport-play')).toBeEnabled();
     await expect(page.getByTestId('offline-cancel')).toBeDisabled();
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000, intervals: [25] })
       .toBeLessThan(1e-4);
 
     // Confirm clean post-invalidation recovery on subsequent Play.

@@ -66,7 +66,7 @@ test.describe('E2E Enriched Demo Scores Suite (Offline Worker)', () => {
       });
       await expect(page.getByTestId('hud-voices')).toHaveText('0');
       await expect
-        .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3_500 })
+        .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3_500, intervals: [25] })
         .toBeLessThan(Math.max(5e-4, playing.rms * 0.1));
     });
   }
@@ -104,14 +104,16 @@ test.describe('E2E Enriched Demo Scores Suite (Offline Worker)', () => {
     await expect
       .poll(
         async () => page.locator('.piano-key.active, .piano-key.is-active').count(),
-        { timeout: 3_000 },
+        { timeout: 3_000, intervals: [25] },
       )
       .toBeGreaterThan(0);
     await expect(page.getByTestId('hud-voices')).toHaveText('0');
 
     await page.getByTestId('transport-stop').click();
     await expect
-      .poll(async () => page.locator('.piano-key.active, .piano-key.is-active').count())
+      .poll(async () => page.locator('.piano-key.active, .piano-key.is-active').count(), {
+        intervals: [25],
+      })
       .toBe(0);
   });
 
@@ -140,7 +142,7 @@ test.describe('E2E Enriched Demo Scores Suite (Offline Worker)', () => {
     expect(await page.locator('.piano-key.is-active').count()).toBe(0);
     expect(Number(await page.getByTestId('transport-seek').inputValue())).toBeCloseTo(0, 1);
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3_000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3_000, intervals: [25] })
       .toBeLessThan(0.0005);
 
     // Immediate replay from t = 0 using cached render.

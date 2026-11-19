@@ -161,7 +161,7 @@ test.describe('Wave 1B: Offline Seek Pedals, WebMIDI & Touch Curve', () => {
       .poll(
         async () =>
           page.evaluate(() => `${window.__PIANO_DIAG__?.status}:${window.__PIANO_DIAG__?.contextState}`),
-        { timeout: 15_000 },
+        { timeout: 15_000, intervals: [25] },
       )
       .toBe('ready:running');
     await waitForAudioRms(page, 0.002);
@@ -229,7 +229,7 @@ test.describe('Wave 1B: Offline Seek Pedals, WebMIDI & Touch Curve', () => {
     await dispatchMockMidi(page, [0xb0, 66, 0]);
     await expect(page.getByTestId('pedal-sostenuto')).toHaveAttribute('aria-pressed', 'false');
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000, intervals: [25] })
       .toBeLessThan(sustained.rms * 0.25);
 
     await page.getByTestId('panic-btn').click();

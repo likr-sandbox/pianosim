@@ -57,7 +57,7 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
       .poll(async () => {
         const text = await page.getByTestId('hud-voices').textContent();
         return parseInt(text ?? '0', 10);
-      }, { timeout: 3000 })
+      }, { timeout: 3000, intervals: [25] })
       .toBeGreaterThanOrEqual(20);
 
     // Verify telemetry fields are structurally finite and non-negative
@@ -102,7 +102,7 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
     // Trigger panic button to silence engine
     await page.getByTestId('panic-btn').click();
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000, intervals: [25] })
       .toBeLessThan(1e-4);
   });
 
@@ -138,7 +138,7 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
             }
             return nonZeroCount > 10;
           }),
-        { timeout: 3000 },
+        { timeout: 3000, intervals: [25] },
       )
       .toBe(true);
 

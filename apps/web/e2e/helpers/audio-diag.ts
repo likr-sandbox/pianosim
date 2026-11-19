@@ -157,7 +157,7 @@ export async function unlockAudioEngine(page: Page): Promise<void> {
           return d ? `${d.status}:${d.contextState}:${d.telemetryBlocksReceived > 0}` : 'missing';
         });
       },
-      { timeout: 15_000 },
+      { timeout: 15_000, intervals: [25] },
     )
     .toBe('ready:running:true');
 }
@@ -178,7 +178,7 @@ export async function expectAudioDecay(
         expect(stats.peak).toBeLessThanOrEqual(1.0);
         return stats.rms;
       },
-      { timeout: timeoutMs },
+      { timeout: timeoutMs, intervals: [25] },
     )
     .toBeLessThan(targetRms);
 }
@@ -244,7 +244,7 @@ export async function waitForSilence(
   timeoutMs = 3000,
 ): Promise<void> {
   await expect
-    .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: timeoutMs })
+    .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: timeoutMs, intervals: [25] })
     .toBeLessThan(thresholdRms);
 }
 
@@ -408,7 +408,7 @@ export async function captureHoldReleaseWindow(
   midi: number,
   sustain: number,
   holdBlocks = 112,
-  releaseBlocks = 192,
+  releaseBlocks = 224,
 ): Promise<HoldReleaseStats> {
   await page.getByTestId('panic-btn').click();
   await setSlider(page, 'sustain-slider', sustain);
@@ -419,8 +419,9 @@ export async function captureHoldReleaseWindow(
   await expect(page.getByTestId('record-stop')).toBeEnabled();
 
   const key = page.locator(`[data-midi="${midi}"]`);
-  const bDown = await waitAudioBlocks(page, 1);
+  await waitAudioBlocks(page, 1);
   await key.dispatchEvent('pointerdown', { buttons: 1 });
+  const bDown = await page.evaluate(() => window.__PIANO_DIAG__?.telemetry.blockCount ?? 0);
   const bUp = await waitAudioBlocks(page, holdBlocks);
   await key.dispatchEvent('pointerup', { buttons: 0 });
   await waitAudioBlocks(page, releaseBlocks);

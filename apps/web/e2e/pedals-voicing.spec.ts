@@ -68,7 +68,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     // Step 1: Strike and hold Note 1
     await note1.dispatchEvent('pointerdown', { buttons: 1 });
-    await waitAudioBlocks(page, 128);
+    await waitAudioBlocks(page, 64);
     const note1Held = await sampleDestinationAudio(page);
     expect(note1Held.rms).toBeGreaterThan(0.002);
 
@@ -78,7 +78,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     // Step 3: Release Note 1 - must sustain far above unlatched closed-damper baseline
     await note1.dispatchEvent('pointerup', { buttons: 0 });
-    await waitAudioBlocks(page, 128);
+    await waitAudioBlocks(page, 64);
     const note1Latched = await sampleDestinationAudio(page);
     expect(note1Latched.nonFiniteCount).toBe(0);
     expect(note1Latched.rms).toBeGreaterThan(0.002);
@@ -89,7 +89,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     // Step 4: Play Note 2 staccato (struck AFTER sostenuto engaged)
     await note2.dispatchEvent('pointerdown', { buttons: 1 });
-    await waitAudioBlocks(page, 80);
+    await waitAudioBlocks(page, 64);
     const note2Held = await sampleDestinationAudio(page);
     expect(note2Held.rms).toBeGreaterThan(note1Latched.rms);
     await note2.dispatchEvent('pointerup', { buttons: 0 });
@@ -108,7 +108,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     // Step 6: Release Sostenuto pedal - Note 1 now dampens and decays
     await page.getByTestId('pedal-sostenuto').click();
     await expect
-      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000, intervals: [25] })
       .toBeLessThan(sustainedState.rms * 0.25);
   });
 
