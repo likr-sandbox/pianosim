@@ -75,14 +75,24 @@ impl FirHead {
     }
 
     pub(crate) fn set_active_taps(&mut self, taps: u8) {
+        if self.set_active_taps_layout(taps) {
+            self.reset();
+        }
+    }
+
+    pub(crate) fn set_active_taps_no_reset(&mut self, taps: u8) {
+        let _ = self.set_active_taps_layout(taps);
+    }
+
+    fn set_active_taps_layout(&mut self, taps: u8) -> bool {
         let new_taps = snap_head_taps(taps);
         if new_taps == self.active_taps {
-            return;
+            return false;
         }
         self.active_taps = new_taps;
         self.active_vecs = new_taps / 4;
         self.hist_offset = RING_LEN - (new_taps - 1);
-        self.reset();
+        true
     }
 
     /// Copy the first `active_taps` (`[0..active_taps)`) of all 18 zone-to-ear IRs

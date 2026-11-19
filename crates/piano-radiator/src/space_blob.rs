@@ -11,7 +11,8 @@ use piano_spec::{
     PRESET_RADIATOR_ZONES,
 };
 
-use crate::fir_head::{FIR_COEFFS_LEN, HEAD_TAPS};
+use crate::block_fft_head::{BLOCK_FFT_PARTITIONS, BLOCK_FFT_SIZE, BLOCK_FFT_SPEC_LEN};
+use crate::fir_head::{snap_head_taps, FIR_COEFFS_LEN, HEAD_TAPS};
 use crate::ir_synth::{
     ir_len_for_sample_rate, ir_len_for_sample_rate_secs, path_index, synthesize_irs_with_duration,
     IrSynthScratch, NUM_IR_PATHS,
@@ -19,7 +20,7 @@ use crate::ir_synth::{
 use crate::math::clamp_f64;
 use crate::nupols_collapse::{
     collapse_zone_spectra_causal, compute_mimo_p_count, compute_p_count, MAX_TIER_FFT_LEN,
-    TIER_CONFIGS,
+    SUB_TIER_16_CFG, SUB_TIER_32_CFG, TIER_CONFIGS,
 };
 use crate::{empty_fallback_preset, CONCERT_GRAND_PRESET_BYTES};
 
@@ -27,6 +28,31 @@ use crate::{empty_fallback_preset, CONCERT_GRAND_PRESET_BYTES};
 pub const SPACE_BLOB_MAGIC_V2: u32 = 0x5042_5351;
 /// Number of `f32` words in the v2 spatial NUPOLS blob header.
 pub const SPACE_BLOB_HEADER_LEN: usize = 8;
+/// Header flag bit 0: use 32-sample block-FFT head (`BlockFftHead`).
+pub const SPACE_BLOB_FLAG_BLOCK_FFT: u32 = 1 << 0;
+/// Header flag bit 1: blob includes precomputed `block_fft_head` or `sub_tier` spectra.
+pub const SPACE_BLOB_FLAG_HEAD_SPECTRA: u32 = 1 << 1;
+
+pub(crate) fn head_spectra_float_len(fir_block_fft: bool, head_taps: u8) -> usize {
+    if fir_block_fft {
+        BLOCK_FFT_PARTITIONS * NUM_IR_PATHS * BLOCK_FFT_SPEC_LEN * 2
+    } else {
+        let snapped = snap_head_taps(head_taps);
+        if snapped == 32 {
+            compute_p_count(SUB_TIER_32_CFG, HEAD_TAPS)
+                * NUM_IR_PATHS
+                * (SUB_TIER_32_CFG.block_size + 1)
+                * 2
+        } else if snapped == 16 {
+            compute_p_count(SUB_TIER_16_CFG, HEAD_TAPS)
+                * NUM_IR_PATHS
+                * (SUB_TIER_16_CFG.block_size + 1)
+                * 2
+        } else {
+            0
+        }
+    }
+}
 
 pub(crate) fn space_blob_len_for_params(ir_len: usize, split_tap: u16) -> usize {
     let mut spectra_floats = 0usize;
@@ -48,6 +74,7 @@ pub fn space_blob_len_for_profile(sample_rate: f64, profile: &PerfProfile) -> us
     let prof = profile.sanitized();
     let ir_len = ir_len_for_sample_rate_secs(sr, f64::from(prof.ir_duration_secs));
     space_blob_len_for_params(ir_len, prof.spatial_tail_split_tap)
+        + head_spectra_float_len(prof.fir_block_fft, prof.fir_head_taps)
 }
 
 /// Computes the maximum (`Full`) `f32` element count for preallocating staging buffers.
@@ -64,6 +91,8 @@ pub struct SpacePrepContext {
     profile: PerfProfile,
     scratch: IrSynthScratch,
     ffts: [RealFft; 4],
+    sub_fft_32: RealFft,
+    sub_fft_16: RealFft,
     time_scratch: AlignedBuf,
     collapse_buf: Vec<SplitComplexBuf>,
     spec_re: Vec<f32>,
@@ -117,11 +146,15 @@ impl SpacePrepContext {
                 RealFft::new(TIER_CONFIGS[2].block_size * 2),
                 RealFft::new(TIER_CONFIGS[3].block_size * 2),
             ],
+            sub_fft_32: RealFft::new(BLOCK_FFT_SIZE * 2),
+            sub_fft_16: RealFft::new(SUB_TIER_16_CFG.block_size * 2),
             time_scratch: AlignedBuf::zeroed(MAX_TIER_FFT_LEN),
             collapse_buf,
             spec_re: vec![0.0; max_spec],
             spec_im: vec![0.0; max_spec],
-            out_blob: Vec::with_capacity(space_blob_len_for_sample_rate(sr)),
+            out_blob: Vec::with_capacity(
+                space_blob_len_for_sample_rate(sr) + head_spectra_float_len(true, 32),
+            ),
         }
     }
 
@@ -207,7 +240,18 @@ impl SpacePrepContext {
         );
         let ir_len = self.scratch.ir_len;
         let split_tap = self.profile.spatial_tail_split_tap;
-        let flags = u32::from(self.profile.fir_block_fft);
+        let snapped_head = snap_head_taps(self.profile.fir_head_taps);
+        let block_fft = self.profile.fir_block_fft;
+        let head_spec_len = head_spectra_float_len(block_fft, snapped_head as u8);
+        let flags = if block_fft {
+            SPACE_BLOB_FLAG_BLOCK_FFT
+        } else {
+            0
+        } | if head_spec_len > 0 {
+            SPACE_BLOB_FLAG_HEAD_SPECTRA
+        } else {
+            0
+        };
 
         self.out_blob.clear();
         self.out_blob.push(f32::from_bits(SPACE_BLOB_MAGIC_V2));
@@ -288,6 +332,62 @@ impl SpacePrepContext {
                         let re = &mut self.spec_re[..spec_len];
                         let im = &mut self.spec_im[..spec_len];
                         collapse_zone_spectra_causal(&self.collapse_buf, fft, work, ch, re, im);
+                        self.out_blob.extend_from_slice(re);
+                        self.out_blob.extend_from_slice(im);
+                    }
+                }
+            }
+        }
+
+        if block_fft {
+            let b = BLOCK_FFT_SIZE;
+            let spec_len = self.sub_fft_32.spectrum_len();
+            let work = &mut work_all[..b * 2];
+            for p in 0..BLOCK_FFT_PARTITIONS {
+                let tap_start = p * b;
+                for z in 0..PRESET_RADIATOR_ZONES {
+                    for ch in 0..2 {
+                        let ir_base = path_index(z, ch) * ir_len;
+                        work.fill(0.0);
+                        let c_len = b.min(ir_len.saturating_sub(tap_start));
+                        if c_len > 0 {
+                            work[..c_len].copy_from_slice(
+                                &ir_flat[ir_base + tap_start..ir_base + tap_start + c_len],
+                            );
+                        }
+                        let re = &mut self.spec_re[..spec_len];
+                        let im = &mut self.spec_im[..spec_len];
+                        self.sub_fft_32.forward_split(work, re, im);
+                        self.out_blob.extend_from_slice(re);
+                        self.out_blob.extend_from_slice(im);
+                    }
+                }
+            }
+        } else if snapped_head < HEAD_TAPS {
+            let (cfg, fft) = if snapped_head <= 16 {
+                (SUB_TIER_16_CFG, &mut self.sub_fft_16)
+            } else {
+                (SUB_TIER_32_CFG, &mut self.sub_fft_32)
+            };
+            let p_count = compute_p_count(cfg, ir_len.min(HEAD_TAPS));
+            let b = cfg.block_size;
+            let spec_len = fft.spectrum_len();
+            let work = &mut work_all[..b * 2];
+            for p in 0..p_count {
+                let tap_start = cfg.ir_offset + p * b;
+                for z in 0..PRESET_RADIATOR_ZONES {
+                    for ch in 0..2 {
+                        let ir_base = path_index(z, ch) * ir_len;
+                        work.fill(0.0);
+                        let c_len = b.min(ir_len.saturating_sub(tap_start));
+                        if c_len > 0 {
+                            work[..c_len].copy_from_slice(
+                                &ir_flat[ir_base + tap_start..ir_base + tap_start + c_len],
+                            );
+                        }
+                        let re = &mut self.spec_re[..spec_len];
+                        let im = &mut self.spec_im[..spec_len];
+                        fft.forward_split(work, re, im);
                         self.out_blob.extend_from_slice(re);
                         self.out_blob.extend_from_slice(im);
                     }

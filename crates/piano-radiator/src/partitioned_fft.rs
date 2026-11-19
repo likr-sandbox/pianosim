@@ -15,6 +15,7 @@ use crate::nupols_collapse::{
     SUB_TIER_32_CFG, TIER_CONFIGS,
 };
 use crate::nupols_tier::NupolsTier;
+use crate::nupols_tier_ops::slice_range;
 use crate::partitioned_schedule::{fire_tier_1024, fire_tier_256, fire_tier_4096, TierFireCtx};
 
 /// Zero-allocation Staggered MIMO NUPOLS convolution tail (`taps 64..ir_len` + optional sub-tier).
@@ -101,6 +102,28 @@ impl NupolsTail {
         head_taps: u8,
         fir_block_fft: bool,
     ) {
+        self.set_stage4_config_inner(active_ir_len, split_tap, head_taps, fir_block_fft, true);
+    }
+
+    /// Reconfigure active Stage 4 parameters without resetting delay rings/FDLs.
+    pub(crate) fn set_stage4_config_no_reset(
+        &mut self,
+        active_ir_len: usize,
+        split_tap: u16,
+        head_taps: u8,
+        fir_block_fft: bool,
+    ) {
+        self.set_stage4_config_inner(active_ir_len, split_tap, head_taps, fir_block_fft, false);
+    }
+
+    fn set_stage4_config_inner(
+        &mut self,
+        active_ir_len: usize,
+        split_tap: u16,
+        head_taps: u8,
+        fir_block_fft: bool,
+        reset_on_change: bool,
+    ) {
         let clamped_ir = active_ir_len.clamp(1, self.max_ir_len);
         let snapped_head = snap_head_taps(head_taps) as u8;
         let new_delay = if fir_block_fft { BLOCK_FFT_SIZE } else { 0 };
@@ -112,15 +135,25 @@ impl NupolsTail {
         self.output_delay = new_delay;
 
         for tier in &mut self.tiers {
-            tier.set_active_layout(clamped_ir, split_tap);
+            if reset_on_change {
+                tier.set_active_layout(clamped_ir, split_tap);
+            } else {
+                tier.set_active_layout_no_reset(clamped_ir, split_tap);
+            }
         }
-        self.sub_tier_32
-            .set_active_layout(clamped_ir.min(HEAD_TAPS), split_tap);
-        self.sub_tier_16
-            .set_active_layout(clamped_ir.min(HEAD_TAPS), split_tap);
-
-        if timing_changed {
-            self.reset();
+        if reset_on_change {
+            self.sub_tier_32
+                .set_active_layout(clamped_ir.min(HEAD_TAPS), split_tap);
+            self.sub_tier_16
+                .set_active_layout(clamped_ir.min(HEAD_TAPS), split_tap);
+            if timing_changed {
+                self.reset();
+            }
+        } else {
+            self.sub_tier_32
+                .set_active_layout_no_reset(clamped_ir.min(HEAD_TAPS), split_tap);
+            self.sub_tier_16
+                .set_active_layout_no_reset(clamped_ir.min(HEAD_TAPS), split_tap);
         }
     }
 
@@ -214,6 +247,60 @@ impl NupolsTail {
             self.active_samples_rem = self
                 .active_samples_rem
                 .max(self.ir_len + IN_RING_LEN + 2 * MAX_TIER_FFT_LEN + self.output_delay);
+        }
+    }
+
+    pub(crate) fn import_sub_tier_ir_spectra(&mut self, src: &[f32]) -> bool {
+        if self.output_delay > 0 {
+            return src.is_empty();
+        }
+        if self.head_taps == 32 {
+            src.len() == self.sub_tier_32.ir_spectra_float_len()
+                && self.sub_tier_32.import_ir_spectra(src) == src.len()
+        } else if self.head_taps == 16 {
+            src.len() == self.sub_tier_16.ir_spectra_float_len()
+                && self.sub_tier_16.import_ir_spectra(src) == src.len()
+        } else {
+            src.is_empty()
+        }
+    }
+
+    pub(crate) fn import_sub_tier_ir_spectra_range(&mut self, sub_off: usize, src: &[f32]) {
+        if self.output_delay > 0 || src.is_empty() {
+            return;
+        }
+        if self.head_taps == 32 {
+            self.sub_tier_32.import_ir_spectra_range(0, sub_off, src);
+        } else if self.head_taps == 16 {
+            self.sub_tier_16.import_ir_spectra_range(0, sub_off, src);
+        }
+    }
+
+    pub(crate) fn clear_small_state(&mut self) {
+        self.sub_tier_32.reset();
+        self.sub_tier_16.reset();
+        for tier in &mut self.tiers {
+            tier.clear_small_state();
+        }
+        self.sample_pos = 0;
+        self.active_samples_rem = 0;
+        self.tail_clean = true;
+    }
+
+    pub(crate) fn clear_rings_and_fdl_slice(&mut self, slice_idx: usize, total_slices: usize) {
+        let (in_s, in_e) = slice_range(IN_RING_LEN, slice_idx, total_slices);
+        if in_s < in_e {
+            for r in &mut self.in_ring {
+                r.as_mut_slice()[in_s..in_e].fill(0.0);
+            }
+        }
+        let (out_s, out_e) = slice_range(OUT_RING_LEN, slice_idx, total_slices);
+        if out_s < out_e {
+            self.out_ring_l.as_mut_slice()[out_s..out_e].fill(0.0);
+            self.out_ring_r.as_mut_slice()[out_s..out_e].fill(0.0);
+        }
+        for tier in &mut self.tiers {
+            tier.clear_fdl_slice(slice_idx, total_slices);
         }
     }
 

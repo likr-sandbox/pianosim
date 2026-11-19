@@ -11,6 +11,8 @@ use crate::fir_head::{FirHead, HEAD_TAPS};
 use crate::ir_synth::{path_index, NUM_IR_PATHS};
 
 pub(crate) const BLOCK_FFT_SIZE: usize = 32;
+pub(crate) const BLOCK_FFT_PARTITIONS: usize = PARTITIONS;
+pub(crate) const BLOCK_FFT_SPEC_LEN: usize = BLOCK_FFT_SIZE + 1;
 const FFT_LEN: usize = BLOCK_FFT_SIZE * 2;
 const PARTITIONS: usize = 2;
 
@@ -130,6 +132,43 @@ impl BlockFftHead {
                     let (re, im) = spec.planes_mut();
                     self.fft.forward_split(&self.work, re, im);
                 }
+            }
+        }
+    }
+
+    pub(crate) fn import_ir_spectra(&mut self, src: &[f32]) -> bool {
+        let spec_len = self.fft.spectrum_len();
+        if src.len() != self.ir_spectra.len() * spec_len * 2 {
+            return false;
+        }
+        let mut off = 0usize;
+        for spec in &mut self.ir_spectra {
+            let (re, im) = spec.planes_mut();
+            re.copy_from_slice(&src[off..off + spec_len]);
+            off += spec_len;
+            im.copy_from_slice(&src[off..off + spec_len]);
+            off += spec_len;
+        }
+        true
+    }
+
+    pub(crate) fn import_ir_spectra_range(&mut self, head_off: usize, src: &[f32]) {
+        if src.is_empty() {
+            return;
+        }
+        let spec_len = self.fft.spectrum_len();
+        let src_end = head_off.saturating_add(src.len());
+        let mut cur = 0usize;
+        for spec in &mut self.ir_spectra {
+            let (re, im) = spec.planes_mut();
+            for plane in [re, im] {
+                let p_end = cur + spec_len;
+                let lo = cur.max(head_off);
+                let hi = p_end.min(src_end);
+                if lo < hi {
+                    plane[lo - cur..hi - cur].copy_from_slice(&src[lo - head_off..hi - head_off]);
+                }
+                cur = p_end;
             }
         }
     }

@@ -20,6 +20,7 @@ mod modal_prepare;
 mod modal_synth;
 mod nupols_collapse;
 mod nupols_tier;
+mod nupols_tier_ops;
 mod partitioned_fft;
 mod partitioned_schedule;
 mod pole_cancel_filter;
@@ -62,7 +63,8 @@ pub use piano_spec::{
 };
 pub use space_blob::{
     space_blob_len_for_profile, space_blob_len_for_sample_rate, SpacePrepContext,
-    SPACE_BLOB_HEADER_LEN, SPACE_BLOB_MAGIC_V2,
+    SPACE_BLOB_FLAG_BLOCK_FFT, SPACE_BLOB_FLAG_HEAD_SPECTRA, SPACE_BLOB_HEADER_LEN,
+    SPACE_BLOB_MAGIC_V2,
 };
 
 /// Deterministic physics-baked 9-zone concert-grand `PIANOBOD` asset.
@@ -78,6 +80,7 @@ pub struct RadiatorBank {
     lid_state: LidState,
     profile: PerfProfile,
     fir_block_fft: bool,
+    staged_blob_has_head_spectra: bool,
     scratch: IrSynthScratch,
     head: FirHead,
     block_fft_head: BlockFftHead,
@@ -180,6 +183,7 @@ impl RadiatorBank {
             lid_state,
             profile: prof,
             fir_block_fft: prof.fir_block_fft,
+            staged_blob_has_head_spectra: false,
             scratch: IrSynthScratch::new(max_ir_len),
             head: FirHead::new_with_taps(prof.fir_head_taps),
             block_fft_head: BlockFftHead::new(),
@@ -341,6 +345,25 @@ impl RadiatorBank {
         self.tail.reset();
         self.hall_fdn.reset();
         self.limiter.reset();
+    }
+
+    /// Incrementally zero runtime delay, filter, FDN, and NUPOLS FDL state across
+    /// `total_slices` deterministic slices (`slice_idx in 0..total_slices`) without
+    /// altering static IR spectra or Stage 4 layout configuration.
+    pub fn clear_runtime_state_slice(&mut self, slice_idx: usize, total_slices: usize) {
+        if total_slices == 0 || slice_idx >= total_slices {
+            return;
+        }
+        if slice_idx == 0 {
+            self.head.reset();
+            self.block_fft_head.reset();
+            self.limiter.reset();
+            self.tail.clear_small_state();
+        }
+        if slice_idx == (1 % total_slices) {
+            self.hall_fdn.reset();
+        }
+        self.tail.clear_rings_and_fdl_slice(slice_idx, total_slices);
     }
 
     /// Algorithmic latency in samples (`0` for direct FIR, `32` when `fir_block_fft` is active).
