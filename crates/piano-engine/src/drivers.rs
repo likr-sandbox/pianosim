@@ -31,6 +31,12 @@ impl KeyActionDriver for ActionDriver<'_> {
     }
 
     #[inline]
+    fn is_damper_settled_open(&self, key_idx: usize, clear_threshold_m: f32) -> Option<f32> {
+        self.action
+            .is_damper_settled_open(key_idx, clear_threshold_m)
+    }
+
+    #[inline]
     fn strike_weights(&self, key_idx: usize) -> [f32; 3] {
         self.action.strike_weights(key_idx)
     }

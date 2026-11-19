@@ -111,7 +111,19 @@ impl SpaceCrossfadeGuard {
         lid: LidState,
         sample_rate: f32,
     ) -> SpaceTransitionAction {
-        if body == self.current_body
+        self.request_body_space_ex(body, perspective, lid, sample_rate, false)
+    }
+
+    pub fn request_body_space_ex(
+        &mut self,
+        body: BodyArchetype,
+        perspective: ListenerPerspective,
+        lid: LidState,
+        sample_rate: f32,
+        force: bool,
+    ) -> SpaceTransitionAction {
+        if !force
+            && body == self.current_body
             && perspective == self.current_perspective
             && lid == self.current_lid
             && !self.crossfading
@@ -212,10 +224,24 @@ impl SpaceCrossfadeGuard {
         lid: LidState,
         sample_rate: f32,
     ) -> SpaceTransitionAction {
+        self.commit_body_standby_ex(body, perspective, lid, sample_rate, false)
+    }
+
+    /// Commits a pre-staged standby radiator bank, optionally forcing transition when Stage 4
+    /// `PerfProfile` parameters changed under identical `(body, perspective, lid)`.
+    pub fn commit_body_standby_ex(
+        &mut self,
+        body: BodyArchetype,
+        perspective: ListenerPerspective,
+        lid: LidState,
+        sample_rate: f32,
+        force: bool,
+    ) -> SpaceTransitionAction {
         if self.crossfading {
             return SpaceTransitionAction::None;
         }
-        if body == self.current_body
+        if !force
+            && body == self.current_body
             && perspective == self.current_perspective
             && lid == self.current_lid
         {

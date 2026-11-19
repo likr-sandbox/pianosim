@@ -4,7 +4,8 @@ use piano_action::ActionBank;
 use piano_bridge::BridgeBank;
 use piano_radiator::{BodyArchetype, RadiatorBank};
 use piano_spec::{
-    midi_to_key, EventKind, PedalKind, SampleEvent, VoicingSpec, DAMPED_KEYS, NUM_KEYS,
+    midi_to_key, EventKind, LidState, ListenerPerspective, PedalKind, PerfProfile, SampleEvent,
+    VoicingSpec, DAMPED_KEYS, NUM_KEYS,
 };
 use piano_strings::StringBank;
 
@@ -80,6 +81,9 @@ pub(crate) struct EngineCore {
     pub bank: StringBank,
     pub bridge: BridgeBank,
     pub radiators: [RadiatorBank; 2],
+    pub perf_profile: PerfProfile,
+    pub current_voicing: VoicingSpec,
+    pub flush_sample_accum: usize,
     pub body_archetype: BodyArchetype,
     pub radiator_bodies: [Option<BodyArchetype>; 2],
     pub staged_standby_body: Option<BodyArchetype>,
@@ -90,12 +94,19 @@ pub(crate) struct EngineCore {
 }
 
 impl EngineCore {
-    pub fn new(sample_rate: f32, voicing: &VoicingSpec) -> Self {
-        let action = ActionBank::new(sample_rate, voicing);
-        let bank = StringBank::new_bridge_coupled(sample_rate, voicing);
-        let mut bridge = BridgeBank::new_with_voicing(bank.sample_rate(), voicing);
+    pub fn new_with_profile(sample_rate: f32, voicing: &VoicingSpec, profile: PerfProfile) -> Self {
+        let prof = profile.sanitized();
+        let v = voicing.sanitized();
+        let action = ActionBank::new_with_profile(sample_rate, &v, &prof);
+        let bank = StringBank::new_bridge_coupled_with_profile(sample_rate, &v, &prof);
+        let mut bridge = BridgeBank::new_with_profile(bank.sample_rate(), &v, &prof);
         bridge.set_port_resistances(bank.bridge_port_resistances());
-        let mut rad0 = RadiatorBank::new_concert_grand(f64::from(sample_rate));
+        let mut rad0 = RadiatorBank::new_with_profile(
+            f64::from(sample_rate),
+            ListenerPerspective::Player,
+            LidState::Open,
+            &prof,
+        );
         rad0.set_reverb(DEFAULT_REVERB_DECAY_S, DEFAULT_REVERB_MIX);
         let rad1 = rad0.clone();
         Self {
@@ -103,6 +114,9 @@ impl EngineCore {
             bank,
             bridge,
             radiators: [rad0, rad1],
+            perf_profile: prof,
+            current_voicing: v,
+            flush_sample_accum: 0,
             body_archetype: BodyArchetype::ConcertGrand,
             radiator_bodies: [Some(BodyArchetype::ConcertGrand); 2],
             staged_standby_body: None,
@@ -189,6 +203,14 @@ impl EngineCore {
             self.apply_event(events[idx].kind);
             idx += 1;
         }
+        self.flush_sample_accum += frames;
+        if self.flush_sample_accum >= 128 {
+            self.flush_sample_accum = 0;
+            self.flush_subnormals_and_retire();
+        }
+    }
+
+    pub fn flush_subnormals_and_retire(&mut self) {
         let hammers = core::array::from_fn(|k| self.action.is_hammer_active(k));
         let closed_damp = core::array::from_fn(|k| {
             k < DAMPED_KEYS && !hammers[k] && self.action.damper_clearance_m(k) <= -1.0e-5
@@ -196,6 +218,7 @@ impl EngineCore {
         self.bank
             .flush_bridge_subnormals_with_dampers(&hammers, &closed_damp);
         self.bridge.flush_subnormals();
+        self.retire_silent_keys();
     }
 
     fn render_segment(
@@ -342,6 +365,7 @@ impl EngineCore {
     pub fn all_notes_off(&mut self) {
         self.key_down.fill(false);
         self.ringing.fill(false);
+        self.flush_sample_accum = 0;
         self.action.reset();
         self.bank.reset();
         self.bridge.reset();

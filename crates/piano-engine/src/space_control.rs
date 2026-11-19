@@ -1,17 +1,34 @@
 //! Multi-body preset synchronization, reverb control, and spatial transition helpers.
 
-use piano_radiator::{embedded_body_bytes, BodyArchetype};
+use piano_radiator::{
+    embedded_body_bytes, space_blob_len_for_profile, BodyArchetype, RadiatorBank,
+    SPACE_BLOB_HEADER_LEN, SPACE_BLOB_MAGIC_V2,
+};
 use piano_spec::{BodyPreset, PresetReducedPole, PRESET_BRIDGE_ZONES, PRESET_REDUCED_POLES};
 
 use crate::engine::PianoEngine;
 use crate::param_smooth::{IntoLidState, IntoListenerPerspective, SpaceTransitionAction};
+use crate::perf_control::stage4_structural_changed;
 
 /// Default musical hall reverb decay time in seconds for [`PianoEngine::new`].
 pub const DEFAULT_REVERB_DECAY_S: f32 = 1.6;
 /// Default musical hall reverb wet mix `[0.0..=1.0]` for [`PianoEngine::new`].
 pub const DEFAULT_REVERB_MIX: f32 = 0.18;
 
-const SPACE_BLOB_MAGIC: u32 = 0x5042_5350;
+#[inline]
+fn blob_matches_radiator_stage4(blob: &[f32], rad: &RadiatorBank) -> bool {
+    if blob.len() < SPACE_BLOB_HEADER_LEN || blob[0].to_bits() != SPACE_BLOB_MAGIC_V2 {
+        return false;
+    }
+    let ir_len = blob[4].to_bits() as usize;
+    let head_taps = blob[5].to_bits() as usize;
+    let split_tap = blob[6].to_bits();
+    let block_fft = (blob[7].to_bits() & 1) != 0;
+    ir_len == rad.ir_len_samples()
+        && head_taps == rad.head_taps()
+        && split_tap == u32::from(rad.perf_profile().spatial_tail_split_tap)
+        && block_fft == (rad.algorithmic_latency_samples() > 0)
+}
 
 /// Trait for converting strongly typed or numeric body discriminants into [`BodyArchetype`].
 pub trait IntoBodyArchetype {
@@ -166,6 +183,14 @@ impl PianoEngine {
         true
     }
 
+    fn sync_core_stage4_from_radiator(&mut self, rad_idx: usize) {
+        let rp = *self.core.radiators[rad_idx].perf_profile();
+        self.core.perf_profile.ir_duration_secs = rp.ir_duration_secs;
+        self.core.perf_profile.spatial_tail_split_tap = rp.spatial_tail_split_tap;
+        self.core.perf_profile.fir_head_taps = rp.fir_head_taps;
+        self.core.perf_profile.fir_block_fft = rp.fir_block_fft;
+    }
+
     fn reconfigure_radiator_for_body(
         &mut self,
         idx: usize,
@@ -173,6 +198,7 @@ impl PianoEngine {
         perspective: piano_spec::ListenerPerspective,
         lid: piano_spec::LidState,
     ) {
+        let profile = self.core.perf_profile;
         if self.core.radiator_bodies[idx] != Some(body) {
             let _ = self.core.radiators[idx].reconfigure_from_preset_bytes(
                 embedded_body_bytes(body),
@@ -182,6 +208,14 @@ impl PianoEngine {
             self.core.radiator_bodies[idx] = Some(body);
         } else {
             self.core.radiators[idx].reconfigure_space(perspective, lid);
+        }
+        if stage4_structural_changed(self.core.radiators[idx].perf_profile(), &profile) {
+            let mut merged = *self.core.radiators[idx].perf_profile();
+            merged.ir_duration_secs = profile.ir_duration_secs;
+            merged.spatial_tail_split_tap = profile.spatial_tail_split_tap;
+            merged.fir_head_taps = profile.fir_head_taps;
+            merged.fir_block_fft = profile.fir_block_fft;
+            self.core.radiators[idx].set_perf_profile(&merged);
         }
     }
 
@@ -203,25 +237,37 @@ impl PianoEngine {
         let Some(lid_state) = lid.into_lid_state() else {
             return false;
         };
-        if !self.space_guard.is_crossfading()
-            && body == self.space_guard.current_body()
+        let active_idx = self.space_guard.active_radiator_idx();
+        let same_space = body == self.space_guard.current_body()
             && persp == self.space_guard.current_perspective()
-            && lid_state == self.space_guard.current_lid()
+            && lid_state == self.space_guard.current_lid();
+        if !self.space_guard.is_crossfading()
+            && same_space
+            && blob_matches_radiator_stage4(blob, &self.core.radiators[active_idx])
         {
-            let expected =
-                piano_radiator::space_blob_len_for_sample_rate(f64::from(self.sample_rate()));
-            return blob.len() == expected && blob[0].to_bits() == SPACE_BLOB_MAGIC;
+            let expected = space_blob_len_for_profile(
+                f64::from(self.sample_rate()),
+                self.core.radiators[active_idx].perf_profile(),
+            );
+            return blob.len() == expected && blob[0].to_bits() == SPACE_BLOB_MAGIC_V2;
         }
         let target_idx = self.space_guard.target_radiator_idx();
+        let stage4_refresh =
+            same_space && !blob_matches_radiator_stage4(blob, &self.core.radiators[active_idx]);
         if !self.core.radiators[target_idx].install_precomputed_space(persp, lid_state, blob) {
             return false;
         }
         if self.core.radiator_bodies[target_idx] != Some(body) {
             self.core.radiator_bodies[target_idx] = None;
         }
-        let _ = self
-            .space_guard
-            .request_body_space(body, persp, lid_state, self.sample_rate());
+        self.sync_core_stage4_from_radiator(target_idx);
+        let _ = self.space_guard.request_body_space_ex(
+            body,
+            persp,
+            lid_state,
+            self.sample_rate(),
+            stage4_refresh,
+        );
         self.core.sync_to_body_if_changed(body);
         true
     }
@@ -302,14 +348,24 @@ impl PianoEngine {
         if self.core.staged_standby_body != Some(body) {
             return false;
         }
+        let active = self.space_guard.active_radiator_idx();
         let standby = self.space_guard.standby_radiator_idx();
         let rad = &self.core.radiators[standby];
         if rad.perspective() != persp || rad.lid_state() != lid_state {
             return false;
         }
-        let _ = self
-            .space_guard
-            .commit_body_standby(body, persp, lid_state, self.sample_rate());
+        let force = stage4_structural_changed(
+            self.core.radiators[active].perf_profile(),
+            self.core.radiators[standby].perf_profile(),
+        );
+        self.sync_core_stage4_from_radiator(standby);
+        let _ = self.space_guard.commit_body_standby_ex(
+            body,
+            persp,
+            lid_state,
+            self.sample_rate(),
+            force,
+        );
         self.core.sync_to_body_if_changed(body);
         self.core.staged_standby_body = None;
         true

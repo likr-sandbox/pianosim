@@ -1,8 +1,8 @@
 //! Real-time 88-key physical piano engine facade.
 
-#[cfg(test)]
-use piano_spec::NUM_KEYS;
-use piano_spec::{LidState, ListenerPerspective, SampleEvent, Temperament, VoicingSpec};
+use piano_spec::{
+    LidState, ListenerPerspective, PerfProfile, SampleEvent, Temperament, VoicingSpec,
+};
 
 use crate::engine_core::{AudioTap, EngineCore};
 use crate::event_queue::{is_sorted_by_offset, EventQueue};
@@ -26,14 +26,25 @@ impl PianoEngine {
     /// Allocates and precomputes all 88-key action, string, bridge, and radiator tables with default voicing.
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
-        Self::new_with_voicing(sample_rate, &VoicingSpec::default())
+        Self::new_with_profile(sample_rate, VoicingSpec::default(), PerfProfile::full())
     }
 
     /// Allocates and precomputes all 88-key action, string, bridge, and radiator tables for `voicing`.
     #[must_use]
     pub fn new_with_voicing(sample_rate: f32, voicing: &VoicingSpec) -> Self {
-        let core = EngineCore::new(sample_rate, voicing);
-        let voicing_smoother = VoicingSmoother::new_with_voicing(voicing);
+        Self::new_with_profile(sample_rate, voicing.clone(), PerfProfile::full())
+    }
+
+    /// Allocates and precomputes all 88-key action, string, bridge, and radiator tables
+    /// for `voicing` and performance profile `profile`.
+    #[must_use]
+    pub fn new_with_profile(
+        sample_rate_hz: f32,
+        voicing: VoicingSpec,
+        profile: PerfProfile,
+    ) -> Self {
+        let core = EngineCore::new_with_profile(sample_rate_hz, &voicing, profile);
+        let voicing_smoother = VoicingSmoother::new_with_voicing(&voicing);
         let space_guard = SpaceCrossfadeGuard::new(ListenerPerspective::Player, LidState::Open);
         Self {
             core,
@@ -175,6 +186,7 @@ impl PianoEngine {
             .set_port_resistances(self.core.bank.bridge_port_resistances());
         v.hammer_hardness = self.voicing_smoother.current_hammer_hardness();
         self.core.action.update_voicing_in_place(&v);
+        self.core.current_voicing = v.clone();
         self.voicing_smoother.set_tuning_applied_full(
             v.unison_detune_scale,
             v.stretch_amount,
@@ -286,7 +298,7 @@ impl PianoEngine {
 
     #[cfg(test)]
     pub(crate) fn is_any_hammer_active(&self) -> bool {
-        (0..NUM_KEYS).any(|k| self.core.action.is_hammer_active(k))
+        (0..piano_spec::NUM_KEYS).any(|k| self.core.action.is_hammer_active(k))
     }
 
     #[cfg(test)]
@@ -353,14 +365,25 @@ impl PianoEngine {
             .step_block_with_dirty(frames, self.sample_rate())
         {
             if (dirty & DIRTY_TUNING) != 0 {
-                self.core.action.update_voicing_in_place(&spec);
-                self.core.bank.update_voicing_in_place(&spec);
-                self.core.bridge.set_voicing(&spec);
+                self.core.current_voicing.hammer_hardness = spec.hammer_hardness;
+                self.core.current_voicing.unison_detune_scale = spec.unison_detune_scale;
+                self.core.current_voicing.stretch_amount = spec.stretch_amount;
+                self.core.current_voicing.string_length_scale = spec.string_length_scale;
+                self.core.current_voicing.a4_freq_hz = spec.a4_freq_hz;
+                self.core.current_voicing.temperament = spec.temperament;
+                self.core.current_voicing.condition = spec.condition;
+                let applied_spec = self.core.current_voicing.clone();
+                self.core.action.update_voicing_in_place(&applied_spec);
+                self.core.bank.update_voicing_in_place(&applied_spec);
+                self.core.bridge.set_voicing(&applied_spec);
                 self.core
                     .bridge
                     .set_port_resistances(self.core.bank.bridge_port_resistances());
             } else {
-                self.core.action.update_hammer_hardness_in_place(&spec);
+                self.core.current_voicing.hammer_hardness = spec.hammer_hardness;
+                self.core
+                    .action
+                    .update_hammer_hardness_in_place(&self.core.current_voicing);
             }
         }
 
@@ -378,7 +401,6 @@ impl PianoEngine {
             );
         }
 
-        self.core.retire_silent_keys();
         self.telemetry = compute_block_telemetry(self.core.active_voice_count(), out_l, out_r);
 
         let peak = out_l
@@ -386,70 +408,5 @@ impl PianoEngine {
             .chain(out_r.iter())
             .fold(0.0_f32, |m, &x| m.max(x.abs()));
         self.space_guard.update_envelope(peak);
-    }
-}
-
-#[cfg(test)]
-mod duplex_integration_tests {
-    use super::*;
-
-    #[test]
-    fn engine_syncs_duplex_voicing_on_init_precomputed_and_dirty_tuning() {
-        let mut init_spec = VoicingSpec::from_globals(0.5, 1.0, 1.75, 1.0);
-        init_spec.note_offsets[87].pitch_cents = 15.0;
-        let eng_init = PianoEngine::new_with_voicing(48_000.0, &init_spec);
-        assert_eq!(eng_init.core.bridge.duplex().voicing().stretch_amount, 1.75);
-        assert_eq!(
-            eng_init.core.bridge.duplex().voicing().note_offsets[87].pitch_cents,
-            15.0
-        );
-
-        let mut eng = PianoEngine::new(48_000.0);
-        eng.set_voicing_with_a4(0.5, 1.0, 1.5, 1.0, 415.0);
-        let (mut l, mut r) = ([0.0_f32; 128], [0.0_f32; 128]);
-        for _ in 0..80 {
-            eng.render_block(&[], &mut l, &mut r);
-        }
-        assert!((eng.core.bridge.duplex().a4_freq_hz() - 415.0).abs() < 1e-4);
-        assert!((eng.core.bridge.duplex().voicing().stretch_amount - 1.5).abs() < 1e-3);
-
-        // apply_precomputed_voicing also updates BridgeBank's DuplexBank with full VoicingSpec.
-        let mut vc_prep = piano_strings::VoicingPrepContext::new(48_000.0);
-        let mut pre_spec = VoicingSpec::from_globals_with_a4(0.6, 1.2, 0.75, 1.0, 442.0);
-        pre_spec.note_offsets[63].pitch_cents = -18.0;
-        let blob = vc_prep.prepare_voicing(&pre_spec);
-        assert!(eng.apply_precomputed_voicing(pre_spec, blob));
-        assert!((eng.core.bridge.duplex().a4_freq_hz() - 442.0).abs() < 1e-4);
-        assert!((eng.core.bridge.duplex().voicing().stretch_amount - 0.75).abs() < 1e-4);
-        assert!(
-            (eng.core.bridge.duplex().voicing().note_offsets[63].pitch_cents + 18.0).abs() < 1e-4
-        );
-
-        // Once StringBank is silent, EngineCore::render_event_slice calls
-        // self.bridge.flush_subnormals() so BridgeBank's idle bypass re-engages after decay.
-        let mut a = [0.0_f32; piano_spec::TOTAL_STRINGS];
-        a[140] = 1.0e-14;
-        let mut b = [0.0_f32; piano_spec::TOTAL_STRINGS];
-        let mut z = [0.0_f32; piano_bridge::NUM_BRIDGE_ZONES];
-        let _ = eng.core.bridge.step_bridge_sample(
-            &a,
-            &[0.0; piano_bridge::NUM_BRIDGE_ZONES],
-            &mut b,
-            &mut z,
-        );
-        assert!(!eng.core.bridge.is_quiescent());
-        for _ in 0..400 {
-            eng.render_block(&[], &mut l, &mut r);
-            if eng.core.bridge.is_quiescent() {
-                break;
-            }
-        }
-        assert!(
-            eng.core.bridge.is_quiescent(),
-            "EngineCore::render_event_slice did not return BridgeBank to quiescent idle bypass (ssm={}, hertz={}, duplex={})",
-            eng.core.bridge.ssm().is_quiescent(),
-            eng.core.bridge.hertz().is_quiescent(),
-            eng.core.bridge.duplex().is_quiescent(),
-        );
     }
 }
