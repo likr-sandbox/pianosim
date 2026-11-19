@@ -55,6 +55,43 @@ fn apply_runtime_knob(profile: &mut PerfProfile, knob_id: u32, value: f32) -> bo
     true
 }
 
+#[inline]
+fn apply_any_knob(profile: &mut PerfProfile, knob_id: u32, value: f32) -> bool {
+    if knob_id <= 9 {
+        return apply_runtime_knob(profile, knob_id, value);
+    }
+    match knob_id {
+        10 => profile.horiz_max_hz = value,
+        11 => profile.dead_mode_prune_db = value,
+        12 => profile.bass_phantom_sparse = value >= 0.5,
+        13 => profile.ir_duration_secs = value,
+        14 => {
+            profile.spatial_tail_split_tap = if value.is_finite() {
+                value.round().clamp(512.0, f32::from(u16::MAX)) as u16
+            } else {
+                u16::MAX
+            };
+        }
+        15 => {
+            profile.fir_head_taps = if value.is_finite() {
+                value.round().clamp(16.0, 64.0) as u8
+            } else {
+                64
+            };
+        }
+        16 => profile.fir_block_fft = value >= 0.5,
+        17 => {
+            profile.action_oversample = if value.is_finite() {
+                value.round().clamp(2.0, 8.0) as u8
+            } else {
+                8
+            };
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// Allocates and initializes a [`WasmContext`] with `preset_id` (`0=Full`, `1=Balanced`,
 /// `2=Realtime`), preallocating `staging` to full capacity for safe runtime/blob upgrades.
 ///
@@ -156,5 +193,89 @@ pub extern "C" fn piano_prep_set_stage4_profile(
         fir_head_taps.min(255) as u8,
         fir_block_fft != 0,
     );
+    0
+}
+
+/// Allocates a mutable [`PerfProfile`] builder initialized from `preset_id` (`0..=2`).
+///
+/// Returns null if `preset_id > 2`. Caller must free with [`piano_perf_builder_destroy`].
+#[no_mangle]
+pub extern "C" fn piano_perf_builder_new(preset_id: u32) -> *mut PerfProfile {
+    let Some(preset) = decode_preset(preset_id) else {
+        return ptr::null_mut();
+    };
+    Box::into_raw(Box::new(PerfProfile::from_preset(preset)))
+}
+
+/// Sets any of the 18 [`PerfProfile`] knobs (`knob_id` in `0..=17`) on `builder`.
+///
+/// Returns `0` on success, `-1` if `builder` is null, or `-2` if `knob_id > 17`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_perf_builder_set(
+    builder: *mut PerfProfile,
+    knob_id: u32,
+    value: f32,
+) -> i32 {
+    if builder.is_null() {
+        return -1;
+    }
+    // SAFETY: `builder` is a valid non-null pointer from `piano_perf_builder_new`.
+    let profile = unsafe { &mut *builder };
+    if apply_any_knob(profile, knob_id, value) {
+        0
+    } else {
+        -2
+    }
+}
+
+/// Frees a [`PerfProfile`] builder allocated by [`piano_perf_builder_new`].
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_perf_builder_destroy(builder: *mut PerfProfile) {
+    if !builder.is_null() {
+        // SAFETY: `builder` was created by `Box::into_raw` in `piano_perf_builder_new`.
+        unsafe {
+            drop(Box::from_raw(builder));
+        }
+    }
+}
+
+/// Allocates and initializes a [`WasmContext`] from a custom `PerfProfile` builder.
+///
+/// Returns null if `builder` is null.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_init_with_builder(
+    sample_rate: f32,
+    builder: *const PerfProfile,
+) -> *mut WasmContext {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: `builder` is a valid non-null pointer from `piano_perf_builder_new`.
+    let profile = unsafe { (*builder).sanitized() };
+    Box::into_raw(Box::new(WasmContext::new_with_profile(
+        sample_rate,
+        profile,
+    )))
+}
+
+/// Configures [`PrepContext`] (`SpacePrepContext` + `VoicingPrepContext`) from a `PerfProfile` builder.
+///
+/// Returns `0` on success or `-1` if `prep` or `builder` is null.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_prep_set_perf_builder(
+    prep: *mut PrepContext,
+    builder: *const PerfProfile,
+) -> i32 {
+    if prep.is_null() || builder.is_null() {
+        return -1;
+    }
+    // SAFETY: `prep` and `builder` are valid non-null pointers.
+    let prep = unsafe { &mut *prep };
+    let profile = unsafe { (*builder).sanitized() };
+    prep.set_perf_profile(&profile);
     0
 }

@@ -16,8 +16,10 @@ pub use exports::{
     piano_staging_offset_ptr, piano_staging_ptr, piano_telemetry_ptr,
 };
 pub use perf_exports::{
-    piano_init_with_profile, piano_prep_set_perf_preset, piano_prep_set_stage4_profile,
-    piano_set_perf_knob, piano_set_perf_preset,
+    piano_init_with_builder, piano_init_with_profile, piano_perf_builder_destroy,
+    piano_perf_builder_new, piano_perf_builder_set, piano_prep_set_perf_builder,
+    piano_prep_set_perf_preset, piano_prep_set_stage4_profile, piano_set_perf_knob,
+    piano_set_perf_preset,
 };
 pub use prep_ipc::PrepContext;
 pub use ring_ipc::{WasmContext, MAX_BLOCK, TELEMETRY_LEN};

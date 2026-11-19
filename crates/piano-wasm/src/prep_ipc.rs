@@ -17,6 +17,7 @@ enum LastKind {
 pub struct PrepContext {
     space: SpacePrepContext,
     voicing: VoicingPrepContext,
+    profile: PerfProfile,
     body_archetype: BodyArchetype,
     last: LastKind,
 }
@@ -33,9 +34,17 @@ impl PrepContext {
         Self {
             space: SpacePrepContext::new_concert_grand(f64::from(sr)),
             voicing: VoicingPrepContext::new(sr),
+            profile: PerfProfile::full(),
             body_archetype: BodyArchetype::ConcertGrand,
             last: LastKind::None,
         }
+    }
+
+    /// Returns the active sanitized [`PerfProfile`] configured for this prep context.
+    #[must_use]
+    #[inline]
+    pub const fn perf_profile(&self) -> PerfProfile {
+        self.profile
     }
 
     /// Returns the currently loaded [`BodyArchetype`] in this prep context.
@@ -48,8 +57,10 @@ impl PrepContext {
     /// Updates both Stage 4 (`SpacePrepContext`) and Stage 2/3 (`VoicingPrepContext`)
     /// to use `profile` for subsequent blob generation.
     pub fn set_perf_profile(&mut self, profile: &PerfProfile) {
-        self.space.set_perf_profile(profile);
-        self.voicing.set_perf_profile(profile);
+        let p = profile.sanitized();
+        self.profile = p;
+        self.space.set_perf_profile(&p);
+        self.voicing.set_perf_profile(&p);
     }
 
     /// Updates Stage 4 parameters directly on `SpacePrepContext` for subsequent `prepare_space*` calls.
@@ -66,6 +77,12 @@ impl PrepContext {
             fir_head_taps,
             fir_block_fft,
         );
+        let mut next = self.profile;
+        next.ir_duration_secs = ir_duration_secs;
+        next.spatial_tail_split_tap = spatial_tail_split_tap;
+        next.fir_head_taps = fir_head_taps;
+        next.fir_block_fft = fir_block_fft;
+        self.profile = next.sanitized();
     }
 
     /// Precomputes Stage 4 spatial FIR + NUPOLS spectra for the active body and returns `f32` element count.
