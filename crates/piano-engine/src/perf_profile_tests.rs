@@ -255,28 +255,36 @@ fn stage2_and_stage4_knobs_take_effect_genuinely() {
         render_with_profile(sr, PerfProfile::full(), 2048, &[note_on(60, u16::MAX, 0)]);
     assert!(max_abs_diff(&lc4_sm10, &lc4_sm52) > 1e-6);
 
-    // passive_res_max_hz limits passive open-string resonance
-    let sus_c6 = [
-        SampleEvent {
-            sample_offset: 0,
-            kind: EventKind::Pedal {
-                kind: PedalKind::Sustain,
-                value_u16: u16::MAX,
-            },
+    // passive_res_max_hz limits retired/passive tail resonance without truncating struck notes
+    let mut eng_pr_full =
+        PianoEngine::new_with_profile(sr, VoicingSpec::default(), PerfProfile::full());
+    let mut eng_pr_lim = PianoEngine::new_with_profile(
+        sr,
+        VoicingSpec::default(),
+        PerfProfile {
+            passive_res_max_hz: 1_200.0,
+            ..PerfProfile::full()
         },
-        note_on(84, u16::MAX, 0),
-    ];
-    let (l_pr_full, _) = render_with_profile(sr, PerfProfile::full(), 2048, &sus_c6);
-    let (l_pr_lim, _) = render_with_profile(
+    );
+    let _ = render_blocks(&mut eng_pr_full, 256, 128, &[note_on(60, u16::MAX, 0)]);
+    let _ = render_blocks(&mut eng_pr_lim, 256, 128, &[note_on(60, u16::MAX, 0)]);
+    eng_pr_full.core.bank.retire_key_struck_contact(39);
+    eng_pr_lim.core.bank.retire_key_struck_contact(39);
+    let (l_pr_full, _) = render_blocks(&mut eng_pr_full, 2048, 128, &[]);
+    let (l_pr_lim, _) = render_blocks(&mut eng_pr_lim, 2048, 128, &[]);
+    assert!(max_abs_diff(&l_pr_full, &l_pr_lim) > 1e-5);
+    let (l_dry_full, _) =
+        render_with_profile(sr, PerfProfile::full(), 2048, &[note_on(69, u16::MAX, 0)]);
+    let (l_dry_lim, _) = render_with_profile(
         sr,
         PerfProfile {
             passive_res_max_hz: 1_200.0,
             ..PerfProfile::full()
         },
         2048,
-        &sus_c6,
+        &[note_on(69, u16::MAX, 0)],
     );
-    assert!(max_abs_diff(&l_pr_full, &l_pr_lim) > 1e-7);
+    assert_eq!(max_abs_diff(&l_dry_full, &l_dry_lim), 0.0);
 
     // Stage 4 knobs
     let p_s4 = PerfProfile {
@@ -329,8 +337,14 @@ fn set_perf_profile_and_runtime_hot_swap_preserve_state_and_report_rebuild_statu
     assert!(!eng.core.bridge.is_hertz_nonlinear());
 
     assert!(!eng.set_perf_profile_runtime(PerfProfile::realtime()));
-    assert_eq!(eng.core.radiators[0].fdn_lines(), 4);
-    assert_eq!(eng.core.bridge.active_poles(), 4);
+    assert_eq!(
+        eng.core.radiators[0].fdn_lines(),
+        PerfProfile::realtime().hall_fdn_lines
+    );
+    assert_eq!(
+        eng.core.bridge.active_poles(),
+        PerfProfile::realtime().active_bridge_poles
+    );
 
     eng.set_perf_profile(PerfProfile::balanced());
     assert_eq!(eng.perf_profile(), PerfProfile::balanced());
@@ -342,7 +356,10 @@ fn set_perf_profile_and_runtime_hot_swap_preserve_state_and_report_rebuild_statu
     assert_eq!(eng.space_guard().current_lid(), LidState::Half);
     assert_eq!(eng.reverb_params(), (2.1, 0.25));
     assert_eq!(eng.core.radiators[0].ir_len_samples(), 12_000);
-    assert_eq!(eng.core.radiators[0].head_taps(), 32);
+    assert_eq!(
+        eng.core.radiators[0].head_taps(),
+        usize::from(PerfProfile::balanced().fir_head_taps)
+    );
 
     let (l, r) = render_blocks(&mut eng, 1024, 128, &[note_on(60, 50_000, 0)]);
     assert!(l.iter().chain(r.iter()).all(|x| x.is_finite()));

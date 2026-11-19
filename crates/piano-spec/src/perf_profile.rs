@@ -110,23 +110,23 @@ impl PerfProfile {
     pub const fn balanced() -> Self {
         Self {
             horiz_max_hz: 3_500.0,
-            dead_mode_prune_db: -80.0,
+            dead_mode_prune_db: -50.0,
             energy_horizon_db: -92.0,
             sav_dormancy_db: -42.0,
             sav_max_key_idx: 39,
             bass_phantom_sparse: true,
             passive_res_max_hz: 4_000.0,
             ir_duration_secs: 0.25,
-            spatial_tail_split_tap: 2_048,
-            fir_head_taps: 32,
+            spatial_tail_split_tap: 4_096,
+            fir_head_taps: 64,
             fir_block_fft: false,
-            hall_fdn_lines: 4,
+            hall_fdn_lines: 8,
             action_oversample: 4,
             polynomial_adaa: true,
             shank_flex_enabled: true,
             damper_control_decim: 2,
             hertz_nonlinear: false,
-            active_bridge_poles: 6,
+            active_bridge_poles: 8,
         }
     }
 
@@ -135,23 +135,23 @@ impl PerfProfile {
     pub const fn realtime() -> Self {
         Self {
             horiz_max_hz: 2_800.0,
-            dead_mode_prune_db: -65.0,
+            dead_mode_prune_db: -45.0,
             energy_horizon_db: -88.0,
             sav_dormancy_db: -38.0,
             sav_max_key_idx: 26,
             bass_phantom_sparse: true,
             passive_res_max_hz: 3_500.0,
-            ir_duration_secs: 0.125,
-            spatial_tail_split_tap: 1_024,
+            ir_duration_secs: 0.18,
+            spatial_tail_split_tap: 2_048,
             fir_head_taps: 32,
-            fir_block_fft: false,
+            fir_block_fft: true,
             hall_fdn_lines: 4,
             action_oversample: 4,
             polynomial_adaa: true,
             shank_flex_enabled: false,
             damper_control_decim: 4,
             hertz_nonlinear: false,
-            active_bridge_poles: 4,
+            active_bridge_poles: 8,
         }
     }
 

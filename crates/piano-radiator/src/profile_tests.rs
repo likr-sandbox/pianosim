@@ -267,16 +267,25 @@ fn set_perf_profile_switches_all_stage4_knobs_cleanly() {
     assert_eq!(bank.fdn_lines(), 8);
     assert_eq!(bank.ir_len_samples(), 24_000);
 
-    bank.set_perf_profile(&PerfProfile::balanced());
-    assert_eq!(bank.fdn_lines(), 4);
-    assert_eq!(bank.head_taps(), 32);
-    assert_eq!(bank.ir_len_samples(), 12_000);
+    let bal = PerfProfile::balanced();
+    bank.set_perf_profile(&bal);
+    assert_eq!(bank.fdn_lines(), bal.hall_fdn_lines);
+    assert_eq!(bank.head_taps(), usize::from(bal.fir_head_taps));
+    assert_eq!(
+        bank.ir_len_samples(),
+        ir_len_for_sample_rate_secs(sr, f64::from(bal.ir_duration_secs))
+    );
     assert_eq!(bank.algorithmic_latency_samples(), 0);
 
-    bank.set_perf_profile(&PerfProfile::realtime());
-    assert_eq!(bank.fdn_lines(), 4);
-    assert_eq!(bank.head_taps(), 32);
-    assert_eq!(bank.ir_len_samples(), 6_000);
+    let rt = PerfProfile::realtime();
+    bank.set_perf_profile(&rt);
+    assert_eq!(bank.fdn_lines(), rt.hall_fdn_lines);
+    assert_eq!(bank.head_taps(), usize::from(rt.fir_head_taps));
+    assert_eq!(
+        bank.ir_len_samples(),
+        ir_len_for_sample_rate_secs(sr, f64::from(rt.ir_duration_secs))
+    );
+    assert_eq!(bank.algorithmic_latency_samples(), 32);
 
     let frames = build_stimulus(256);
     let (mut l, mut r) = ([0.0_f32; 256], [0.0_f32; 256]);
@@ -312,22 +321,29 @@ fn collapsed_spatial_tail_preserves_energy_and_binaural_decorrelation() {
     full.process_block(&stim, &mut fl, &mut fr);
     rt.process_block(&stim, &mut rl, &mut rr);
 
-    // Early [0..1024) must match Full closely (exact 9-zone MIMO + sub-tier).
-    let early_db = rel_error_db(&rl[..1024], &rr[..1024], &fl[..1024], &fr[..1024]);
+    // Early [lat..split_tap) must match Full closely (exact 9-zone MIMO + sub-tier).
+    let lat = rt.algorithmic_latency_samples();
+    let split = usize::from(PerfProfile::realtime().spatial_tail_split_tap);
+    let early_db = rel_error_db(
+        &rl[lat..split],
+        &rr[lat..split],
+        &fl[..split - lat],
+        &fr[..split - lat],
+    );
     assert!(
         early_db <= -90.0,
-        "early MIMO region [0..1024) deviated {early_db:.2} dB"
+        "early MIMO region [{lat}..{split}) deviated {early_db:.2} dB"
     );
 
-    // Late collapsed tail [1024..6000) must stay energetic and preserve L/R decorrelation.
-    let e_full: f64 = fl[1024..6000]
+    // Late collapsed tail [split..6000) must stay energetic and preserve L/R decorrelation.
+    let e_full: f64 = fl[split..6000]
         .iter()
-        .chain(fr[1024..6000].iter())
+        .chain(fr[split..6000].iter())
         .map(|&v| f64::from(v).powi(2))
         .sum();
-    let e_rt: f64 = rl[1024..6000]
+    let e_rt: f64 = rl[split..6000]
         .iter()
-        .chain(rr[1024..6000].iter())
+        .chain(rr[split..6000].iter())
         .map(|&v| f64::from(v).powi(2))
         .sum();
     let ratio_db = 10.0 * (e_rt / e_full.max(1.0e-30)).log10();
@@ -339,7 +355,7 @@ fn collapsed_spatial_tail_preserves_energy_and_binaural_decorrelation() {
     let mut cross = 0.0_f64;
     let mut el = 0.0_f64;
     let mut er = 0.0_f64;
-    for i in 1024..6000 {
+    for i in split..6000 {
         let lv = f64::from(rl[i]);
         let rv = f64::from(rr[i]);
         cross += lv * rv;
@@ -350,5 +366,35 @@ fn collapsed_spatial_tail_preserves_energy_and_binaural_decorrelation() {
     assert!(
         corr < 0.70,
         "collapsed binaural tail L/R correlation {corr:.3} too high"
+    );
+}
+
+#[test]
+fn causal_collapse_has_zero_wraparound_tail_and_no_partition_step_clicks() {
+    let sr = 48_000.0;
+    let total = 16_384_usize;
+    let mut stim = vec![[0.0_f32; PRESET_RADIATOR_ZONES]; total];
+    for (i, frame) in stim.iter_mut().enumerate() {
+        let t = (i as f32) / 48_000.0;
+        let s = 0.05 * (2.0 * std::f32::consts::PI * 220.0 * t).sin();
+        frame[1] = s;
+        frame[2] = 0.7 * s;
+    }
+    let mut bank = RadiatorBank::new_with_profile(
+        sr,
+        ListenerPerspective::Player,
+        LidState::Open,
+        &PerfProfile::balanced(),
+    );
+    let (mut ol, mut or) = (vec![0.0_f32; total], vec![0.0_f32; total]);
+    bank.process_block(&stim, &mut ol, &mut or);
+    // Steady sine response after initial transient must have tiny 3rd difference (no 1024-sample partition clicks).
+    let max_d3 = ol[4096..]
+        .windows(4)
+        .map(|w| (w[3] - 3.0 * w[2] + 3.0 * w[1] - w[0]).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_d3 < 1.0e-3,
+        "expected smooth collapsed sine without partition clicks, got max_d3={max_d3}"
     );
 }
