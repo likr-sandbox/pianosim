@@ -9,6 +9,7 @@ pub mod f32x4;
 pub mod fft_radix2;
 pub mod lut_adaa;
 mod math;
+pub mod poly_adaa;
 pub mod real_fft;
 pub mod split_complex;
 
@@ -16,11 +17,14 @@ pub use aligned_buf::AlignedBuf;
 pub use f32x4::F32x4;
 pub use fft_radix2::{Complex, Radix2Fft};
 pub use lut_adaa::{adaa1_lerp, AdaaPowerLut, AdaaState, ADAA_DIFF_EPS};
+pub use poly_adaa::{PolyPowerApprox, POLY_ADAA_DIFF_EPS};
 pub use real_fft::RealFft;
 pub use split_complex::{complex_fma_accumulate, complex_fma_accumulate_lr, SplitComplexBuf};
 
 #[cfg(test)]
 mod lut_adaa_tests;
+#[cfg(test)]
+mod poly_adaa_tests;
 
 #[cfg(test)]
 mod tests {

@@ -362,6 +362,13 @@ impl AdaaState {
         self.x_prev == 0.0
     }
 
+    /// Returns the stored previous sample `x_prev`.
+    #[must_use]
+    #[inline]
+    pub const fn prev(&self) -> f32 {
+        self.x_prev
+    }
+
     /// Updates `x_prev` directly when stepping within a linear equilibrium region.
     #[inline]
     pub fn sync_x(&mut self, x: f32) {
