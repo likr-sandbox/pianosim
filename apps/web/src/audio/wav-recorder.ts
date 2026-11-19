@@ -124,6 +124,67 @@ export function encodeStereoWav(
   return out;
 }
 
+/** Encodes planar stereo f32 buffers (left/right) into a genuine RIFF/WAVE byte array. */
+export function encodePlanarStereoWav(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+  format: WavFormat,
+): Uint8Array {
+  const sr = Number.isFinite(sampleRate) && sampleRate > 0 ? Math.round(sampleRate) : WEB_AUDIO_SAMPLE_RATE;
+  const frames = Math.max(0, Math.min(left.length, right.length));
+
+  if (format === 'f32') {
+    const out = new Uint8Array(44 + frames * 8);
+    writeWavHeader(out, sr, frames, WAVE_FORMAT_IEEE_FLOAT, 32);
+    const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    let byteOff = 44;
+    for (let i = 0; i < frames; i++) {
+      const l = left[i];
+      const r = right[i];
+      dv.setFloat32(byteOff, Number.isFinite(l) ? l : 0.0, true);
+      dv.setFloat32(byteOff + 4, Number.isFinite(r) ? r : 0.0, true);
+      byteOff += 8;
+    }
+    return out;
+  }
+
+  const out = new Uint8Array(44 + frames * 6);
+  writeWavHeader(out, sr, frames, WAVE_FORMAT_PCM, 24);
+  const rng = new TpdfPrng();
+  let byteOff = 44;
+  for (let i = 0; i < frames; i++) {
+    const rawL = left[i];
+    const rawR = right[i];
+    const clL = Number.isFinite(rawL) ? Math.max(-1.0, Math.min(1.0, rawL)) : 0.0;
+    const clR = Number.isFinite(rawR) ? Math.max(-1.0, Math.min(1.0, rawR)) : 0.0;
+    const qL = Math.max(PCM24_MIN, Math.min(PCM24_MAX, Math.round(clL * PCM24_MAX + rng.nextTpdfLsb()))) | 0;
+    const qR = Math.max(PCM24_MIN, Math.min(PCM24_MAX, Math.round(clR * PCM24_MAX + rng.nextTpdfLsb()))) | 0;
+
+    out[byteOff] = qL & 0xff;
+    out[byteOff + 1] = (qL >> 8) & 0xff;
+    out[byteOff + 2] = (qL >> 16) & 0xff;
+    out[byteOff + 3] = qR & 0xff;
+    out[byteOff + 4] = (qR >> 8) & 0xff;
+    out[byteOff + 5] = (qR >> 16) & 0xff;
+    byteOff += 6;
+  }
+  return out;
+}
+
+export function createPlanarWavBlob(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+  format: WavFormat,
+): Blob | null {
+  if (Math.min(left.length, right.length) <= 0) {
+    return null;
+  }
+  const bytes = encodePlanarStereoWav(left, right, sampleRate, format);
+  return new Blob([bytes.buffer as ArrayBuffer], { type: 'audio/wav' });
+}
+
 /** Off-audio-thread stereo buffer accumulator for live AudioWorklet recording. */
 export class WavRecorder {
   private chunks: Float32Array[] = [];
@@ -186,12 +247,16 @@ export class WavRecorder {
   }
 }
 
-export function triggerWavDownload(blob: Blob, format: WavFormat): void {
+export function triggerWavDownload(
+  blob: Blob,
+  format: WavFormat,
+  filenamePrefix = 'pianosim-recording',
+): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   const suffix = format === 'f32' ? '32f' : '24bit';
   a.href = url;
-  a.download = `pianosim-recording-${suffix}.wav`;
+  a.download = `${filenamePrefix}-${suffix}.wav`;
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
