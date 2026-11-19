@@ -129,3 +129,93 @@ fn space_chunk_buf_is_decoupled_from_staging_and_rejects_oversized_chunks() {
         SPACE_CHUNK_MAX * 2,
     ));
 }
+
+#[test]
+fn interrupted_stage_body_space_chunk_restart_and_mismatched_commit_rejected() {
+    use piano_engine::{embedded_body_bytes, BodyArchetype, SpacePrepContext};
+
+    let mut ctx = WasmContext::new(48_000.0);
+    let mut prep = SpacePrepContext::new_concert_grand(48_000.0);
+    prep.set_body_preset_bytes(embedded_body_bytes(BodyArchetype::UprightStudio))
+        .unwrap();
+    let blob_a = prep
+        .prepare_space(ListenerPerspective::ConcertHall, LidState::Half)
+        .to_vec();
+
+    prep.set_body_preset_bytes(embedded_body_bytes(BodyArchetype::VintageSaloon))
+        .unwrap();
+    let blob_b = prep
+        .prepare_space(ListenerPerspective::BinauralHrtf, LidState::Closed)
+        .to_vec();
+
+    // Stream partial A (chunks 0..2), verify premature commit and mismatched body chunk fail.
+    let mut off = 0_usize;
+    for _ in 0..2 {
+        let n = SPACE_CHUNK_MAX.min(blob_a.len() - off);
+        ctx.space_chunk_buf[..n].copy_from_slice(&blob_a[off..off + n]);
+        assert!(ctx.stage_body_space_chunk(
+            BodyArchetype::UprightStudio,
+            ListenerPerspective::ConcertHall,
+            LidState::Half,
+            off,
+            n,
+            blob_a.len(),
+        ));
+        off += n;
+    }
+    assert!(!ctx.commit_body_space(
+        BodyArchetype::UprightStudio,
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+    ));
+
+    let bad_n = SPACE_CHUNK_MAX.min(blob_a.len() - off);
+    ctx.space_chunk_buf[..bad_n].copy_from_slice(&blob_a[off..off + bad_n]);
+    assert!(!ctx.stage_body_space_chunk(
+        BodyArchetype::VintageSaloon,
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        off,
+        bad_n,
+        blob_a.len(),
+    ));
+
+    // Restart cleanly from blob_off == 0 with stream B and commit.
+    let mut off_b = 0_usize;
+    while off_b < blob_b.len() {
+        let n = SPACE_CHUNK_MAX.min(blob_b.len() - off_b);
+        ctx.space_chunk_buf[..n].copy_from_slice(&blob_b[off_b..off_b + n]);
+        assert!(ctx.stage_body_space_chunk(
+            BodyArchetype::VintageSaloon,
+            ListenerPerspective::BinauralHrtf,
+            LidState::Closed,
+            off_b,
+            n,
+            blob_b.len(),
+        ));
+        off_b += n;
+    }
+
+    // Mismatched body, perspective, or lid commits must be rejected; exact commit succeeds.
+    assert!(!ctx.commit_body_space(
+        BodyArchetype::UprightStudio,
+        ListenerPerspective::BinauralHrtf,
+        LidState::Closed,
+    ));
+    assert!(!ctx.commit_body_space(
+        BodyArchetype::VintageSaloon,
+        ListenerPerspective::Player,
+        LidState::Closed,
+    ));
+    assert!(!ctx.commit_body_space(
+        BodyArchetype::VintageSaloon,
+        ListenerPerspective::BinauralHrtf,
+        LidState::Open,
+    ));
+    assert!(ctx.commit_body_space(
+        BodyArchetype::VintageSaloon,
+        ListenerPerspective::BinauralHrtf,
+        LidState::Closed,
+    ));
+    assert_eq!(ctx.body_archetype(), BodyArchetype::VintageSaloon);
+}
