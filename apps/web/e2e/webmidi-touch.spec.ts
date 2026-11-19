@@ -202,4 +202,37 @@ test.describe('Wave 1B: Offline Seek Pedals, WebMIDI & Touch Curve', () => {
     await page.getByTestId('touch-curve-natural').click();
     assertNoErrors();
   });
+
+  test('I-3 / Tier 4: Live Web MIDI CC66 Sostenuto latches held note and releases cleanly', async ({
+    page,
+  }) => {
+    const assertNoErrors = setupErrorMonitoring(page);
+    await page.goto('./');
+    await injectMockMidi(page);
+    await unlockAudioEngine(page);
+
+    await dispatchMockMidi(page, [0x90, 60, 108]);
+    await expect(page.locator('[data-midi="60"]')).toHaveClass(/is-active/);
+    await waitAudioBlocks(page, 32);
+
+    await dispatchMockMidi(page, [0xb0, 66, 127]);
+    await expect(page.getByTestId('pedal-sostenuto')).toHaveAttribute('aria-pressed', 'true');
+
+    await dispatchMockMidi(page, [0x80, 60, 64]);
+    await expect(page.locator('[data-midi="60"]')).not.toHaveClass(/is-active/);
+
+    await waitAudioBlocks(page, 96);
+    const sustained = await sampleDestinationAudio(page);
+    expect(sustained.nonFiniteCount).toBe(0);
+    expect(sustained.rms).toBeGreaterThan(0.0015);
+
+    await dispatchMockMidi(page, [0xb0, 66, 0]);
+    await expect(page.getByTestId('pedal-sostenuto')).toHaveAttribute('aria-pressed', 'false');
+    await expect
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .toBeLessThan(sustained.rms * 0.25);
+
+    await page.getByTestId('panic-btn').click();
+    assertNoErrors();
+  });
 });

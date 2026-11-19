@@ -5,6 +5,7 @@ import {
   unlockAudioEngine,
   waitForAudioRms,
 } from './helpers/audio-diag';
+import { buildMidiFile } from './helpers/midi-helpers';
 import { waitForOfflineRenderDone } from './helpers/offline-helpers';
 
 test.describe('E2E Enriched Demo Scores Suite (Offline Worker)', () => {
@@ -112,5 +113,40 @@ test.describe('E2E Enriched Demo Scores Suite (Offline Worker)', () => {
     await expect
       .poll(async () => page.locator('.piano-key.active, .piano-key.is-active').count())
       .toBe(0);
+  });
+
+  test('Short custom .mid completes playback naturally (Playing -> Ready) and replays immediately from t=0', async ({
+    page,
+  }) => {
+    test.setTimeout(30_000);
+    const smf = buildMidiFile([
+      { delta: 0, data: [0x90, 60, 108] },
+      { delta: 384, data: [0x80, 60, 64] },
+    ]);
+    await page.getByTestId('midi-file-input').setInputFiles({
+      name: 'short-end.mid',
+      mimeType: 'audio/midi',
+      buffer: Buffer.from(smf),
+    });
+
+    await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
+    await waitForAudioRms(page, 0.003);
+
+    await expect(page.getByTestId('offline-render-status')).toHaveText('Ready', {
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId('hud-voices')).toHaveText('0');
+    expect(await page.locator('.piano-key.is-active').count()).toBe(0);
+    expect(Number(await page.getByTestId('transport-seek').inputValue())).toBeCloseTo(0, 1);
+    await expect
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3_000 })
+      .toBeLessThan(0.0005);
+
+    // Immediate replay from t = 0 using cached render.
+    await page.getByTestId('transport-play').click();
+    await expect(page.getByTestId('offline-render-status')).toHaveText('Playing');
+    await waitForAudioRms(page, 0.003);
+    await page.getByTestId('transport-stop').click();
   });
 });

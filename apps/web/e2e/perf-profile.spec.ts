@@ -24,6 +24,7 @@ test.describe('E2E PerfProfile UI, URL Query, and 3-Tier Reconfiguration', () =>
   test('Default live preset is Balanced and ?perf=realtime overrides boot preset', async ({
     page,
   }) => {
+    test.setTimeout(60_000);
     await page.goto('./');
     await unlockAudioEngine(page);
     const defaultDiag = await page.evaluate(() => ({
@@ -45,11 +46,44 @@ test.describe('E2E PerfProfile UI, URL Query, and 3-Tier Reconfiguration', () =>
     expect(rtDiag.irDurationSecs).toBeCloseTo(0.18, 2);
     expect(rtDiag.firBlockFft).toBe(true);
     await expect(page.getByTestId('perf-preset-realtime')).toHaveClass(/active/);
+
+    // Verify ?perf=realtime C4 Sostenuto sustains above boundary threshold (RMS > 0.001).
+    const c4Key = page.locator('[data-midi="60"]');
+    await c4Key.dispatchEvent('pointerdown', { buttons: 1 });
+    await waitAudioBlocks(page, 64);
+    await page.getByTestId('pedal-sostenuto').click();
+    await expect(page.getByTestId('pedal-sostenuto')).toHaveAttribute('aria-pressed', 'true');
+    await c4Key.dispatchEvent('pointerup', { buttons: 0 });
+    await waitAudioBlocks(page, 160);
+    const sostRt = await sampleDestinationAudio(page);
+    expect(sostRt.nonFiniteCount).toBe(0);
+    expect(sostRt.rms).toBeGreaterThan(0.001);
+    await page.getByTestId('pedal-sostenuto').click();
+    await page.getByTestId('panic-btn').click();
+    await waitForSilence(page);
+
+    // Verify ?perf=full override and ?perf=invalid fallback to Balanced.
+    await page.goto('./?perf=full');
+    await unlockAudioEngine(page);
+    const fullDiag = await page.evaluate(() => ({
+      preset: window.__PIANO_DIAG__?.perfPreset,
+      irDurationSecs: window.__PIANO_DIAG__?.perfConfig.irDurationSecs,
+    }));
+    expect(fullDiag.preset).toBe(0);
+    expect(fullDiag.irDurationSecs).toBeCloseTo(0.5, 2);
+    await expect(page.getByTestId('perf-preset-full')).toHaveClass(/active/);
+
+    await page.goto('./?perf=invalid');
+    await unlockAudioEngine(page);
+    const invalidDiag = await page.evaluate(() => window.__PIANO_DIAG__?.perfPreset);
+    expect(invalidDiag).toBe(1);
+    await expect(page.getByTestId('perf-preset-balanced')).toHaveClass(/active/);
   });
 
   test('3-tier preset switching and 19-knob overrides preserve voicing/space state cleanly', async ({
     page,
   }) => {
+    test.setTimeout(60_000);
     await page.goto('./');
     await unlockAudioEngine(page);
 
@@ -72,13 +106,20 @@ test.describe('E2E PerfProfile UI, URL Query, and 3-Tier Reconfiguration', () =>
     await waitForPrepIdle(page);
     await expect(page.getByTestId('perf-preset-balanced')).toHaveClass(/active/);
 
-    // Verify note playback produces finite, non-clipping audio after Tier 3 rebuilds.
+    // Verify note playback produces finite, non-clipping audio and preserves A4 = 442.0 Hz after Tier 3 rebuilds.
     await page.locator('[data-midi="69"]').dispatchEvent('pointerdown', { buttons: 1 });
     await waitAudioBlocks(page, 64);
-    const stats = await sampleDestinationAudio(page);
+    const stats = await sampleDestinationAudio(page, { minFreq: 420, maxFreq: 465 });
     expect(stats.nonFiniteCount).toBe(0);
     expect(stats.peak).toBeLessThanOrEqual(1.0);
     expect(stats.rms).toBeGreaterThan(0.002);
+    expect(stats.peakFreqHz).toBeGreaterThanOrEqual(440.5);
+    expect(stats.peakFreqHz).toBeLessThanOrEqual(444.0);
+    const seqCheck = await page.evaluate(() => ({
+      applied: window.__PIANO_DIAG__?.appliedVoicingSeq ?? 0,
+      requested: window.__PIANO_DIAG__?.requestedVoicingSeq ?? 0,
+    }));
+    expect(seqCheck.applied).toBeGreaterThanOrEqual(seqCheck.requested);
     await page.locator('[data-midi="69"]').dispatchEvent('pointerup', { buttons: 0 });
     await page.getByTestId('panic-btn').click();
     await waitForSilence(page);
