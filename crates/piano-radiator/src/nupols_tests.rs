@@ -259,27 +259,39 @@ fn reset_immediately_zeros_state_and_repeats_cleanly() {
 
 #[test]
 fn staggered_schedule_is_strictly_collision_free_on_128_sample_blocks() {
-    // Verify 4-tier 4x-growth schedule over `128` 128-sample blocks (`256` 64-sample slots):
-    // - Tier 3 (`B=4096`) fires at most ONCE across any 128-sample callback (`sub` spaced by 4).
-    // - Tier 2 (`B=1024`) IFFTs (`sub16 in {12, 13}`) never coincide with Tier 3 (`sub64 & 3 == 3`).
+    // Verify P0-3 4-tier 4x-growth schedule over `128` 128-sample blocks (`256` 64-sample slots):
+    // - Tier 3 (`B=4096`) fires exclusively on even slots (`sub64 % 2 == 0`), so <= 1 op per 128f block.
+    // - Tier 3 never collides with Tier 1 (`m&3` in {1, 3}) or Tier 2 accum/IFFT (`m&15` in {10,11,12,13,15}).
+    // - Both Tier 3 IFFTs (`56, 62`) land on Tier 2 IDLE slots (`m&15` in {8, 14}).
     let mut tier3_ops_total = 0;
     for b in 0..128_usize {
         let mut tier3_in_block = 0;
         for half in 0..2_usize {
             let m = 2 * b + half + 1;
+            let sub4 = m & 3;
             let sub16 = m & 15;
             let sub64 = m & 63;
-            let tier2_ifft = m >= 16 && (sub16 == 12 || sub16 == 13);
-            let tier3_op = m >= 64
-                && matches!(
-                    sub64,
-                    3 | 7 | 11 | 15 | 19 | 23 | 27 | 31 | 35 | 39 | 43 | 47 | 51 | 55 | 59
-                );
-            assert!(
-                !(tier2_ifft && tier3_op),
-                "Tier 2 IFFT collided with Tier 3 8192-pt op at slot m={m}"
-            );
+            let tier1_heavy = m >= 4 && (sub4 == 1 || sub4 == 3);
+            let tier2_heavy = m >= 16 && matches!(sub16, 10 | 11 | 12 | 13 | 15);
+            let tier3_fwd = m >= 64 && matches!(sub64, 2 | 6 | 8 | 14 | 18 | 22 | 24 | 30 | 38);
+            let tier3_heavy = m >= 64 && matches!(sub64, 40 | 46 | 50 | 54 | 56 | 62);
+            let tier3_op = tier3_fwd || tier3_heavy;
             if tier3_op {
+                assert_eq!(sub64 & 1, 0, "Tier 3 op must be on even slot, got m={m}");
+                assert!(
+                    !tier1_heavy,
+                    "Tier 3 collided with Tier 1 heavy slot at m={m} (sub4={sub4})"
+                );
+                assert!(
+                    !tier2_heavy,
+                    "Tier 3 collided with Tier 2 accum/IFFT at m={m} (sub16={sub16})"
+                );
+                if matches!(sub64, 56 | 62) {
+                    assert!(
+                        matches!(sub16, 8 | 14),
+                        "Tier 3 IFFT must land on Tier 2 idle slot, got sub16={sub16}"
+                    );
+                }
                 tier3_in_block += 1;
                 tier3_ops_total += 1;
             }
@@ -289,7 +301,7 @@ fn staggered_schedule_is_strictly_collision_free_on_128_sample_blocks() {
             "multiple Tier 3 8192-pt ops in 128-sample block b={b}"
         );
     }
-    assert!(tier3_ops_total > 0);
+    assert_eq!(tier3_ops_total, 45);
 }
 
 #[test]

@@ -1,147 +1,35 @@
-//! Zero-allocation SIMD 3D early reflections + 8x8 orthogonal Hadamard FDN
-//! reverberator with `< 400 Hz` binaural IACC shaping and diffuse-field EQ.
+//! Zero-allocation SIMD 3D early reflections + configurable 4x4/8x8/16x16 orthogonal
+//! Hadamard FDN reverberator with `< 400 Hz` binaural IACC shaping and diffuse-field EQ.
 
 extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::f32::consts::FRAC_1_SQRT_2;
 use piano_simd::F32x4;
 use piano_spec::ListenerPerspective;
 
 use crate::binaural_hrtf::{Biquad, BiquadState};
+use crate::hall_hadamard::{
+    hadamard_16, hadamard_4, hadamard_8, next_pow2, next_prime_above, perspective_tuning,
+    snap_fdn_lines, ER_BASE_DELAYS_S, FDN_BASE_DELAYS_S, INV_SQRT_16, INV_SQRT_4, INV_SQRT_8,
+    MAX_FDN_LINES, NUM_ER_TAPS,
+};
 use crate::math::{clamp_f64, exp_f64, powf_f64, round_f64, PI};
-
-const NUM_FDN_LINES: usize = 8;
-const NUM_ER_TAPS: usize = 6;
 
 pub(crate) const DEFAULT_REVERB_DECAY_S: f32 = 1.8;
 pub(crate) const MAX_REVERB_DECAY_S: f32 = 3.2;
 
-const FDN_BASE_DELAYS_S: [f64; NUM_FDN_LINES] = [
-    0.0233, 0.0289, 0.0351, 0.0427, 0.0513, 0.0619, 0.0731, 0.0853,
-];
-
-const ER_BASE_DELAYS_S: [f64; NUM_ER_TAPS] = [0.0073, 0.0117, 0.0169, 0.0231, 0.0317, 0.0423];
-
-const INV_SQRT_8: f32 = 0.353_553_38;
 const FDN_AIR_LPF_HZ: f64 = 5_500.0;
 const IACC_CUTOFF_HZ: f64 = 400.0;
+const FDN_VEC_COUNT: usize = MAX_FDN_LINES / 4;
 
-#[inline]
-fn is_prime(n: usize) -> bool {
-    if n < 2 {
-        return false;
-    }
-    if n == 2 || n == 3 {
-        return true;
-    }
-    if n.is_multiple_of(2) || n.is_multiple_of(3) {
-        return false;
-    }
-    let mut d = 5usize;
-    while d * d <= n {
-        if n.is_multiple_of(d) || n.is_multiple_of(d + 2) {
-            return false;
-        }
-        d += 6;
-    }
-    true
-}
-
-#[inline]
-fn next_prime_above(mut n: usize, min_exclusive: usize) -> usize {
-    if n <= min_exclusive {
-        n = min_exclusive + 1;
-    }
-    while !is_prime(n) {
-        n += 1;
-    }
-    n
-}
-
-#[inline]
-fn next_pow2(mut n: usize) -> usize {
-    if n <= 1 {
-        return 1;
-    }
-    n -= 1;
-    n |= n >> 1;
-    n |= n >> 2;
-    n |= n >> 4;
-    n |= n >> 8;
-    n |= n >> 16;
-    n + 1
-}
-
-/// 8x8 orthogonal Walsh-Hadamard transform on two `F32x4` vectors (`H^T H = I`).
-#[inline]
-pub(crate) fn hadamard_8(lo: F32x4, hi: F32x4) -> (F32x4, F32x4) {
-    let sign2 = F32x4::from_array([1.0, 1.0, -1.0, -1.0]);
-    let scale = F32x4::splat(INV_SQRT_8);
-
-    let s_lo = lo + hi;
-    let s_hi = lo - hi;
-
-    let w_lo = s_lo * sign2 + s_lo.slide2(s_lo);
-    let w_hi = s_hi * sign2 + s_hi.slide2(s_hi);
-
-    let lo_l = w_lo.unpack_lo(w_lo);
-    let lo_h = w_lo.unpack_hi(w_lo);
-    let y_lo = (lo_l.unpack_lo(lo_h) + lo_l.unpack_hi(lo_h) * sign2) * scale;
-
-    let hi_l = w_hi.unpack_lo(w_hi);
-    let hi_h = w_hi.unpack_hi(w_hi);
-    let y_hi = (hi_l.unpack_lo(hi_h) + hi_l.unpack_hi(hi_h) * sign2) * scale;
-    (y_lo, y_hi)
-}
-
-#[derive(Clone, Copy)]
-struct PerspectiveTuning {
-    er_time_scale: f64,
-    er_gain_scale: f32,
-    fdn_gain_scale: f32,
-    er_tap_gains_l: [f32; NUM_ER_TAPS],
-    er_tap_gains_r: [f32; NUM_ER_TAPS],
-}
-
-fn perspective_tuning(perspective: ListenerPerspective) -> PerspectiveTuning {
-    match perspective {
-        ListenerPerspective::Player => PerspectiveTuning {
-            er_time_scale: 0.72,
-            er_gain_scale: 0.24,
-            fdn_gain_scale: 0.42,
-            er_tap_gains_l: [0.38, 0.22, 0.30, 0.16, 0.20, 0.12],
-            er_tap_gains_r: [0.22, 0.38, 0.18, 0.28, 0.14, 0.19],
-        },
-        ListenerPerspective::CloseStereo => PerspectiveTuning {
-            er_time_scale: 0.58,
-            er_gain_scale: 0.16,
-            fdn_gain_scale: 0.30,
-            er_tap_gains_l: [0.34, 0.24, 0.26, 0.18, 0.16, 0.11],
-            er_tap_gains_r: [0.24, 0.34, 0.18, 0.26, 0.12, 0.15],
-        },
-        ListenerPerspective::ConcertHall => PerspectiveTuning {
-            er_time_scale: 1.15,
-            er_gain_scale: 0.34,
-            fdn_gain_scale: 0.58,
-            er_tap_gains_l: [0.40, 0.28, 0.34, 0.24, 0.26, 0.18],
-            er_tap_gains_r: [0.28, 0.40, 0.24, 0.34, 0.18, 0.26],
-        },
-        ListenerPerspective::BinauralHrtf => PerspectiveTuning {
-            er_time_scale: 0.88,
-            er_gain_scale: 0.28,
-            fdn_gain_scale: 0.48,
-            er_tap_gains_l: [0.42, 0.18, 0.31, 0.15, 0.22, 0.12],
-            er_tap_gains_r: [0.18, 0.42, 0.15, 0.31, 0.12, 0.22],
-        },
-    }
-}
-
-/// Real-time zero-allocation 3D early-reflection + 8x8 Hadamard FDN reverberator.
+/// Real-time zero-allocation 3D early-reflection + 4x4/8x8/16x16 Hadamard FDN reverberator.
 #[derive(Clone)]
 pub(crate) struct HallFdn {
     sample_rate: f64,
     perspective: ListenerPerspective,
+    active_lines: usize,
     reverb_decay_s: f32,
     reverb_mix: f32,
 
@@ -156,16 +44,14 @@ pub(crate) struct HallFdn {
     fdn_level: f32,
 
     fdn_buf: Vec<f32>,
-    fdn_offsets: [usize; NUM_FDN_LINES],
-    fdn_lens: [usize; NUM_FDN_LINES],
-    fdn_pos: [usize; NUM_FDN_LINES],
+    fdn_offsets: [usize; MAX_FDN_LINES],
+    fdn_lens: [usize; MAX_FDN_LINES],
+    fdn_pos: [usize; MAX_FDN_LINES],
 
-    fdn_gain_lo: F32x4,
-    fdn_gain_hi: F32x4,
+    fdn_gains: [F32x4; FDN_VEC_COUNT],
     lpf_coeff: F32x4,
     one_minus_lpf: F32x4,
-    lpf_lo: F32x4,
-    lpf_hi: F32x4,
+    lpf_state: [F32x4; FDN_VEC_COUNT],
 
     is_binaural: bool,
     iacc_mid_shelf: Biquad,
@@ -181,17 +67,27 @@ pub(crate) struct HallFdn {
 }
 
 impl HallFdn {
+    #[cfg(test)]
     pub(crate) fn new(sample_rate: f64, perspective: ListenerPerspective) -> Self {
+        Self::new_with_lines(sample_rate, perspective, 8)
+    }
+
+    pub(crate) fn new_with_lines(
+        sample_rate: f64,
+        perspective: ListenerPerspective,
+        lines: u8,
+    ) -> Self {
         let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
+        let active_lines = snap_fdn_lines(lines);
         let max_er_samples = (round_f64(0.060 * sr) as usize).max(64);
         let er_len = next_pow2(max_er_samples + 8);
         let er_mask = er_len - 1;
 
-        let mut fdn_lens = [0usize; NUM_FDN_LINES];
-        let mut fdn_offsets = [0usize; NUM_FDN_LINES];
+        let mut fdn_lens = [0usize; MAX_FDN_LINES];
+        let mut fdn_offsets = [0usize; MAX_FDN_LINES];
         let mut total_fdn = 0usize;
         let mut prev_len = 16usize;
-        for i in 0..NUM_FDN_LINES {
+        for i in 0..MAX_FDN_LINES {
             let target = round_f64(FDN_BASE_DELAYS_S[i] * sr) as usize;
             let prime_len = next_prime_above(target, prev_len);
             fdn_offsets[i] = total_fdn;
@@ -207,6 +103,7 @@ impl HallFdn {
         let mut fdn = Self {
             sample_rate: sr,
             perspective,
+            active_lines,
             reverb_decay_s: DEFAULT_REVERB_DECAY_S,
             reverb_mix: 0.0,
             er_buf_l: vec![0.0_f32; er_len],
@@ -221,13 +118,11 @@ impl HallFdn {
             fdn_buf: vec![0.0_f32; total_fdn],
             fdn_offsets,
             fdn_lens,
-            fdn_pos: [0; NUM_FDN_LINES],
-            fdn_gain_lo: F32x4::zero(),
-            fdn_gain_hi: F32x4::zero(),
+            fdn_pos: [0; MAX_FDN_LINES],
+            fdn_gains: [F32x4::zero(); FDN_VEC_COUNT],
             lpf_coeff: F32x4::splat(a_lpf),
             one_minus_lpf: F32x4::splat(1.0 - a_lpf),
-            lpf_lo: F32x4::zero(),
-            lpf_hi: F32x4::zero(),
+            lpf_state: [F32x4::zero(); FDN_VEC_COUNT],
             is_binaural: matches!(perspective, ListenerPerspective::BinauralHrtf),
             iacc_mid_shelf,
             iacc_side_shelf,
@@ -243,6 +138,31 @@ impl HallFdn {
         fdn.update_perspective_tuning();
         fdn.update_decay_gains();
         fdn
+    }
+
+    #[inline]
+    pub(crate) const fn fdn_lines(&self) -> u8 {
+        self.active_lines as u8
+    }
+
+    pub(crate) fn set_fdn_lines(&mut self, lines: u8) {
+        let new_lines = snap_fdn_lines(lines);
+        if new_lines == self.active_lines {
+            return;
+        }
+        if new_lines > self.active_lines {
+            for i in self.active_lines..new_lines {
+                let off = self.fdn_offsets[i];
+                let len = self.fdn_lens[i];
+                self.fdn_buf[off..off + len].fill(0.0);
+                self.fdn_pos[i] = 0;
+            }
+            for v in (self.active_lines / 4)..(new_lines / 4) {
+                self.lpf_state[v] = F32x4::zero();
+            }
+        }
+        self.active_lines = new_lines;
+        self.update_decay_gains();
     }
 
     pub(crate) fn set_perspective(&mut self, perspective: ListenerPerspective) {
@@ -290,8 +210,7 @@ impl HallFdn {
         self.er_pos = 0;
         self.fdn_buf.fill(0.0);
         self.fdn_pos.fill(0);
-        self.lpf_lo = F32x4::zero();
-        self.lpf_hi = F32x4::zero();
+        self.lpf_state = [F32x4::zero(); FDN_VEC_COUNT];
         self.iacc_lp_mid.reset();
         self.iacc_lp_side.reset();
         self.diff_eq_peak_l.reset();
@@ -324,22 +243,151 @@ impl HallFdn {
 
     fn update_decay_gains(&mut self) {
         if self.reverb_decay_s <= 0.0 {
-            self.fdn_gain_lo = F32x4::zero();
-            self.fdn_gain_hi = F32x4::zero();
+            self.fdn_gains = [F32x4::zero(); FDN_VEC_COUNT];
             return;
         }
         let decay_s = self.reverb_decay_s as f64;
-        let mut g = [0.0_f32; NUM_FDN_LINES];
-        for (i, slot) in g.iter_mut().enumerate() {
-            let len_s = (self.fdn_lens[i] as f64) / self.sample_rate;
-            let gain = powf_f64(10.0, -3.0 * len_s / decay_s).min(0.9995);
-            *slot = gain as f32;
+        let mut g = [0.0_f32; MAX_FDN_LINES];
+        for (slot, &len) in g
+            .iter_mut()
+            .zip(self.fdn_lens.iter())
+            .take(self.active_lines)
+        {
+            let len_s = (len as f64) / self.sample_rate;
+            *slot = powf_f64(10.0, -3.0 * len_s / decay_s).min(0.9995) as f32;
         }
-        self.fdn_gain_lo = F32x4::from_array([g[0], g[1], g[2], g[3]]);
-        self.fdn_gain_hi = F32x4::from_array([g[4], g[5], g[6], g[7]]);
+        for v in 0..FDN_VEC_COUNT {
+            let base = v * 4;
+            self.fdn_gains[v] = F32x4::from_array([g[base], g[base + 1], g[base + 2], g[base + 3]]);
+        }
     }
 
-    /// Apply 3D early reflections + 8x8 FDN diffuse reverb in-place with 0-sample latency.
+    #[inline]
+    fn step_fdn_lines(&mut self, inj_l: f32, inj_r: f32, fdn_level: f32) -> (f32, f32) {
+        let anti_denorm = F32x4::splat(1.0e-25);
+        let mid_in = 0.5 * (inj_l + inj_r);
+        let side_in = 0.5 * (inj_l - inj_r);
+        let n_lines = self.active_lines;
+        let n_vecs = n_lines / 4;
+
+        let mut x_arr = [0.0_f32; MAX_FDN_LINES];
+        let mut k = 0;
+        while k < n_lines {
+            x_arr[k] = self.fdn_buf[self.fdn_offsets[k] + self.fdn_pos[k]];
+            k += 1;
+        }
+
+        let mut d = [F32x4::zero(); FDN_VEC_COUNT];
+        let mut v = 0;
+        while v < n_vecs {
+            let b = v * 4;
+            let xv = F32x4::from_array([x_arr[b], x_arr[b + 1], x_arr[b + 2], x_arr[b + 3]]);
+            self.lpf_state[v] = xv * self.one_minus_lpf + self.lpf_state[v] * self.lpf_coeff;
+            d[v] = self.lpf_state[v] * self.fdn_gains[v];
+            v += 1;
+        }
+
+        let (fdn_l, fdn_r, w) = match n_lines {
+            4 => {
+                let rl = F32x4::from_array([FRAC_1_SQRT_2, 0.0, -FRAC_1_SQRT_2, 0.0]);
+                let rr = F32x4::from_array([0.0, FRAC_1_SQRT_2, 0.0, -FRAC_1_SQRT_2]);
+                let fl = (d[0] * rl).reduce_sum() * fdn_level;
+                let fr = (d[0] * rr).reduce_sum() * fdn_level;
+                let y0 = hadamard_4(d[0]);
+                let in0 = F32x4::from_array([
+                    mid_in + side_in,
+                    mid_in - side_in,
+                    -mid_in + side_in,
+                    -mid_in - side_in,
+                ]) * F32x4::splat(INV_SQRT_4);
+                let w0 = ((y0 + in0) + anti_denorm) - anti_denorm;
+                (fl, fr, [w0, F32x4::zero(), F32x4::zero(), F32x4::zero()])
+            }
+            8 => {
+                let rl = F32x4::from_array([0.5, 0.0, -0.5, 0.0]);
+                let rr = F32x4::from_array([0.0, 0.5, 0.0, -0.5]);
+                let fl = (d[0] * rl + d[1] * rl).reduce_sum() * fdn_level;
+                let fr = (d[0] * rr + d[1] * rr).reduce_sum() * fdn_level;
+                let (y0, y1) = hadamard_8(d[0], d[1]);
+                let scale = F32x4::splat(INV_SQRT_8);
+                let in0 = F32x4::from_array([
+                    mid_in + side_in,
+                    mid_in - side_in,
+                    -mid_in + side_in,
+                    -mid_in - side_in,
+                ]) * scale;
+                let in1 = F32x4::from_array([
+                    mid_in - side_in,
+                    -mid_in + side_in,
+                    mid_in + side_in,
+                    -mid_in - side_in,
+                ]) * scale;
+                let w0 = ((y0 + in0) + anti_denorm) - anti_denorm;
+                let w1 = ((y1 + in1) + anti_denorm) - anti_denorm;
+                (fl, fr, [w0, w1, F32x4::zero(), F32x4::zero()])
+            }
+            _ => {
+                let rl = F32x4::from_array([INV_SQRT_8, 0.0, -INV_SQRT_8, 0.0]);
+                let rr = F32x4::from_array([0.0, INV_SQRT_8, 0.0, -INV_SQRT_8]);
+                let fl = ((d[0] + d[1] + d[2] + d[3]) * rl).reduce_sum() * fdn_level;
+                let fr = ((d[0] + d[1] + d[2] + d[3]) * rr).reduce_sum() * fdn_level;
+                let y = hadamard_16(d);
+                let scale = F32x4::splat(INV_SQRT_16);
+                let in0 = F32x4::from_array([
+                    mid_in + side_in,
+                    mid_in - side_in,
+                    -mid_in + side_in,
+                    -mid_in - side_in,
+                ]) * scale;
+                let in1 = F32x4::from_array([
+                    mid_in - side_in,
+                    -mid_in + side_in,
+                    mid_in + side_in,
+                    -mid_in - side_in,
+                ]) * scale;
+                let in2 = F32x4::from_array([
+                    -mid_in + side_in,
+                    mid_in + side_in,
+                    -mid_in - side_in,
+                    mid_in - side_in,
+                ]) * scale;
+                let in3 = F32x4::from_array([
+                    -mid_in - side_in,
+                    -mid_in + side_in,
+                    mid_in - side_in,
+                    mid_in + side_in,
+                ]) * scale;
+                let w0 = ((y[0] + in0) + anti_denorm) - anti_denorm;
+                let w1 = ((y[1] + in1) + anti_denorm) - anti_denorm;
+                let w2 = ((y[2] + in2) + anti_denorm) - anti_denorm;
+                let w3 = ((y[3] + in3) + anti_denorm) - anti_denorm;
+                (fl, fr, [w0, w1, w2, w3])
+            }
+        };
+
+        let mut v_idx = 0;
+        while v_idx < n_vecs {
+            let arr = w[v_idx].to_array();
+            let base = v_idx * 4;
+            let mut lane = 0;
+            while lane < 4 {
+                let m = base + lane;
+                let pos = self.fdn_pos[m];
+                self.fdn_buf[self.fdn_offsets[m] + pos] = arr[lane];
+                let next_pos = pos + 1;
+                self.fdn_pos[m] = if next_pos >= self.fdn_lens[m] {
+                    0
+                } else {
+                    next_pos
+                };
+                lane += 1;
+            }
+            v_idx += 1;
+        }
+        (fdn_l, fdn_r)
+    }
+
+    /// Apply 3D early reflections + Hadamard FDN diffuse reverb in-place with 0-sample latency.
     pub(crate) fn process_block(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         if !self.is_active() {
             return;
@@ -349,12 +397,6 @@ impl HallFdn {
         let wet_gain = self.reverb_mix * 0.72;
         let er_level = self.er_level;
         let fdn_level = self.fdn_level;
-
-        let read_l_lo = F32x4::from_array([0.5, 0.0, -0.5, 0.0]);
-        let read_l_hi = F32x4::from_array([0.5, 0.0, -0.5, 0.0]);
-        let read_r_lo = F32x4::from_array([0.0, 0.5, 0.0, -0.5]);
-        let read_r_hi = F32x4::from_array([0.0, 0.5, 0.0, -0.5]);
-        let inj_scale = F32x4::splat(INV_SQRT_8);
         let anti_denorm = F32x4::splat(1.0e-25);
 
         let er_mask = self.er_mask;
@@ -404,58 +446,8 @@ impl HallFdn {
             let er_vr1 = F32x4::from_array([self.er_buf_r[p4], self.er_buf_l[p5], 0.0, 0.0]);
             let er_r = (er_vr0 * er_gr0 + er_vr1 * er_gr1).reduce_sum() * er_level;
 
-            let mut x_arr = [0.0_f32; NUM_FDN_LINES];
-            let mut k = 0;
-            while k < NUM_FDN_LINES {
-                x_arr[k] = self.fdn_buf[self.fdn_offsets[k] + self.fdn_pos[k]];
-                k += 1;
-            }
-            let x_lo = F32x4::from_array([x_arr[0], x_arr[1], x_arr[2], x_arr[3]]);
-            let x_hi = F32x4::from_array([x_arr[4], x_arr[5], x_arr[6], x_arr[7]]);
-
-            self.lpf_lo = x_lo * self.one_minus_lpf + self.lpf_lo * self.lpf_coeff;
-            self.lpf_hi = x_hi * self.one_minus_lpf + self.lpf_hi * self.lpf_coeff;
-            let d_lo = self.lpf_lo * self.fdn_gain_lo;
-            let d_hi = self.lpf_hi * self.fdn_gain_hi;
-
-            let fdn_l = (d_lo * read_l_lo + d_hi * read_l_hi).reduce_sum() * fdn_level;
-            let fdn_r = (d_lo * read_r_lo + d_hi * read_r_hi).reduce_sum() * fdn_level;
-
-            let (y_lo, y_hi) = hadamard_8(d_lo, d_hi);
-            let inj_l = er_l + 0.45 * dry_l;
-            let inj_r = er_r + 0.45 * dry_r;
-            let mid_in = 0.5 * (inj_l + inj_r);
-            let side_in = 0.5 * (inj_l - inj_r);
-            let in_lo = F32x4::from_array([
-                mid_in + side_in,
-                mid_in - side_in,
-                -mid_in + side_in,
-                -mid_in - side_in,
-            ]) * inj_scale;
-            let in_hi = F32x4::from_array([
-                mid_in - side_in,
-                -mid_in + side_in,
-                mid_in + side_in,
-                -mid_in - side_in,
-            ]) * inj_scale;
-
-            let w_lo = ((y_lo + in_lo) + anti_denorm) - anti_denorm;
-            let w_hi = ((y_hi + in_hi) + anti_denorm) - anti_denorm;
-            let w0 = w_lo.to_array();
-            let w1 = w_hi.to_array();
-            let w_all = [w0[0], w0[1], w0[2], w0[3], w1[0], w1[1], w1[2], w1[3]];
-            let mut m = 0;
-            while m < NUM_FDN_LINES {
-                let pos = self.fdn_pos[m];
-                self.fdn_buf[self.fdn_offsets[m] + pos] = w_all[m];
-                let next_pos = pos + 1;
-                self.fdn_pos[m] = if next_pos >= self.fdn_lens[m] {
-                    0
-                } else {
-                    next_pos
-                };
-                m += 1;
-            }
+            let (fdn_l, fdn_r) =
+                self.step_fdn_lines(er_l + 0.45 * dry_l, er_r + 0.45 * dry_r, fdn_level);
 
             let mut wet_l = er_l + fdn_l;
             let mut wet_r = er_r + fdn_r;
@@ -478,8 +470,10 @@ impl HallFdn {
         }
 
         self.er_pos = er_pos;
-        self.lpf_lo = (self.lpf_lo + anti_denorm) - anti_denorm;
-        self.lpf_hi = (self.lpf_hi + anti_denorm) - anti_denorm;
+        let n_vecs = self.active_lines / 4;
+        for v in 0..n_vecs {
+            self.lpf_state[v] = (self.lpf_state[v] + anti_denorm) - anti_denorm;
+        }
         self.iacc_lp_mid.flush_denormals();
         self.iacc_lp_side.flush_denormals();
         self.diff_eq_peak_l.flush_denormals();

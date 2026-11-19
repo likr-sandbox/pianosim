@@ -2,9 +2,30 @@ use alloc::vec;
 use piano_simd::{F32x4, RealFft};
 use piano_spec::{LidState, ListenerPerspective, PRESET_RADIATOR_ZONES};
 
-use crate::hall_fdn::{hadamard_8, HallFdn};
+use crate::hall_fdn::HallFdn;
+use crate::hall_hadamard::{hadamard_16, hadamard_4, hadamard_8};
 use crate::nupols_tests::test_preset;
 use crate::RadiatorBank;
+
+#[test]
+fn hadamard_4_is_strictly_orthogonal_and_energy_preserving() {
+    let mut cols = [[0.0_f32; 4]; 4];
+    for c in 0..4 {
+        let mut basis = [0.0_f32; 4];
+        basis[c] = 1.0;
+        cols[c] = hadamard_4(F32x4::from_array(basis)).to_array();
+    }
+    for i in 0..4 {
+        for j in 0..4 {
+            let dot: f32 = (0..4).map(|r| cols[i][r] * cols[j][r]).sum();
+            let expected = if i == j { 1.0 } else { 0.0 };
+            assert!(
+                (dot - expected).abs() < 1.0e-6,
+                "H4^T H4 [{i}][{j}] = {dot}, expected {expected}"
+            );
+        }
+    }
+}
 
 #[test]
 fn hadamard_8_is_strictly_orthogonal_and_energy_preserving() {
@@ -28,6 +49,35 @@ fn hadamard_8_is_strictly_orthogonal_and_energy_preserving() {
             assert!(
                 (dot - expected).abs() < 1.0e-6,
                 "H^T H [{i}][{j}] = {dot}, expected {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn hadamard_16_is_strictly_orthogonal_and_energy_preserving() {
+    let mut cols = [[0.0_f32; 16]; 16];
+    for c in 0..16 {
+        let mut basis = [0.0_f32; 16];
+        basis[c] = 1.0;
+        let y = hadamard_16([
+            F32x4::from_array([basis[0], basis[1], basis[2], basis[3]]),
+            F32x4::from_array([basis[4], basis[5], basis[6], basis[7]]),
+            F32x4::from_array([basis[8], basis[9], basis[10], basis[11]]),
+            F32x4::from_array([basis[12], basis[13], basis[14], basis[15]]),
+        ]);
+        for v in 0..4 {
+            let arr = y[v].to_array();
+            cols[c][v * 4..v * 4 + 4].copy_from_slice(&arr);
+        }
+    }
+    for i in 0..16 {
+        for j in 0..16 {
+            let dot: f32 = (0..16).map(|r| cols[i][r] * cols[j][r]).sum();
+            let expected = if i == j { 1.0 } else { 0.0 };
+            assert!(
+                (dot - expected).abs() < 1.0e-6,
+                "H16^T H16 [{i}][{j}] = {dot}, expected {expected}"
             );
         }
     }
@@ -248,5 +298,49 @@ fn hall_fdn_reset_and_block_size_invariance() {
     for i in 0..len {
         assert!((la2[i] - lb[i]).abs() < 1.0e-6);
         assert!((ra2[i] - rb[i]).abs() < 1.0e-6);
+    }
+}
+
+#[test]
+fn hall_fdn_runtime_line_switching_4_8_16_preserves_binaural_iacc_and_stability() {
+    let sr = 48_000.0;
+    for &lines in &[4_u8, 8, 16] {
+        let mut fdn = HallFdn::new_with_lines(sr, ListenerPerspective::BinauralHrtf, lines);
+        assert_eq!(fdn.fdn_lines(), lines);
+        fdn.set_reverb(2.0, 0.65);
+
+        let n = 16_384_usize;
+        let (mut l, mut r) = (vec![0.0_f32; n], vec![0.0_f32; n]);
+        l[0] = 0.55;
+        r[0] = -0.35;
+        fdn.process_block(&mut l, &mut r);
+
+        assert!(l.iter().all(|x| x.is_finite()));
+        assert!(r.iter().all(|x| x.is_finite()));
+        let iacc_lo = band_iacc(&l[64..], &r[64..], sr, 60.0, 350.0);
+        let iacc_hi = band_iacc(&l[64..], &r[64..], sr, 1_200.0, 6_000.0);
+        assert!(
+            iacc_lo > 0.70,
+            "lines={lines} <350Hz binaural IACC={iacc_lo:.3} must exceed 0.70"
+        );
+        assert!(
+            iacc_lo > iacc_hi + 0.30,
+            "lines={lines} low IACC ({iacc_lo:.3}) must exceed high IACC ({iacc_hi:.3})"
+        );
+    }
+
+    // Verify hot-swapping 8 -> 4 -> 16 -> 8 on RadiatorBank is finite and updates line count.
+    let preset = test_preset(32);
+    let mut bank = RadiatorBank::from_preset(&preset, sr);
+    bank.set_reverb(1.8, 0.25);
+    assert_eq!(bank.fdn_lines(), 8);
+    let frames = [[0.05_f32; PRESET_RADIATOR_ZONES]; 128];
+    let (mut ol, mut or) = ([0.0_f32; 128], [0.0_f32; 128]);
+    for &lines in &[4_u8, 16, 4, 8] {
+        bank.set_fdn_lines(lines);
+        assert_eq!(bank.fdn_lines(), lines);
+        bank.process_block(&frames, &mut ol, &mut or);
+        assert!(ol.iter().all(|x| x.is_finite()));
+        assert!(or.iter().all(|x| x.is_finite()));
     }
 }

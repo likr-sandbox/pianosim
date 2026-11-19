@@ -5,20 +5,26 @@
 
 extern crate alloc;
 
+mod bank_config;
 mod binaural_hrtf;
+mod block_fft_head;
 mod body_assets;
 mod fir_head;
 mod hall_fdn;
+mod hall_hadamard;
 mod ir_synth;
 mod limiter;
 mod math;
 mod mic_perspectives;
 mod modal_prepare;
 mod modal_synth;
+mod nupols_collapse;
 mod nupols_tier;
 mod partitioned_fft;
+mod partitioned_schedule;
 mod pole_cancel_filter;
 mod space_blob;
+mod space_blob_install;
 mod subrate_upsample;
 mod velvet_tail;
 
@@ -31,38 +37,50 @@ mod multi_body_tests;
 #[cfg(test)]
 mod nupols_tests;
 #[cfg(test)]
+mod profile_tests;
+#[cfg(test)]
 mod spectral_tests;
 #[cfg(test)]
 mod tests;
 
-use alloc::vec::Vec;
+use bank_config::empty_fallback_preset;
+use block_fft_head::{BlockFftHead, BLOCK_FFT_SIZE};
 pub use body_assets::{body_asset_filename, embedded_body_bytes, BodyArchetype};
 use core::fmt;
-use fir_head::{FirHead, HEAD_TAPS};
+use fir_head::FirHead;
 use hall_fdn::HallFdn;
-pub use ir_synth::{ir_len_for_sample_rate, synthesize_irs, IrSynthScratch};
+pub use ir_synth::{
+    ir_len_for_sample_rate, ir_len_for_sample_rate_secs, synthesize_irs,
+    synthesize_irs_with_duration, IrSynthScratch,
+};
 use limiter::StereoLimiter;
 use math::clamp_f64;
 use partitioned_fft::NupolsTail;
 pub use piano_spec::{
-    BodyPreset, LidState, ListenerPerspective, PresetDecodeError, PRESET_RADIATOR_ZONES,
+    BodyPreset, LidState, ListenerPerspective, PerfPreset, PerfProfile, PresetDecodeError,
+    PRESET_RADIATOR_ZONES,
 };
-use piano_spec::{PresetReducedPole, PRESET_BRIDGE_ZONES, PRESET_REDUCED_POLES};
-pub use space_blob::{space_blob_len_for_sample_rate, SpacePrepContext};
+pub use space_blob::{
+    space_blob_len_for_profile, space_blob_len_for_sample_rate, SpacePrepContext,
+    SPACE_BLOB_HEADER_LEN, SPACE_BLOB_MAGIC_V2,
+};
 
 /// Deterministic physics-baked 9-zone concert-grand `PIANOBOD` asset.
 pub const CONCERT_GRAND_PRESET_BYTES: &[u8] = include_bytes!("../assets/concert_grand_v1.pbdy");
 
-/// Stage 4 acoustic radiator combining a 64-tap zero-latency `F32x4` direct FIR
-/// head with a zero-allocation Staggered MIMO NUPOLS convolution tail.
+/// Stage 4 acoustic radiator combining a configurable `16/32/64`-tap SIMD FIR (or
+/// optional 32-sample block-FFT) head with a zero-alloc Staggered NUPOLS tail.
 #[derive(Clone)]
 pub struct RadiatorBank {
     preset: BodyPreset,
     sample_rate: f64,
     perspective: ListenerPerspective,
     lid_state: LidState,
+    profile: PerfProfile,
+    fir_block_fft: bool,
     scratch: IrSynthScratch,
     head: FirHead,
+    block_fft_head: BlockFftHead,
     tail: NupolsTail,
     hall_fdn: HallFdn,
     limiter: StereoLimiter,
@@ -74,30 +92,15 @@ impl fmt::Debug for RadiatorBank {
             .field("sample_rate", &self.sample_rate)
             .field("perspective", &self.perspective)
             .field("lid_state", &self.lid_state)
-            .field("ir_len", &self.scratch.ir_len)
+            .field("ir_len", &self.tail.active_ir_len())
             .field("modes", &self.preset.modes.len())
             .finish()
     }
 }
 
-fn empty_fallback_preset() -> BodyPreset {
-    BodyPreset {
-        y_inf: [1.8e-4; PRESET_BRIDGE_ZONES],
-        direct_zone_gain: [0.0; PRESET_RADIATOR_ZONES],
-        zone_pos_m: [[0.0; 3]; PRESET_RADIATOR_ZONES],
-        reduced_poles: [PresetReducedPole {
-            freq_hz: 100.0,
-            zeta: 0.02,
-            modal_mass_kg: 0.0,
-            zone_gains: [0.0; PRESET_BRIDGE_ZONES],
-        }; PRESET_REDUCED_POLES],
-        modes: Vec::new(),
-    }
-}
-
 impl RadiatorBank {
     /// Construct a radiator bank from the embedded `concert_grand_v1.pbdy` preset
-    /// with default `Player` perspective and `Open` lid state.
+    /// with default `Player` perspective, `Open` lid state, and `Full` profile.
     pub fn new_concert_grand(sample_rate: f64) -> Self {
         Self::new_concert_grand_with_space(sample_rate, ListenerPerspective::Player, LidState::Open)
     }
@@ -109,9 +112,19 @@ impl RadiatorBank {
         perspective: ListenerPerspective,
         lid_state: LidState,
     ) -> Self {
+        Self::new_with_profile(sample_rate, perspective, lid_state, &PerfProfile::full())
+    }
+
+    /// Construct a concert-grand radiator bank with explicit space and [`PerfProfile`].
+    pub fn new_with_profile(
+        sample_rate: f64,
+        perspective: ListenerPerspective,
+        lid_state: LidState,
+        profile: &PerfProfile,
+    ) -> Self {
         let preset = BodyPreset::decode(CONCERT_GRAND_PRESET_BYTES)
             .unwrap_or_else(|_| empty_fallback_preset());
-        Self::from_preset_with_space(&preset, sample_rate, perspective, lid_state)
+        Self::from_preset_with_profile(&preset, sample_rate, perspective, lid_state, profile)
     }
 
     /// Construct a radiator bank from a decoded `BodyPreset` using default
@@ -132,17 +145,46 @@ impl RadiatorBank {
         perspective: ListenerPerspective,
         lid_state: LidState,
     ) -> Self {
+        Self::from_preset_with_profile(
+            preset,
+            sample_rate,
+            perspective,
+            lid_state,
+            &PerfProfile::full(),
+        )
+    }
+
+    /// Construct a radiator bank from a decoded `BodyPreset`, space, and [`PerfProfile`].
+    pub fn from_preset_with_profile(
+        preset: &BodyPreset,
+        sample_rate: f64,
+        perspective: ListenerPerspective,
+        lid_state: LidState,
+        profile: &PerfProfile,
+    ) -> Self {
         let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
-        let ir_len = ir_len_for_sample_rate(sr);
+        let prof = profile.sanitized();
+        let max_ir_len = ir_len_for_sample_rate(sr);
+        let active_ir_len = ir_len_for_sample_rate_secs(sr, f64::from(prof.ir_duration_secs));
+        let mut tail = NupolsTail::new(max_ir_len);
+        tail.set_stage4_config(
+            active_ir_len,
+            prof.spatial_tail_split_tap,
+            prof.fir_head_taps,
+            prof.fir_block_fft,
+        );
         let mut bank = Self {
             preset: preset.clone(),
             sample_rate: sr,
             perspective,
             lid_state,
-            scratch: IrSynthScratch::new(ir_len),
-            head: FirHead::new(),
-            tail: NupolsTail::new(ir_len),
-            hall_fdn: HallFdn::new(sr, perspective),
+            profile: prof,
+            fir_block_fft: prof.fir_block_fft,
+            scratch: IrSynthScratch::new(max_ir_len),
+            head: FirHead::new_with_taps(prof.fir_head_taps),
+            block_fft_head: BlockFftHead::new(),
+            tail,
+            hall_fdn: HallFdn::new_with_lines(sr, perspective, prof.hall_fdn_lines),
             limiter: StereoLimiter::new(sr),
         };
         bank.rebuild_ir_and_load();
@@ -166,51 +208,52 @@ impl RadiatorBank {
         perspective: ListenerPerspective,
         lid_state: LidState,
     ) -> Result<Self, PresetDecodeError> {
+        Self::from_preset_bytes_with_profile(
+            bytes,
+            sample_rate,
+            perspective,
+            lid_state,
+            &PerfProfile::full(),
+        )
+    }
+
+    /// Decode serialized `PIANOBOD` bytes with explicit space and [`PerfProfile`].
+    pub fn from_preset_bytes_with_profile(
+        bytes: &[u8],
+        sample_rate: f64,
+        perspective: ListenerPerspective,
+        lid_state: LidState,
+        profile: &PerfProfile,
+    ) -> Result<Self, PresetDecodeError> {
         let preset = BodyPreset::decode(bytes)?;
-        Ok(Self::from_preset_with_space(
+        Ok(Self::from_preset_with_profile(
             &preset,
             sample_rate,
             perspective,
             lid_state,
+            profile,
         ))
     }
 
-    /// Re-synthesize all 18 spatialized IRs and reload FIR/NUPOLS partitions in-place.
-    pub fn reconfigure_space(&mut self, perspective: ListenerPerspective, lid_state: LidState) {
-        if self.perspective == perspective && self.lid_state == lid_state {
-            return;
-        }
-        self.perspective = perspective;
-        self.lid_state = lid_state;
-        self.hall_fdn.set_perspective(perspective);
-        self.rebuild_ir_and_load();
+    /// Hot-swap the Hall FDN line count (`4`, `8`, or `16`) with zero heap allocations.
+    #[inline]
+    pub fn set_fdn_lines(&mut self, lines: u8) {
+        self.hall_fdn.set_fdn_lines(lines);
+        self.profile.hall_fdn_lines = self.hall_fdn.fdn_lines();
     }
 
-    /// Decode serialized `PIANOBOD` bytes, switch the active body preset, and
-    /// re-synthesize FIR/NUPOLS partitions in-place.
-    pub fn reconfigure_from_preset_bytes(
-        &mut self,
-        bytes: &[u8],
-        perspective: ListenerPerspective,
-        lid_state: LidState,
-    ) -> Result<(), PresetDecodeError> {
-        let preset = BodyPreset::decode(bytes)?;
-        self.reconfigure_from_preset(preset, perspective, lid_state);
-        Ok(())
+    /// Active Hall FDN feedback line count (`4`, `8`, or `16`).
+    #[inline]
+    #[must_use]
+    pub const fn fdn_lines(&self) -> u8 {
+        self.hall_fdn.fdn_lines()
     }
 
-    /// Switch the active body preset and re-synthesize FIR/NUPOLS partitions in-place.
-    pub fn reconfigure_from_preset(
-        &mut self,
-        preset: BodyPreset,
-        perspective: ListenerPerspective,
-        lid_state: LidState,
-    ) {
-        self.preset = preset;
-        self.perspective = perspective;
-        self.lid_state = lid_state;
-        self.hall_fdn.set_perspective(perspective);
-        self.rebuild_ir_and_load();
+    /// Active [`PerfProfile`].
+    #[inline]
+    #[must_use]
+    pub const fn perf_profile(&self) -> &PerfProfile {
+        &self.profile
     }
 
     /// Configure hall reverb decay `[0.0..3.2 s]` and wet mix `[0.0..1.0]`
@@ -234,21 +277,26 @@ impl RadiatorBank {
         &self.preset
     }
 
-    fn rebuild_ir_and_load(&mut self) {
-        synthesize_irs(
+    pub(crate) fn rebuild_ir_and_load(&mut self) {
+        synthesize_irs_with_duration(
             &self.preset,
             self.perspective,
             self.lid_state,
             self.sample_rate,
+            f64::from(self.profile.ir_duration_secs),
             &mut self.scratch,
         );
         let ir_len = self.scratch.ir_len;
-        self.head.load_from_ir_flat(&self.scratch.ir_flat, ir_len);
+        if self.fir_block_fft {
+            self.block_fft_head
+                .load_from_ir_flat(&self.scratch.ir_flat, ir_len);
+        } else {
+            self.head.load_from_ir_flat(&self.scratch.ir_flat, ir_len);
+        }
         self.tail.load_ir_flat(&self.scratch.ir_flat, ir_len);
     }
 
-    /// Process an arbitrary-length slice of 9-zone input frames with zero allocations
-    /// and exact `0`-sample algorithmic latency into `(out_l, out_r)`.
+    /// Process an arbitrary-length slice of 9-zone input frames into `(out_l, out_r)`.
     pub fn process_block(
         &mut self,
         zone_frames: &[[f32; PRESET_RADIATOR_ZONES]],
@@ -264,7 +312,12 @@ impl RadiatorBank {
             let l_slice = &mut out_l[offset..offset + chunk];
             let r_slice = &mut out_r[offset..offset + chunk];
 
-            self.head.process_frames(z_slice, l_slice, r_slice);
+            if self.fir_block_fft {
+                self.block_fft_head
+                    .process_frames(z_slice, l_slice, r_slice);
+            } else {
+                self.head.process_frames(z_slice, l_slice, r_slice);
+            }
             self.tail.process_subchunk(z_slice, l_slice, r_slice);
             self.hall_fdn.process_block(l_slice, r_slice);
             self.limiter.process_block(l_slice, r_slice);
@@ -284,27 +337,32 @@ impl RadiatorBank {
     /// and pending NUPOLS rings immediately.
     pub fn reset(&mut self) {
         self.head.reset();
+        self.block_fft_head.reset();
         self.tail.reset();
         self.hall_fdn.reset();
         self.limiter.reset();
     }
 
-    /// Algorithmic latency in samples (always exact `0` via split FIR + NUPOLS).
+    /// Algorithmic latency in samples (`0` for direct FIR, `32` when `fir_block_fft` is active).
     #[inline]
     pub const fn algorithmic_latency_samples(&self) -> usize {
-        0
+        if self.fir_block_fft {
+            BLOCK_FFT_SIZE
+        } else {
+            0
+        }
     }
 
-    /// Length of the zero-latency direct SIMD FIR head in taps.
+    /// Length of the active direct SIMD FIR head in taps (`16`, `32`, or `64`).
     #[inline]
     pub const fn head_taps(&self) -> usize {
-        HEAD_TAPS
+        self.head.active_taps()
     }
 
-    /// Active impulse-response length in samples (`0.5 s * sample_rate`).
+    /// Active impulse-response length in samples.
     #[inline]
     pub fn ir_len_samples(&self) -> usize {
-        self.scratch.ir_len
+        self.tail.active_ir_len()
     }
 
     /// Configured host sample rate in Hz.
@@ -332,25 +390,5 @@ impl RadiatorBank {
         } else {
             None
         }
-    }
-
-    /// Synthesize all 18 spatialized/pole-cancelled IRs (`[zone][L/R][n]`) for
-    /// offline inspection and regression tests.
-    pub fn synthesize_ir_for_test(
-        preset: &BodyPreset,
-        sample_rate: f64,
-        perspective: ListenerPerspective,
-        lid_state: LidState,
-    ) -> [[Vec<f32>; 2]; PRESET_RADIATOR_ZONES] {
-        let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
-        let ir_len = ir_len_for_sample_rate(sr);
-        let mut scratch = IrSynthScratch::new(ir_len);
-        synthesize_irs(preset, perspective, lid_state, sr, &mut scratch);
-        core::array::from_fn(|z| {
-            [
-                scratch.path_slice(z, 0).to_vec(),
-                scratch.path_slice(z, 1).to_vec(),
-            ]
-        })
     }
 }

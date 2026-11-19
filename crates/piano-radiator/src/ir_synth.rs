@@ -19,12 +19,24 @@ pub(crate) use crate::modal_synth::{path_index, NUM_IR_PATHS};
 
 /// Fixed physical IR duration synthesized at any host sample rate `[seconds]`.
 pub(crate) const IR_DURATION_SECS: f64 = 0.5;
+const MIN_IR_DURATION_SECS: f64 = 0.05;
+
+/// Compute IR sample length for `sample_rate` and `ir_duration_secs` (`0.05..=0.50 s`, min 256).
+#[inline]
+pub fn ir_len_for_sample_rate_secs(sample_rate: f64, ir_duration_secs: f64) -> usize {
+    let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
+    let dur = if ir_duration_secs.is_finite() {
+        clamp_f64(ir_duration_secs, MIN_IR_DURATION_SECS, IR_DURATION_SECS)
+    } else {
+        IR_DURATION_SECS
+    };
+    (round_f64(dur * sr) as usize).clamp(256, 192_000)
+}
 
 /// Compute IR sample length for `sample_rate` (`0.5 s`, minimum 256 samples).
 #[inline]
 pub fn ir_len_for_sample_rate(sample_rate: f64) -> usize {
-    let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
-    (round_f64(IR_DURATION_SECS * sr) as usize).clamp(256, 192_000)
+    ir_len_for_sample_rate_secs(sample_rate, IR_DURATION_SECS)
 }
 
 /// Reusable scratch storage so `reconfigure_space` allocates zero heap memory
@@ -80,8 +92,27 @@ pub fn synthesize_irs(
     sample_rate: f64,
     scratch: &mut IrSynthScratch,
 ) {
+    synthesize_irs_with_duration(
+        preset,
+        perspective,
+        lid_state,
+        sample_rate,
+        IR_DURATION_SECS,
+        scratch,
+    );
+}
+
+/// Synthesize all 18 spatialized and pole-cancelled IRs with explicit duration (`0.05..=0.50 s`).
+pub fn synthesize_irs_with_duration(
+    preset: &BodyPreset,
+    perspective: ListenerPerspective,
+    lid_state: LidState,
+    sample_rate: f64,
+    ir_duration_secs: f64,
+    scratch: &mut IrSynthScratch,
+) {
     let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
-    let ir_len = ir_len_for_sample_rate(sr);
+    let ir_len = ir_len_for_sample_rate_secs(sr, ir_duration_secs);
     scratch.ensure_len(ir_len);
 
     let paths = compute_all_zone_paths(preset, perspective, lid_state, sr);

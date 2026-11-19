@@ -1,43 +1,59 @@
-//! Off-thread spatial IR + NUPOLS FFT spectrum precomputation for zero-stall
-//! `AudioWorklet` space switching (`no_std` + `alloc`).
+//! Off-thread spatial IR + NUPOLS FFT spectrum precomputation (`SpaceBlob` v2)
+//! for zero-stall `AudioWorklet` space & profile switching (`no_std` + `alloc`).
 
 extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use piano_simd::{AlignedBuf, RealFft};
+use piano_simd::{AlignedBuf, RealFft, SplitComplexBuf};
 use piano_spec::{
-    BodyPreset, LidState, ListenerPerspective, PresetDecodeError, PRESET_RADIATOR_ZONES,
+    BodyPreset, LidState, ListenerPerspective, PerfProfile, PresetDecodeError,
+    PRESET_RADIATOR_ZONES,
 };
 
 use crate::fir_head::{FIR_COEFFS_LEN, HEAD_TAPS};
 use crate::ir_synth::{
-    ir_len_for_sample_rate, path_index, synthesize_irs, IrSynthScratch, NUM_IR_PATHS,
+    ir_len_for_sample_rate, ir_len_for_sample_rate_secs, path_index, synthesize_irs_with_duration,
+    IrSynthScratch, NUM_IR_PATHS,
 };
 use crate::math::clamp_f64;
-use crate::nupols_tier::{MAX_TIER_FFT_LEN, TIER_CONFIGS};
-use crate::{empty_fallback_preset, RadiatorBank, CONCERT_GRAND_PRESET_BYTES};
+use crate::nupols_collapse::{
+    collapse_zone_spectra_into, compute_mimo_p_count, compute_p_count, MAX_TIER_FFT_LEN,
+    TIER_CONFIGS,
+};
+use crate::{empty_fallback_preset, CONCERT_GRAND_PRESET_BYTES};
 
-const SPACE_BLOB_MAGIC: u32 = 0x5042_5350; // "PBSP"
-const SPACE_BLOB_HEADER_LEN: usize = 4;
+/// Magic tag for v2 parameterized spatial NUPOLS blobs (`"PBSQ"`).
+pub const SPACE_BLOB_MAGIC_V2: u32 = 0x5042_5351;
+/// Number of `f32` words in the v2 spatial NUPOLS blob header.
+pub const SPACE_BLOB_HEADER_LEN: usize = 8;
 
-/// Computes the exact number of `f32` elements in a serialized spatial NUPOLS blob.
-#[must_use]
-pub fn space_blob_len_for_sample_rate(sample_rate: f64) -> usize {
-    let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
-    let ir_len = ir_len_for_sample_rate(sr);
+pub(crate) fn space_blob_len_for_params(ir_len: usize, split_tap: u16) -> usize {
     let mut spectra_floats = 0usize;
     for &cfg in &TIER_CONFIGS {
-        let end = ir_len.min(cfg.end_limit);
-        let p_count = if end > cfg.ir_offset {
-            (end - cfg.ir_offset).div_ceil(cfg.block_size)
-        } else {
-            0
-        };
-        let spec_len = cfg.block_size + 1; // (block_size * 2) / 2 + 1
-        spectra_floats += p_count * NUM_IR_PATHS * spec_len * 2;
+        let p_count = compute_p_count(cfg, ir_len);
+        let mimo_p_count = compute_mimo_p_count(cfg, p_count, split_tap);
+        let spec_floats = (cfg.block_size + 1) * 2;
+        spectra_floats += mimo_p_count * NUM_IR_PATHS * spec_floats;
+        spectra_floats += (p_count - mimo_p_count) * 2 * spec_floats;
     }
     SPACE_BLOB_HEADER_LEN + FIR_COEFFS_LEN + spectra_floats
+}
+
+/// Computes the exact number of `f32` elements in a serialized spatial NUPOLS blob
+/// for the given [`PerfProfile`].
+#[must_use]
+pub fn space_blob_len_for_profile(sample_rate: f64, profile: &PerfProfile) -> usize {
+    let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
+    let prof = profile.sanitized();
+    let ir_len = ir_len_for_sample_rate_secs(sr, f64::from(prof.ir_duration_secs));
+    space_blob_len_for_params(ir_len, prof.spatial_tail_split_tap)
+}
+
+/// Computes the maximum (`Full`) `f32` element count for preallocating staging buffers.
+#[must_use]
+pub fn space_blob_len_for_sample_rate(sample_rate: f64) -> usize {
+    space_blob_len_for_profile(sample_rate, &PerfProfile::full())
 }
 
 /// Off-thread precomputation engine producing serialized spatial FIR + NUPOLS blobs
@@ -45,33 +61,56 @@ pub fn space_blob_len_for_sample_rate(sample_rate: f64) -> usize {
 pub struct SpacePrepContext {
     preset: BodyPreset,
     sample_rate: f64,
+    profile: PerfProfile,
     scratch: IrSynthScratch,
     ffts: [RealFft; 4],
     time_scratch: AlignedBuf,
+    collapse_buf: Vec<SplitComplexBuf>,
     spec_re: Vec<f32>,
     spec_im: Vec<f32>,
     out_blob: Vec<f32>,
 }
 
 impl SpacePrepContext {
-    /// Constructs a spatial prep context from the baked concert-grand preset.
+    /// Constructs a spatial prep context from the baked concert-grand preset (`Full` profile).
     #[must_use]
     pub fn new_concert_grand(sample_rate: f64) -> Self {
-        let preset = BodyPreset::decode(CONCERT_GRAND_PRESET_BYTES)
-            .unwrap_or_else(|_| empty_fallback_preset());
-        Self::new_from_preset(preset, sample_rate)
+        Self::new_with_profile(sample_rate, &PerfProfile::full())
     }
 
-    /// Constructs a spatial prep context from decoded `BodyPreset`.
+    /// Constructs a spatial prep context from the baked concert-grand preset with `profile`.
+    #[must_use]
+    pub fn new_with_profile(sample_rate: f64, profile: &PerfProfile) -> Self {
+        let preset = BodyPreset::decode(CONCERT_GRAND_PRESET_BYTES)
+            .unwrap_or_else(|_| empty_fallback_preset());
+        Self::new_from_preset_with_profile(preset, sample_rate, profile)
+    }
+
+    /// Constructs a spatial prep context from decoded `BodyPreset` (`Full` profile).
     #[must_use]
     pub fn new_from_preset(preset: BodyPreset, sample_rate: f64) -> Self {
+        Self::new_from_preset_with_profile(preset, sample_rate, &PerfProfile::full())
+    }
+
+    /// Constructs a spatial prep context from decoded `BodyPreset` and [`PerfProfile`].
+    #[must_use]
+    pub fn new_from_preset_with_profile(
+        preset: BodyPreset,
+        sample_rate: f64,
+        profile: &PerfProfile,
+    ) -> Self {
         let sr = clamp_f64(sample_rate, 8_000.0, 384_000.0);
-        let ir_len = ir_len_for_sample_rate(sr);
+        let max_ir_len = ir_len_for_sample_rate(sr);
         let max_spec = MAX_TIER_FFT_LEN / 2 + 1;
+        let mut collapse_buf = Vec::with_capacity(NUM_IR_PATHS);
+        for _ in 0..NUM_IR_PATHS {
+            collapse_buf.push(SplitComplexBuf::zeroed(max_spec));
+        }
         Self {
             preset,
             sample_rate: sr,
-            scratch: IrSynthScratch::new(ir_len),
+            profile: profile.sanitized(),
+            scratch: IrSynthScratch::new(max_ir_len),
             ffts: [
                 RealFft::new(TIER_CONFIGS[0].block_size * 2),
                 RealFft::new(TIER_CONFIGS[1].block_size * 2),
@@ -79,19 +118,33 @@ impl SpacePrepContext {
                 RealFft::new(TIER_CONFIGS[3].block_size * 2),
             ],
             time_scratch: AlignedBuf::zeroed(MAX_TIER_FFT_LEN),
+            collapse_buf,
             spec_re: vec![0.0; max_spec],
             spec_im: vec![0.0; max_spec],
             out_blob: Vec::with_capacity(space_blob_len_for_sample_rate(sr)),
         }
     }
 
-    /// Decodes `PIANOBOD` bytes and constructs a spatial prep context.
+    /// Decodes `PIANOBOD` bytes and constructs a spatial prep context (`Full` profile).
     pub fn new_from_preset_bytes(
         bytes: &[u8],
         sample_rate: f64,
     ) -> Result<Self, PresetDecodeError> {
+        Self::new_from_preset_bytes_with_profile(bytes, sample_rate, &PerfProfile::full())
+    }
+
+    /// Decodes `PIANOBOD` bytes and constructs a spatial prep context with `profile`.
+    pub fn new_from_preset_bytes_with_profile(
+        bytes: &[u8],
+        sample_rate: f64,
+        profile: &PerfProfile,
+    ) -> Result<Self, PresetDecodeError> {
         let preset = BodyPreset::decode(bytes)?;
-        Ok(Self::new_from_preset(preset, sample_rate))
+        Ok(Self::new_from_preset_with_profile(
+            preset,
+            sample_rate,
+            profile,
+        ))
     }
 
     /// Replaces the active body preset in-place from serialized `PIANOBOD` bytes.
@@ -103,6 +156,33 @@ impl SpacePrepContext {
     /// Replaces the active body preset in-place.
     pub fn set_body_preset(&mut self, preset: BodyPreset) {
         self.preset = preset;
+    }
+
+    /// Updates the performance profile used for subsequent [`Self::prepare_space`] calls.
+    pub fn set_perf_profile(&mut self, profile: &PerfProfile) {
+        self.profile = profile.sanitized();
+    }
+
+    /// Updates Stage 4 parameters directly for subsequent [`Self::prepare_space`] calls.
+    pub fn set_stage4_profile(
+        &mut self,
+        ir_duration_secs: f32,
+        spatial_tail_split_tap: u16,
+        fir_head_taps: u8,
+        fir_block_fft: bool,
+    ) {
+        let mut next = self.profile;
+        next.ir_duration_secs = ir_duration_secs;
+        next.spatial_tail_split_tap = spatial_tail_split_tap;
+        next.fir_head_taps = fir_head_taps;
+        next.fir_block_fft = fir_block_fft;
+        self.profile = next.sanitized();
+    }
+
+    /// Active [`PerfProfile`] used by this spatial prep context.
+    #[must_use]
+    pub const fn perf_profile(&self) -> &PerfProfile {
+        &self.profile
     }
 
     /// Returns the active [`BodyPreset`] used by this spatial prep context.
@@ -117,20 +197,29 @@ impl SpacePrepContext {
         perspective: ListenerPerspective,
         lid_state: LidState,
     ) -> &[f32] {
-        synthesize_irs(
+        synthesize_irs_with_duration(
             &self.preset,
             perspective,
             lid_state,
             self.sample_rate,
+            f64::from(self.profile.ir_duration_secs),
             &mut self.scratch,
         );
+        let ir_len = self.scratch.ir_len;
+        let split_tap = self.profile.spatial_tail_split_tap;
+        let flags = u32::from(self.profile.fir_block_fft);
+
         self.out_blob.clear();
-        self.out_blob.push(f32::from_bits(SPACE_BLOB_MAGIC));
+        self.out_blob.push(f32::from_bits(SPACE_BLOB_MAGIC_V2));
         self.out_blob.push(self.sample_rate as f32);
         self.out_blob.push(f32::from_bits(perspective as u32));
         self.out_blob.push(f32::from_bits(lid_state as u32));
+        self.out_blob.push(f32::from_bits(ir_len as u32));
+        self.out_blob
+            .push(f32::from_bits(u32::from(self.profile.fir_head_taps)));
+        self.out_blob.push(f32::from_bits(u32::from(split_tap)));
+        self.out_blob.push(f32::from_bits(flags));
 
-        let ir_len = self.scratch.ir_len;
         let ir_flat = &self.scratch.ir_flat;
         let copy_len = ir_len.min(HEAD_TAPS);
         let mut rev_l = [0.0_f32; HEAD_TAPS];
@@ -151,34 +240,54 @@ impl SpacePrepContext {
 
         let work_all = self.time_scratch.as_mut_slice();
         for (ti, &cfg) in TIER_CONFIGS.iter().enumerate() {
-            let end = ir_len.min(cfg.end_limit);
-            let p_count = if end > cfg.ir_offset {
-                (end - cfg.ir_offset).div_ceil(cfg.block_size)
-            } else {
-                0
-            };
+            let p_count = compute_p_count(cfg, ir_len);
             if p_count == 0 {
                 continue;
             }
+            let mimo_p_count = compute_mimo_p_count(cfg, p_count, split_tap);
             let b = cfg.block_size;
             let fft = &mut self.ffts[ti];
             let spec_len = fft.spectrum_len();
             let work = &mut work_all[..b * 2];
             for p in 0..p_count {
                 let tap_start = cfg.ir_offset + p * b;
-                for z in 0..PRESET_RADIATOR_ZONES {
-                    for ch in 0..2 {
-                        let ir_base = path_index(z, ch) * ir_len;
-                        work.fill(0.0);
-                        if tap_start < ir_len {
-                            let c_len = b.min(ir_len - tap_start);
-                            work[..c_len].copy_from_slice(
-                                &ir_flat[ir_base + tap_start..ir_base + tap_start + c_len],
-                            );
+                if p < mimo_p_count {
+                    for z in 0..PRESET_RADIATOR_ZONES {
+                        for ch in 0..2 {
+                            let ir_base = path_index(z, ch) * ir_len;
+                            work.fill(0.0);
+                            if tap_start < ir_len {
+                                let c_len = b.min(ir_len - tap_start);
+                                work[..c_len].copy_from_slice(
+                                    &ir_flat[ir_base + tap_start..ir_base + tap_start + c_len],
+                                );
+                            }
+                            let re = &mut self.spec_re[..spec_len];
+                            let im = &mut self.spec_im[..spec_len];
+                            fft.forward_split(work, re, im);
+                            self.out_blob.extend_from_slice(re);
+                            self.out_blob.extend_from_slice(im);
                         }
+                    }
+                } else {
+                    for z in 0..PRESET_RADIATOR_ZONES {
+                        for ch in 0..2 {
+                            let ir_base = path_index(z, ch) * ir_len;
+                            work.fill(0.0);
+                            if tap_start < ir_len {
+                                let c_len = b.min(ir_len - tap_start);
+                                work[..c_len].copy_from_slice(
+                                    &ir_flat[ir_base + tap_start..ir_base + tap_start + c_len],
+                                );
+                            }
+                            let (re, im) = self.collapse_buf[path_index(z, ch)].planes_mut();
+                            fft.forward_split(work, &mut re[..spec_len], &mut im[..spec_len]);
+                        }
+                    }
+                    for ch in 0..2 {
                         let re = &mut self.spec_re[..spec_len];
                         let im = &mut self.spec_im[..spec_len];
-                        fft.forward_split(work, re, im);
+                        collapse_zone_spectra_into(&self.collapse_buf, spec_len, ch, re, im);
                         self.out_blob.extend_from_slice(re);
                         self.out_blob.extend_from_slice(im);
                     }
@@ -192,145 +301,5 @@ impl SpacePrepContext {
     #[must_use]
     pub fn out_blob(&self) -> &[f32] {
         &self.out_blob
-    }
-}
-
-impl RadiatorBank {
-    /// Installs a precomputed spatial FIR + NUPOLS spectrum blob with zero allocations
-    /// and zero FFT computation on the audio thread.
-    pub fn install_precomputed_space(
-        &mut self,
-        perspective: ListenerPerspective,
-        lid_state: LidState,
-        blob: &[f32],
-    ) -> bool {
-        let expected_len =
-            SPACE_BLOB_HEADER_LEN + FIR_COEFFS_LEN + self.tail.ir_spectra_float_len();
-        if blob.len() != expected_len
-            || blob[0].to_bits() != SPACE_BLOB_MAGIC
-            || (f64::from(blob[1]) - self.sample_rate).abs() > 0.5
-            || blob[2].to_bits() != perspective as u32
-            || blob[3].to_bits() != lid_state as u32
-        {
-            return false;
-        }
-        let fir_start = SPACE_BLOB_HEADER_LEN;
-        let fir_end = fir_start + FIR_COEFFS_LEN;
-        self.head.load_coeffs_slice(&blob[fir_start..fir_end]);
-        if !self.tail.import_ir_spectra(&blob[fir_end..]) {
-            return false;
-        }
-        self.perspective = perspective;
-        self.lid_state = lid_state;
-        self.hall_fdn.set_perspective(perspective);
-        true
-    }
-
-    /// Streams one slice `[blob_off .. blob_off + chunk.len())` of a precomputed spatial blob.
-    pub fn install_precomputed_space_chunk(
-        &mut self,
-        perspective: ListenerPerspective,
-        lid_state: LidState,
-        blob_off: usize,
-        chunk: &[f32],
-        total_len: usize,
-    ) -> bool {
-        let expected_len =
-            SPACE_BLOB_HEADER_LEN + FIR_COEFFS_LEN + self.tail.ir_spectra_float_len();
-        if total_len != expected_len || blob_off + chunk.len() > total_len {
-            return false;
-        }
-        if blob_off == 0
-            && (chunk.len() < SPACE_BLOB_HEADER_LEN
-                || chunk[0].to_bits() != SPACE_BLOB_MAGIC
-                || (f64::from(chunk[1]) - self.sample_rate).abs() > 0.5
-                || chunk[2].to_bits() != perspective as u32
-                || chunk[3].to_bits() != lid_state as u32)
-        {
-            return false;
-        }
-        let chunk_end = blob_off + chunk.len();
-        let fir_start = SPACE_BLOB_HEADER_LEN;
-        let fir_end = fir_start + FIR_COEFFS_LEN;
-        let f_lo = blob_off.max(fir_start);
-        let f_hi = chunk_end.min(fir_end);
-        if f_lo < f_hi {
-            self.head
-                .load_coeffs_range(f_lo - fir_start, &chunk[f_lo - blob_off..f_hi - blob_off]);
-        }
-        let t_lo = blob_off.max(fir_end);
-        let t_hi = chunk_end;
-        if t_lo < t_hi {
-            self.tail
-                .import_ir_spectra_range(t_lo - fir_end, &chunk[t_lo - blob_off..t_hi - blob_off]);
-        }
-        if chunk_end == total_len {
-            self.perspective = perspective;
-            self.lid_state = lid_state;
-            self.hall_fdn.set_perspective(perspective);
-        }
-        true
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn space_blob_install_matches_reconfigure_space_bit_exact() {
-        let sr = 48_000.0;
-        let mut ref_bank = RadiatorBank::new_concert_grand(sr);
-        let mut fast_bank = RadiatorBank::new_concert_grand(sr);
-        let mut prep = SpacePrepContext::new_concert_grand(sr);
-
-        let cases = [
-            (ListenerPerspective::ConcertHall, LidState::Half),
-            (ListenerPerspective::BinauralHrtf, LidState::Closed),
-            (ListenerPerspective::CloseStereo, LidState::Open),
-        ];
-        let frames = [[0.25_f32; PRESET_RADIATOR_ZONES]; 128];
-        let mut ref_l = [0.0_f32; 128];
-        let mut ref_r = [0.0_f32; 128];
-        let mut fast_l = [0.0_f32; 128];
-        let mut fast_r = [0.0_f32; 128];
-
-        for (persp, lid) in cases {
-            ref_bank.reconfigure_space(persp, lid);
-            let blob = prep.prepare_space(persp, lid);
-            assert_eq!(blob.len(), space_blob_len_for_sample_rate(sr));
-            assert!(fast_bank.install_precomputed_space(persp, lid, blob));
-            ref_bank.process_block(&frames, &mut ref_l, &mut ref_r);
-            fast_bank.process_block(&frames, &mut fast_l, &mut fast_r);
-            assert_eq!(ref_l, fast_l);
-            assert_eq!(ref_r, fast_r);
-        }
-        assert!(!fast_bank.install_precomputed_space(
-            ListenerPerspective::Player,
-            LidState::Open,
-            &[0.0; 16],
-        ));
-
-        let mut chunk_bank = RadiatorBank::new_concert_grand(sr);
-        let blob = prep.prepare_space(ListenerPerspective::ConcertHall, LidState::Closed);
-        let total = blob.len();
-        let mut off = 0usize;
-        while off < total {
-            let n = 7_919.min(total - off);
-            assert!(chunk_bank.install_precomputed_space_chunk(
-                ListenerPerspective::ConcertHall,
-                LidState::Closed,
-                off,
-                &blob[off..off + n],
-                total,
-            ));
-            off += n;
-        }
-        let mut ref_chunk_bank = RadiatorBank::new_concert_grand(sr);
-        ref_chunk_bank.reconfigure_space(ListenerPerspective::ConcertHall, LidState::Closed);
-        ref_chunk_bank.process_block(&frames, &mut ref_l, &mut ref_r);
-        chunk_bank.process_block(&frames, &mut fast_l, &mut fast_r);
-        assert_eq!(ref_l, fast_l);
-        assert_eq!(ref_r, fast_r);
     }
 }
