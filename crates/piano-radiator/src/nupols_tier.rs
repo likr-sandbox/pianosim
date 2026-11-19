@@ -10,8 +10,8 @@ use piano_spec::PRESET_RADIATOR_ZONES;
 use crate::fir_head::FirHead;
 use crate::ir_synth::{path_index, NUM_IR_PATHS};
 use crate::nupols_collapse::{
-    add_simd_slice, collapse_zone_spectra_into, compute_mimo_p_count, compute_p_count, TierConfig,
-    IN_RING_LEN, IN_RING_MASK, OUT_RING_LEN, OUT_RING_MASK,
+    add_simd_slice, collapse_zone_spectra_causal, compute_mimo_p_count, compute_p_count,
+    TierConfig, IN_RING_LEN, IN_RING_MASK, OUT_RING_LEN, OUT_RING_MASK,
 };
 
 #[derive(Clone)]
@@ -89,7 +89,6 @@ impl NupolsTier {
         }
         let b = self.block_size;
         let fft_len = b * 2;
-        let spec_len = self.fft.spectrum_len();
         let work = &mut time_scratch[..fft_len];
 
         let mut p = 0;
@@ -118,9 +117,9 @@ impl NupolsTier {
             if p >= self.mimo_p_count {
                 let slice = &mut self.ir_spectra[p_base..p_base + NUM_IR_PATHS];
                 let (cr, ci) = self.collapsed_x_scratch.planes_mut();
-                collapse_zone_spectra_into(slice, spec_len, 0, cr, ci);
+                collapse_zone_spectra_causal(slice, &mut self.fft, work, 0, cr, ci);
                 let (tr, ti) = self.acc_l.planes_mut();
-                collapse_zone_spectra_into(slice, spec_len, 1, tr, ti);
+                collapse_zone_spectra_causal(slice, &mut self.fft, work, 1, tr, ti);
                 slice[0]
                     .re_mut()
                     .copy_from_slice(self.collapsed_x_scratch.re());

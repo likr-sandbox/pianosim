@@ -1,7 +1,7 @@
 //! Tier configuration constants, SIMD slice addition, and RMS-matched
 //! late-partition stereo collapse helpers for `NupolsTier` and `SpacePrepContext`.
 
-use piano_simd::{F32x4, SplitComplexBuf};
+use piano_simd::{F32x4, RealFft, SplitComplexBuf};
 
 use crate::ir_synth::path_index;
 use crate::math::sqrt_f64;
@@ -81,7 +81,7 @@ pub(crate) fn compute_mimo_p_count(cfg: TierConfig, p_count: usize, split_tap: u
 }
 
 /// Collapse 9 zone spectra for channel `ch` into one RMS-energy-matched diffuse spectrum.
-pub(crate) fn collapse_zone_spectra_into(
+fn collapse_zone_spectra_into(
     zone_spectra: &[SplitComplexBuf],
     spec_len: usize,
     ch: usize,
@@ -120,6 +120,23 @@ pub(crate) fn collapse_zone_spectra_into(
             out_im[k] = 0.0;
         }
     }
+}
+
+/// Collapses 9 zone spectra into a strictly causal (`h[b..2*b] == 0`) overlap-save IR spectrum.
+pub(crate) fn collapse_zone_spectra_causal(
+    zone_spectra: &[SplitComplexBuf],
+    fft: &mut RealFft,
+    work: &mut [f32],
+    ch: usize,
+    out_re: &mut [f32],
+    out_im: &mut [f32],
+) {
+    let spec_len = fft.spectrum_len();
+    collapse_zone_spectra_into(zone_spectra, spec_len, ch, out_re, out_im);
+    fft.inverse_split(out_re, out_im, work);
+    let half = work.len() / 2;
+    work[half..].fill(0.0);
+    fft.forward_split(work, out_re, out_im);
 }
 
 #[inline]

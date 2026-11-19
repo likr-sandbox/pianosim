@@ -18,7 +18,7 @@ use crate::ir_synth::{
 };
 use crate::math::clamp_f64;
 use crate::nupols_collapse::{
-    collapse_zone_spectra_into, compute_mimo_p_count, compute_p_count, MAX_TIER_FFT_LEN,
+    collapse_zone_spectra_causal, compute_mimo_p_count, compute_p_count, MAX_TIER_FFT_LEN,
     TIER_CONFIGS,
 };
 use crate::{empty_fallback_preset, CONCERT_GRAND_PRESET_BYTES};
@@ -287,7 +287,7 @@ impl SpacePrepContext {
                     for ch in 0..2 {
                         let re = &mut self.spec_re[..spec_len];
                         let im = &mut self.spec_im[..spec_len];
-                        collapse_zone_spectra_into(&self.collapse_buf, spec_len, ch, re, im);
+                        collapse_zone_spectra_causal(&self.collapse_buf, fft, work, ch, re, im);
                         self.out_blob.extend_from_slice(re);
                         self.out_blob.extend_from_slice(im);
                     }
