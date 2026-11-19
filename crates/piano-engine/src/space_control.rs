@@ -167,6 +167,8 @@ impl PianoEngine {
                 perspective,
                 lid,
             } => {
+                self.core.staged_standby_body = None;
+                self.core.streaming_standby_body = None;
                 self.reconfigure_radiator_for_body(target_idx, body, perspective, lid);
                 self.core.sync_to_body_if_changed(body);
             }
@@ -176,6 +178,8 @@ impl PianoEngine {
                 lid,
                 ..
             } => {
+                self.core.staged_standby_body = None;
+                self.core.streaming_standby_body = None;
                 self.reconfigure_radiator_for_body(fade_in_idx, body, perspective, lid);
                 self.core.sync_to_body_if_changed(body);
             }
@@ -266,6 +270,8 @@ impl PianoEngine {
             self.core.radiator_bodies[target_idx] = None;
         }
         self.sync_core_stage4_from_radiator(target_idx);
+        self.core.staged_standby_body = None;
+        self.core.streaming_standby_body = None;
         let _ = self.space_guard.request_body_space_ex(
             body,
             persp,
@@ -310,13 +316,28 @@ impl PianoEngine {
         let Some(lid_state) = lid.into_lid_state() else {
             return false;
         };
+        let Some(chunk_end) = blob_off.checked_add(chunk.len()) else {
+            self.core.streaming_standby_body = None;
+            self.core.staged_standby_body = None;
+            return false;
+        };
+        if chunk.is_empty() || total_len == 0 {
+            self.core.streaming_standby_body = None;
+            self.core.staged_standby_body = None;
+            return false;
+        }
         let standby = self.space_guard.standby_radiator_idx();
         if blob_off == 0 {
             self.core.standby_clear_slice_next = 0;
             self.core.staged_standby_body = None;
+            self.core.streaming_standby_body = Some(body);
             if self.core.radiator_bodies[standby] != Some(body) {
                 self.core.radiator_bodies[standby] = None;
             }
+        } else if self.core.streaming_standby_body != Some(body) {
+            self.core.streaming_standby_body = None;
+            self.core.staged_standby_body = None;
+            return false;
         }
         const STANDBY_CLEAR_SLICES: usize = 16;
         if self.space_guard.standby_delay_dirty() {
@@ -333,10 +354,12 @@ impl PianoEngine {
         let ok = self.core.radiators[standby]
             .install_precomputed_space_chunk(persp, lid_state, blob_off, chunk, total_len);
         if !ok {
+            self.core.streaming_standby_body = None;
             self.core.staged_standby_body = None;
             return false;
         }
-        if blob_off.saturating_add(chunk.len()) == total_len {
+        if chunk_end == total_len {
+            self.core.streaming_standby_body = None;
             self.core.staged_standby_body = Some(body);
         }
         true
@@ -362,7 +385,8 @@ impl PianoEngine {
         let Some(lid_state) = lid.into_lid_state() else {
             return false;
         };
-        if self.core.staged_standby_body != Some(body) {
+        if self.core.streaming_standby_body.is_some() || self.core.staged_standby_body != Some(body)
+        {
             return false;
         }
         let active = self.space_guard.active_radiator_idx();

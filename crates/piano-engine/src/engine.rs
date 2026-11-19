@@ -354,10 +354,11 @@ impl PianoEngine {
 
         let _ = self.step_voicing_commit();
 
-        if let Some((spec, dirty)) = self
-            .voicing_smoother
-            .step_block_with_dirty(frames, self.sample_rate())
-        {
+        if let Some((spec, dirty)) = self.voicing_smoother.step_block_with_dirty_ex(
+            frames,
+            self.sample_rate(),
+            !self.voicing_commit.active,
+        ) {
             if (dirty & DIRTY_TUNING) != 0 && !self.voicing_commit.active {
                 self.core.current_voicing.hammer_hardness = spec.hammer_hardness;
                 self.core.current_voicing.unison_detune_scale = spec.unison_detune_scale;

@@ -87,6 +87,7 @@ pub(crate) struct EngineCore {
     pub body_archetype: BodyArchetype,
     pub radiator_bodies: [Option<BodyArchetype>; 2],
     pub staged_standby_body: Option<BodyArchetype>,
+    pub streaming_standby_body: Option<BodyArchetype>,
     pub standby_clear_slice_next: u8,
     pub body_models: BodyModelCache,
     pub scratch: EngineScratch,
@@ -121,6 +122,7 @@ impl EngineCore {
             body_archetype: BodyArchetype::ConcertGrand,
             radiator_bodies: [Some(BodyArchetype::ConcertGrand); 2],
             staged_standby_body: None,
+            streaming_standby_body: None,
             standby_clear_slice_next: 0,
             body_models: BodyModelCache::new(),
             scratch: EngineScratch::default(),
@@ -369,6 +371,8 @@ impl EngineCore {
         self.ringing.fill(false);
         self.flush_sample_accum = 0;
         self.standby_clear_slice_next = 0;
+        self.staged_standby_body = None;
+        self.streaming_standby_body = None;
         self.action.reset();
         self.bank.reset();
         self.bridge.reset();

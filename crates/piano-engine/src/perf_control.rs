@@ -37,10 +37,26 @@ impl PianoEngine {
         self.core.action.set_perf_profile(&next);
 
         if stage2_structural_changed(&cur, &next) {
+            let aborted_commit = self.voicing_commit.active;
             self.voicing_commit.active = false;
+            self.voicing_commit.next_key = 0;
+            self.voicing_commit.blob_len = 0;
             let sr = self.core.bank.sample_rate();
             self.core.bank =
                 StringBank::new_bridge_coupled_with_profile(sr, &self.core.current_voicing, &next);
+            if aborted_commit {
+                let v = &self.core.current_voicing;
+                self.core.action.update_voicing_in_place(v);
+                self.core.bridge.set_voicing(v);
+                self.voicing_smoother.set_tuning_applied_full(
+                    v.unison_detune_scale,
+                    v.stretch_amount,
+                    v.string_length_scale,
+                    v.a4_freq_hz,
+                    v.temperament,
+                    v.condition,
+                );
+            }
             self.core
                 .bridge
                 .set_port_resistances(self.core.bank.bridge_port_resistances());
@@ -52,6 +68,8 @@ impl PianoEngine {
 
         self.core.radiators[0].set_perf_profile(&next);
         self.core.radiators[1].set_perf_profile(&next);
+        self.core.staged_standby_body = None;
+        self.core.streaming_standby_body = None;
 
         self.core.perf_profile = next;
     }

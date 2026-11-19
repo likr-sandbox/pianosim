@@ -269,21 +269,31 @@ impl VoicingSmoother {
         frames: usize,
         sample_rate: f32,
     ) -> Option<(VoicingSpec, u8)> {
+        self.step_block_with_dirty_ex(frames, sample_rate, true)
+    }
+
+    pub fn step_block_with_dirty_ex(
+        &mut self,
+        frames: usize,
+        sample_rate: f32,
+        step_tuning: bool,
+    ) -> Option<(VoicingSpec, u8)> {
         if !self.active || frames == 0 || sample_rate <= 0.0 {
             return None;
         }
         let prev = self.current;
         let dt = (frames as f32) / sample_rate;
+        let param_end = if step_tuning { NUM_VOICING_PARAMS } else { 1 };
         match self.curve {
             SmoothCurve::Exponential => {
                 let alpha = (-dt / VOICING_SMOOTH_TAU_S).exp();
-                for i in 0..NUM_VOICING_PARAMS {
+                for i in 0..param_end {
                     self.current[i] = self.target[i] + (self.current[i] - self.target[i]) * alpha;
                 }
             }
             SmoothCurve::Linear => {
                 let step_rate = dt / VOICING_SMOOTH_TAU_S;
-                for i in 0..NUM_VOICING_PARAMS {
+                for i in 0..param_end {
                     let diff = self.target[i] - self.current[i];
                     let max_step = step_rate * (MAXS[i] - MINS[i]);
                     if diff.abs() <= max_step {
@@ -294,7 +304,7 @@ impl VoicingSmoother {
                 }
             }
         }
-        for i in 0..NUM_VOICING_PARAMS {
+        for i in 0..param_end {
             if (self.current[i] - self.target[i]).abs() <= settle_tol(i) {
                 self.current[i] = self.target[i];
             }
@@ -303,19 +313,21 @@ impl VoicingSmoother {
         if self.current[0] != prev[0] {
             dirty |= DIRTY_HAMMER;
         }
-        if self.current[1] != prev[1]
-            || self.current[2] != prev[2]
-            || self.current[3] != prev[3]
-            || self.current[4] != prev[4]
-        {
-            dirty |= DIRTY_TUNING;
-        }
-        if self.current[5] != prev[5] {
-            dirty |= DIRTY_TUNING | DIRTY_HAMMER;
-        }
-        if self.temperament != self.applied_temperament {
-            dirty |= DIRTY_TUNING;
-            self.applied_temperament = self.temperament;
+        if step_tuning {
+            if self.current[1] != prev[1]
+                || self.current[2] != prev[2]
+                || self.current[3] != prev[3]
+                || self.current[4] != prev[4]
+            {
+                dirty |= DIRTY_TUNING;
+            }
+            if self.current[5] != prev[5] {
+                dirty |= DIRTY_TUNING | DIRTY_HAMMER;
+            }
+            if self.temperament != self.applied_temperament {
+                dirty |= DIRTY_TUNING;
+                self.applied_temperament = self.temperament;
+            }
         }
         if self.current == self.target && self.temperament == self.applied_temperament {
             self.active = false;
@@ -378,6 +390,24 @@ impl VoicingSmoother {
         self.temperament = temperament;
         self.applied_temperament = temperament;
         self.active = self.current[0] != self.target[0];
+    }
+
+    /// Records `spec`'s tuning fields as currently applied without overwriting any pending
+    /// concurrent tuning targets (such as `a4_freq_hz` or `temperament`) queued mid-commit.
+    pub fn sync_applied_tuning_preserve_targets(&mut self, spec: &VoicingSpec) {
+        let v = spec.sanitized();
+        let vals = [
+            v.unison_detune_scale,
+            v.stretch_amount,
+            v.string_length_scale,
+            v.a4_freq_hz,
+            v.condition,
+        ];
+        for idx in 1..NUM_VOICING_PARAMS {
+            self.current[idx] = vals[idx - 1].clamp(MINS[idx], MAXS[idx]);
+        }
+        self.applied_temperament = v.temperament;
+        self.active = self.current != self.target || self.temperament != self.applied_temperament;
     }
 
     #[inline]

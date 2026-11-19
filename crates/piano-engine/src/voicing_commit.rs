@@ -111,14 +111,8 @@ impl PianoEngine {
                 .bridge
                 .set_port_resistances(self.core.bank.bridge_port_resistances());
             self.core.current_voicing = spec;
-            self.voicing_smoother.set_tuning_applied_full(
-                self.core.current_voicing.unison_detune_scale,
-                self.core.current_voicing.stretch_amount,
-                self.core.current_voicing.string_length_scale,
-                self.core.current_voicing.a4_freq_hz,
-                self.core.current_voicing.temperament,
-                self.core.current_voicing.condition,
-            );
+            self.voicing_smoother
+                .sync_applied_tuning_preserve_targets(&self.core.current_voicing);
             self.voicing_commit.active = false;
         }
         true
