@@ -93,7 +93,13 @@ fn cli_profile_rejects_invalid_values_and_reports_label() {
     assert!(parse_all(&["--fir-head-taps", "48"]).is_err());
     assert!(parse_all(&["--hall-fdn-lines", "12"]).is_err());
     assert!(parse_all(&["--action-oversample", "3"]).is_err());
-    assert!(parse_all(&["--damper-decim", "8"]).is_err());
+    assert!(parse_all(&["--damper-decim", "3"]).is_err());
+    assert_eq!(
+        parse_all(&["--damper-decim", "16"])
+            .unwrap()
+            .damper_control_decim,
+        16
+    );
     assert!(parse_all(&["--active-bridge-poles", "12"]).is_err());
     assert!(parse_all(&["--sav-max-key", "80"]).is_err());
     assert!(parse_all(&["--polynomial-adaa", "maybe"]).is_err());

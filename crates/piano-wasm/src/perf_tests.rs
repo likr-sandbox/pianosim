@@ -7,7 +7,36 @@ use piano_engine::{
     space_blob_len_for_profile, voicing_blob_len_with_profile, PerfProfile, SPACE_BLOB_MAGIC_V2,
 };
 
+use crate::{piano_is_voicing_applying, piano_space_chunk_ptr};
+
 use super::*;
+
+fn stream_space_via_chunk_buf(
+    ctx: *mut WasmContext,
+    body_id: u32,
+    persp: u32,
+    lid: u32,
+    src: &[f32],
+) {
+    let mut off = 0_usize;
+    while off < src.len() {
+        let n = 2_048.min(src.len() - off);
+        let dst = piano_space_chunk_ptr(ctx);
+        assert!(!dst.is_null());
+        unsafe { slice::from_raw_parts_mut(dst, n) }.copy_from_slice(&src[off..off + n]);
+        assert_eq!(
+            piano_stage_body_space_chunk(ctx, body_id, persp, lid, off, n, src.len()),
+            0
+        );
+        off += n;
+    }
+}
+
+fn drain_voicing(ctx: *mut WasmContext) {
+    while piano_is_voicing_applying(ctx) != 0 {
+        piano_render(ctx, 128);
+    }
+}
 
 #[test]
 fn init_with_profile_renders_finite_audio_and_installs_profile_blobs() {
@@ -46,6 +75,7 @@ fn init_with_profile_renders_finite_audio_and_installs_profile_blobs() {
             piano_apply_voicing_blob(ctx, 0.7, 1.4, 1.2, 0.96, 442.0, vc_len),
             0
         );
+        drain_voicing(ctx);
 
         piano_render(ctx, 128);
         let out_l = unsafe { slice::from_raw_parts(piano_out_l_ptr(ctx), 128) };
@@ -73,23 +103,30 @@ fn set_perf_preset_and_knob_runtime_checks_and_error_codes() {
     let prep = piano_prep_init(48_000.0);
     assert_eq!(piano_set_perf_preset(ctx, 99), -2);
     assert_eq!(piano_set_perf_knob(ctx, 99, 1.0), -2);
+    assert_eq!(piano_set_perf_knob(ctx, 19, 1.0), -2);
     assert_eq!(piano_prep_set_perf_preset(prep, 99), -2);
 
     // Full -> Balanced at runtime returns 1 (structural SpaceBlob recommended),
-    // and applies all 10 runtime knobs cleanly.
+    // and applies all 11 runtime knobs cleanly.
     assert_eq!(piano_set_perf_preset(ctx, 1), 1);
-    // Individual runtime knobs 0..=9 return 0 when no structural mismatch introduced.
+    // Individual runtime knobs 0..=9 and 18 return 0 when no structural mismatch introduced.
     assert_eq!(piano_set_perf_knob(ctx, 0, -95.0), 0);
     assert_eq!(piano_set_perf_knob(ctx, 1, -44.0), 0);
     assert_eq!(piano_set_perf_knob(ctx, 2, 32.0), 0);
     assert_eq!(piano_set_perf_knob(ctx, 3, 4_200.0), 0);
     assert_eq!(piano_set_perf_knob(ctx, 4, 16.0), 0);
-    assert_eq!(piano_set_perf_knob(ctx, 5, 2.0), 0);
+    assert_eq!(piano_set_perf_knob(ctx, 5, 16.0), 0);
     assert_eq!(piano_set_perf_knob(ctx, 6, 0.0), 0);
     assert_eq!(piano_set_perf_knob(ctx, 7, 8.0), 0);
     assert_eq!(piano_set_perf_knob(ctx, 8, 1.0), 0);
     assert_eq!(piano_set_perf_knob(ctx, 9, 1.0), 0);
     assert_eq!(piano_set_perf_knob(ctx, 9, 0.0), 0);
+    assert_eq!(piano_set_perf_knob(ctx, 18, -105.0), 0);
+    assert_eq!(unsafe { (*ctx).perf_profile().damper_control_decim }, 16);
+    assert_eq!(
+        unsafe { (*ctx).perf_profile().low_order_energy_horizon_db },
+        -105.0
+    );
 
     // Stage 4 PrepContext direct override produces matching SpaceBlob v2 length and applies.
     assert_eq!(piano_prep_set_stage4_profile(prep, 0.125, 1024, 16, 1), 0);
@@ -106,13 +143,7 @@ fn set_perf_preset_and_knob_runtime_checks_and_error_codes() {
     );
     assert_eq!(sp_len, expected);
     let sp_src = unsafe { slice::from_raw_parts(piano_prep_out_ptr(prep), sp_len) };
-    let st_sp = piano_staging_ptr(ctx, sp_len);
-    assert!(!st_sp.is_null());
-    unsafe { slice::from_raw_parts_mut(st_sp, sp_len) }.copy_from_slice(sp_src);
-    assert_eq!(
-        piano_stage_body_space_chunk(ctx, 1, 3, 2, 0, sp_len, sp_len),
-        0
-    );
+    stream_space_via_chunk_buf(ctx, 1, 3, 2, sp_src);
     assert_eq!(piano_commit_body_space(ctx, 1, 3, 2), 0);
 
     piano_note_on(ctx, 69, 48_000, 0);
@@ -126,7 +157,7 @@ fn set_perf_preset_and_knob_runtime_checks_and_error_codes() {
 }
 
 #[test]
-fn perf_builder_configures_all_18_knobs_and_syncs_wasm_and_prep_contexts() {
+fn perf_builder_configures_all_19_knobs_and_syncs_wasm_and_prep_contexts() {
     assert!(piano_perf_builder_new(3).is_null());
     assert_eq!(piano_perf_builder_set(ptr::null_mut(), 0, -90.0), -1);
     assert!(piano_init_with_builder(48_000.0, ptr::null()).is_null());
@@ -138,16 +169,16 @@ fn perf_builder_configures_all_18_knobs_and_syncs_wasm_and_prep_contexts() {
 
     let builder = piano_perf_builder_new(1);
     assert!(!builder.is_null());
-    assert_eq!(piano_perf_builder_set(builder, 18, 1.0), -2);
+    assert_eq!(piano_perf_builder_set(builder, 19, 1.0), -2);
 
-    // Exercise every knob 0..=17 with custom overrides.
-    let overrides: [(u32, f32); 18] = [
+    // Exercise every knob 0..=18 with custom overrides.
+    let overrides: [(u32, f32); 19] = [
         (0, -90.0),
         (1, -40.0),
         (2, 30.0),
         (3, 3_800.0),
         (4, 4.0),
-        (5, 4.0),
+        (5, 16.0),
         (6, 0.0),
         (7, 8.0),
         (8, 0.0),
@@ -160,6 +191,7 @@ fn perf_builder_configures_all_18_knobs_and_syncs_wasm_and_prep_contexts() {
         (15, 32.0),
         (16, 1.0),
         (17, 4.0),
+        (18, -108.0),
     ];
     for (knob, val) in overrides {
         assert_eq!(piano_perf_builder_set(builder, knob, val), 0);
@@ -184,13 +216,7 @@ fn perf_builder_configures_all_18_knobs_and_syncs_wasm_and_prep_contexts() {
         space_blob_len_for_profile(48_000.0, &expected_profile)
     );
     let sp_src = unsafe { slice::from_raw_parts(piano_prep_out_ptr(prep), sp_len) };
-    let st_sp = piano_staging_ptr(ctx, sp_len);
-    assert!(!st_sp.is_null());
-    unsafe { slice::from_raw_parts_mut(st_sp, sp_len) }.copy_from_slice(sp_src);
-    assert_eq!(
-        piano_stage_body_space_chunk(ctx, 0, 1, 1, 0, sp_len, sp_len),
-        0
-    );
+    stream_space_via_chunk_buf(ctx, 0, 1, 1, sp_src);
     assert_eq!(piano_commit_body_space(ctx, 0, 1, 1), 0);
 
     let vc_len = piano_prep_voicing_ex(prep, 0.65, 1.2, 1.1, 0.98, 442.0, 1, 0.15);
@@ -206,6 +232,7 @@ fn perf_builder_configures_all_18_knobs_and_syncs_wasm_and_prep_contexts() {
         piano_apply_voicing_blob_ex(ctx, 0.65, 1.2, 1.1, 0.98, 442.0, 1, 0.15, vc_len),
         0
     );
+    drain_voicing(ctx);
 
     piano_note_on(ctx, 64, 50_000, 0);
     piano_render(ctx, 128);

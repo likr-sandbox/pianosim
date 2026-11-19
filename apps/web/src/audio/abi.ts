@@ -175,6 +175,8 @@ export interface PianoWasmExports extends WebAssembly.Exports {
   piano_set_space(ctx: number, perspective: number, lid: number): number;
   piano_set_reverb(ctx: number, decayS: number, mix: number): number;
   piano_set_body_space(ctx: number, bodyId: number, perspective: number, lid: number): number;
+  piano_space_chunk_ptr(ctx: number): number;
+  piano_is_voicing_applying(ctx: number): number;
   piano_staging_ptr(ctx: number, lenF32: number): number;
   piano_staging_offset_ptr(ctx: number, offF32: number, lenF32: number): number;
   piano_stage_space_chunk(

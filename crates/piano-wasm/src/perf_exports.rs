@@ -35,7 +35,7 @@ fn apply_runtime_knob(profile: &mut PerfProfile, knob_id: u32, value: f32) -> bo
         }
         5 => {
             profile.damper_control_decim = if value.is_finite() {
-                value.round().clamp(1.0, 4.0) as u8
+                value.round().clamp(1.0, 16.0) as u8
             } else {
                 1
             };
@@ -50,6 +50,13 @@ fn apply_runtime_knob(profile: &mut PerfProfile, knob_id: u32, value: f32) -> bo
         }
         8 => profile.shank_flex_enabled = value >= 0.5,
         9 => profile.polynomial_adaa = value >= 0.5,
+        18 => {
+            profile.low_order_energy_horizon_db = if value.is_finite() {
+                value.clamp(-120.0, -40.0)
+            } else {
+                -120.0
+            };
+        }
         _ => return false,
     }
     true
@@ -57,7 +64,7 @@ fn apply_runtime_knob(profile: &mut PerfProfile, knob_id: u32, value: f32) -> bo
 
 #[inline]
 fn apply_any_knob(profile: &mut PerfProfile, knob_id: u32, value: f32) -> bool {
-    if knob_id <= 9 {
+    if knob_id <= 9 || knob_id == 18 {
         return apply_runtime_knob(profile, knob_id, value);
     }
     match knob_id {
@@ -129,10 +136,10 @@ pub extern "C" fn piano_set_perf_preset(ctx: *mut WasmContext, preset_id: u32) -
     }
 }
 
-/// Updates a single runtime-tunable `PerfProfile` knob (`knob_id` in `0..=9`) with zero allocations.
+/// Updates a single runtime-tunable `PerfProfile` knob (`knob_id` in `0..=9` or `18`) with zero allocations.
 ///
 /// Returns `0` if applied cleanly, `1` if `polynomial_adaa = false` requires `PGridLuts` allocation,
-/// `-1` if `ctx` is null, or `-2` if `knob_id > 9`.
+/// `-1` if `ctx` is null, or `-2` if `knob_id` is not runtime-tunable.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn piano_set_perf_knob(ctx: *mut WasmContext, knob_id: u32, value: f32) -> i32 {
@@ -207,9 +214,9 @@ pub extern "C" fn piano_perf_builder_new(preset_id: u32) -> *mut PerfProfile {
     Box::into_raw(Box::new(PerfProfile::from_preset(preset)))
 }
 
-/// Sets any of the 18 [`PerfProfile`] knobs (`knob_id` in `0..=17`) on `builder`.
+/// Sets any of the 19 [`PerfProfile`] knobs (`knob_id` in `0..=18`) on `builder`.
 ///
-/// Returns `0` on success, `-1` if `builder` is null, or `-2` if `knob_id > 17`.
+/// Returns `0` on success, `-1` if `builder` is null, or `-2` if `knob_id > 18`.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn piano_perf_builder_set(

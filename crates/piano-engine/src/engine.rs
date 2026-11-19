@@ -10,6 +10,7 @@ use crate::param_smooth::{
     IntoLidState, IntoListenerPerspective, SpaceCrossfadeGuard, VoicingSmoother, DIRTY_TUNING,
 };
 use crate::telemetry::{compute_block_telemetry, EngineTelemetry};
+use crate::voicing_commit::VoicingCommitState;
 
 /// Zero-allocation 88-key polyphonic piano engine coupling Stage 1 action,
 /// Stage 2 strings, Stage 3 bridge, and Stage 4 spatial acoustic radiator.
@@ -18,7 +19,8 @@ pub struct PianoEngine {
     pub(crate) core: EngineCore,
     scratch_events: EventQueue,
     telemetry: EngineTelemetry,
-    voicing_smoother: VoicingSmoother,
+    pub(crate) voicing_smoother: VoicingSmoother,
+    pub(crate) voicing_commit: VoicingCommitState,
     pub(crate) space_guard: SpaceCrossfadeGuard,
 }
 
@@ -45,12 +47,14 @@ impl PianoEngine {
     ) -> Self {
         let core = EngineCore::new_with_profile(sample_rate_hz, &voicing, profile);
         let voicing_smoother = VoicingSmoother::new_with_voicing(&voicing);
+        let voicing_commit = VoicingCommitState::new(core.bank.sample_rate());
         let space_guard = SpaceCrossfadeGuard::new(ListenerPerspective::Player, LidState::Open);
         Self {
             core,
             scratch_events: EventQueue::new(),
             telemetry: EngineTelemetry::default(),
             voicing_smoother,
+            voicing_commit,
             space_guard,
         }
     }
@@ -86,6 +90,7 @@ impl PianoEngine {
     pub fn reset(&mut self) {
         self.core.all_notes_off();
         self.space_guard.on_silence_reset();
+        self.space_guard.clear_standby_delay_dirty();
         self.telemetry = EngineTelemetry::default();
     }
 
@@ -176,25 +181,12 @@ impl PianoEngine {
 
     /// Installs an off-thread precomputed Stage 2/3 tuning table blob with zero allocations.
     pub fn apply_precomputed_voicing(&mut self, spec: VoicingSpec, blob: &[f32]) -> bool {
-        let mut v = spec.sanitized();
-        if !self.core.bank.install_precomputed_voicing(&v, blob) {
+        if !self.begin_voicing_commit(spec, blob) {
             return false;
         }
-        self.core.bridge.set_voicing(&v);
-        self.core
-            .bridge
-            .set_port_resistances(self.core.bank.bridge_port_resistances());
-        v.hammer_hardness = self.voicing_smoother.current_hammer_hardness();
-        self.core.action.update_voicing_in_place(&v);
-        self.core.current_voicing = v.clone();
-        self.voicing_smoother.set_tuning_applied_full(
-            v.unison_detune_scale,
-            v.stretch_amount,
-            v.string_length_scale,
-            v.a4_freq_hz,
-            v.temperament,
-            v.condition,
-        );
+        while self.is_voicing_applying() {
+            self.step_voicing_commit();
+        }
         true
     }
 
@@ -360,11 +352,13 @@ impl PianoEngine {
         let out_l = &mut out_l[..frames];
         let out_r = &mut out_r[..frames];
 
+        let _ = self.step_voicing_commit();
+
         if let Some((spec, dirty)) = self
             .voicing_smoother
             .step_block_with_dirty(frames, self.sample_rate())
         {
-            if (dirty & DIRTY_TUNING) != 0 {
+            if (dirty & DIRTY_TUNING) != 0 && !self.voicing_commit.active {
                 self.core.current_voicing.hammer_hardness = spec.hammer_hardness;
                 self.core.current_voicing.unison_detune_scale = spec.unison_detune_scale;
                 self.core.current_voicing.stretch_amount = spec.stretch_amount;

@@ -113,3 +113,19 @@ fn staging_guards_reject_overflow_oob_and_corrupted_headers() {
     let vc_len = voicing_blob_len(48_000.0);
     assert!(!ctx.apply_voicing_blob(0.5, 1.0, 1.0, 1.0, 440.0, vc_len));
 }
+
+#[test]
+fn space_chunk_buf_is_decoupled_from_staging_and_rejects_oversized_chunks() {
+    let mut ctx = WasmContext::new(48_000.0);
+    let sp_ptr = ctx.space_chunk_mut_ptr() as usize;
+    let st_ptr = ctx.staging_mut_ptr(16) as usize;
+    assert_ne!(sp_ptr, st_ptr);
+    assert!(!ctx.stage_body_space_chunk(
+        piano_engine::BodyArchetype::ConcertGrand,
+        ListenerPerspective::Player,
+        LidState::Open,
+        0,
+        SPACE_CHUNK_MAX + 1,
+        SPACE_CHUNK_MAX * 2,
+    ));
+}

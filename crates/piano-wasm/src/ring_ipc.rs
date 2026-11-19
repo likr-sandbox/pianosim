@@ -11,6 +11,9 @@ pub const MAX_BLOCK: usize = 512;
 /// Number of `f32` scalars in the shared telemetry buffer.
 pub const TELEMETRY_LEN: usize = 8;
 
+/// Maximum `f32` elements per `SpaceBlob` chunk transfer (`8 KB`).
+pub const SPACE_CHUNK_MAX: usize = 2_048;
+
 #[repr(C, align(16))]
 struct AlignedBlock([f32; MAX_BLOCK]);
 
@@ -24,6 +27,7 @@ pub struct WasmContext {
     out_l: AlignedBlock,
     out_r: AlignedBlock,
     telemetry: AlignedTelemetry,
+    pub(crate) space_chunk_buf: [f32; SPACE_CHUNK_MAX],
     pub(crate) staging: Vec<f32>,
 }
 
@@ -47,6 +51,7 @@ impl WasmContext {
             out_l: AlignedBlock([0.0; MAX_BLOCK]),
             out_r: AlignedBlock([0.0; MAX_BLOCK]),
             telemetry: AlignedTelemetry([0.0; TELEMETRY_LEN]),
+            space_chunk_buf: [0.0; SPACE_CHUNK_MAX],
             staging: vec![0.0; cap],
         }
     }
@@ -165,7 +170,7 @@ impl WasmContext {
         self.engine.set_body_space(body, perspective, lid)
     }
 
-    /// Streams one slice from `staging[0..chunk_len]` into the standby spatial radiator for `body`.
+    /// Streams one slice from `space_chunk_buf[0..chunk_len]` into the standby spatial radiator for `body`.
     pub fn stage_body_space_chunk(
         &mut self,
         body: BodyArchetype,
@@ -179,7 +184,7 @@ impl WasmContext {
             return false;
         };
         if chunk_len == 0
-            || chunk_len > self.staging.len()
+            || chunk_len > self.space_chunk_buf.len()
             || total_len == 0
             || chunk_end > total_len
         {
@@ -190,7 +195,7 @@ impl WasmContext {
             perspective,
             lid,
             blob_off,
-            &self.staging[..chunk_len],
+            &self.space_chunk_buf[..chunk_len],
             total_len,
         )
     }
@@ -213,15 +218,32 @@ impl WasmContext {
         self.engine.set_hammer_hardness(hammer_hardness);
     }
 
+    /// Returns mutable pointer to the dedicated `SpaceBlob` chunk buffer (`SPACE_CHUNK_MAX` floats).
+    #[inline]
+    pub fn space_chunk_mut_ptr(&mut self) -> *mut f32 {
+        self.space_chunk_buf.as_mut_ptr()
+    }
+
+    /// Returns `true` while a time-sliced `VoicingBlob` commit is in flight.
+    #[inline]
+    #[must_use]
+    pub const fn is_voicing_applying(&self) -> bool {
+        self.engine.is_voicing_applying()
+    }
+
     /// Returns mutable pointer to pre-allocated staging buffer if `len_f32` fits.
     #[inline]
     pub fn staging_mut_ptr(&mut self, len_f32: usize) -> *mut f32 {
         self.staging_offset_mut_ptr(0, len_f32)
     }
 
-    /// Returns mutable pointer to `staging[off_f32..]` if `[off_f32..off_f32 + len_f32]` fits.
+    /// Returns mutable pointer to `staging[off_f32..]` if `[off_f32..off_f32 + len_f32]` fits
+    /// and no time-sliced `VoicingBlob` commit is actively reading `staging`.
     #[inline]
     pub fn staging_offset_mut_ptr(&mut self, off_f32: usize, len_f32: usize) -> *mut f32 {
+        if self.engine.is_voicing_applying() {
+            return core::ptr::null_mut();
+        }
         let Some(end) = off_f32.checked_add(len_f32) else {
             return core::ptr::null_mut();
         };
@@ -232,7 +254,7 @@ impl WasmContext {
         unsafe { self.staging.as_mut_ptr().add(off_f32) }
     }
 
-    /// Streams one slice from `staging[0..chunk_len]` into the standby spatial radiator.
+    /// Streams one slice from `space_chunk_buf[0..chunk_len]` into the standby spatial radiator.
     pub fn stage_space_chunk(
         &mut self,
         perspective: ListenerPerspective,
@@ -245,7 +267,7 @@ impl WasmContext {
             return false;
         };
         if chunk_len == 0
-            || chunk_len > self.staging.len()
+            || chunk_len > self.space_chunk_buf.len()
             || total_len == 0
             || chunk_end > total_len
         {
@@ -255,7 +277,7 @@ impl WasmContext {
             perspective,
             lid,
             blob_off,
-            &self.staging[..chunk_len],
+            &self.space_chunk_buf[..chunk_len],
             total_len,
         )
     }
@@ -287,7 +309,7 @@ impl WasmContext {
         self.engine.apply_precomputed_space(perspective, lid, blob)
     }
 
-    /// Applies an off-thread precomputed Stage 2/3 tuning table blob from staging memory.
+    /// Starts time-sliced installation of an off-thread Stage 2/3 tuning table blob from staging.
     pub fn apply_voicing_blob(
         &mut self,
         hammer_hardness: f32,
@@ -297,7 +319,7 @@ impl WasmContext {
         a4_freq_hz: f32,
         len_f32: usize,
     ) -> bool {
-        if len_f32 == 0 || len_f32 > self.staging.len() {
+        if self.engine.is_voicing_applying() || len_f32 == 0 || len_f32 > self.staging.len() {
             return false;
         }
         let spec = VoicingSpec::from_globals_with_a4(
@@ -308,7 +330,7 @@ impl WasmContext {
             a4_freq_hz,
         );
         self.engine
-            .apply_precomputed_voicing(spec, &self.staging[..len_f32])
+            .begin_voicing_commit(spec, &self.staging[..len_f32])
     }
 
     /// Renders up to `MAX_BLOCK` frames into the internal L/R buffers, updates

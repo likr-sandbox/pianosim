@@ -7,8 +7,8 @@ use crate::{
     piano_all_notes_off, piano_commit_body_space, piano_destroy, piano_init,
     piano_is_space_crossfading, piano_note_off, piano_note_on, piano_out_l_ptr, piano_out_r_ptr,
     piano_prep_destroy, piano_prep_init, piano_prep_out_ptr, piano_prep_space_for_body,
-    piano_render, piano_set_body_space, piano_set_reverb, piano_stage_body_space_chunk,
-    piano_staging_ptr,
+    piano_render, piano_set_body_space, piano_set_reverb, piano_space_chunk_ptr,
+    piano_stage_body_space_chunk,
 };
 
 #[test]
@@ -26,6 +26,7 @@ fn c_abi_reverb_and_body_space_discriminant_validation() {
         -1
     );
     assert_eq!(piano_commit_body_space(ptr::null_mut(), 0, 0, 2), -1);
+    assert!(piano_space_chunk_ptr(ptr::null_mut()).is_null());
 
     // Invalid discriminants return -2 (or 0 for prep_space_for_body)
     assert_eq!(piano_set_body_space(ctx, 3, 0, 2), -2);
@@ -71,10 +72,16 @@ fn c_abi_prep_worker_streams_multibody_space_chunks_and_commits() {
     assert!(len > 10_000);
     let src = unsafe { slice::from_raw_parts(piano_prep_out_ptr(prep), len) };
 
+    // Oversized space chunk (> 2048 floats) must be rejected cleanly.
+    assert_eq!(
+        piano_stage_body_space_chunk(ctx, 1, 0, 2, 0, 2_049, len),
+        -3
+    );
+
     let mut off = 0_usize;
     while off < len {
-        let n = 8_192.min(len - off);
-        let dst = piano_staging_ptr(ctx, n);
+        let n = 2_048.min(len - off);
+        let dst = piano_space_chunk_ptr(ctx);
         assert!(!dst.is_null());
         unsafe { slice::from_raw_parts_mut(dst, n) }.copy_from_slice(&src[off..off + n]);
         assert_eq!(piano_stage_body_space_chunk(ctx, 1, 0, 2, off, n, len), 0);
@@ -104,8 +111,8 @@ fn c_abi_prep_worker_streams_multibody_space_chunks_and_commits() {
     let src2 = unsafe { slice::from_raw_parts(piano_prep_out_ptr(prep), len2) };
     let mut off2 = 0_usize;
     while off2 < len2 {
-        let n = 8_192.min(len2 - off2);
-        let dst = piano_staging_ptr(ctx, n);
+        let n = 2_048.min(len2 - off2);
+        let dst = piano_space_chunk_ptr(ctx);
         assert!(!dst.is_null());
         unsafe { slice::from_raw_parts_mut(dst, n) }.copy_from_slice(&src2[off2..off2 + n]);
         assert_eq!(piano_stage_body_space_chunk(ctx, 2, 2, 0, off2, n, len2), 0);

@@ -1,4 +1,4 @@
-/** Performance & Physics Quality panel managing Full/Balanced/Realtime presets and 18 knobs. */
+/** Performance & Physics Quality panel managing Full/Balanced/Realtime presets and 19 knobs. */
 
 import {
   clonePerfConfig,
@@ -157,7 +157,7 @@ export class PerfPanel {
           </div>
         </div>
         <details class="perf-advanced" data-testid="perf-advanced-toggle">
-          <summary class="perf-advanced-summary">Advanced 18-Knob Simplification Parameters</summary>
+          <summary class="perf-advanced-summary">Advanced 19-Knob Simplification Parameters</summary>
           <div class="perf-knob-grid">${knobsHtml}</div>
         </details>
       </section>

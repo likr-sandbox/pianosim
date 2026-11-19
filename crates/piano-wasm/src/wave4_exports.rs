@@ -65,7 +65,7 @@ impl WasmContext {
         condition: f32,
         len_f32: usize,
     ) -> bool {
-        if len_f32 == 0 || len_f32 > self.staging.len() {
+        if self.engine.is_voicing_applying() || len_f32 == 0 || len_f32 > self.staging.len() {
             return false;
         }
         let spec = VoicingSpec::from_globals_full(
@@ -78,7 +78,7 @@ impl WasmContext {
             condition,
         );
         self.engine
-            .apply_precomputed_voicing(spec, &self.staging[..len_f32])
+            .begin_voicing_commit(spec, &self.staging[..len_f32])
     }
 }
 

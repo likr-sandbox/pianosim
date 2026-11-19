@@ -47,6 +47,8 @@ export const REQUIRED_EXPORTS: ReadonlyArray<keyof PianoWasmExports> = [
   'piano_set_space',
   'piano_set_reverb',
   'piano_set_body_space',
+  'piano_space_chunk_ptr',
+  'piano_is_voicing_applying',
   'piano_staging_ptr',
   'piano_staging_offset_ptr',
   'piano_stage_space_chunk',
@@ -110,7 +112,7 @@ export function applyRuntimePerfKnobs(
   perfConfig: PerfProfileConfig,
 ): void {
   for (const spec of PERF_KNOB_SPECS) {
-    if (spec.knobId <= 9) {
+    if (spec.knobId <= 9 || spec.knobId === 18) {
       exports.piano_set_perf_knob(ctx, spec.knobId, encodeKnobValue(spec.key, perfConfig));
     }
   }
@@ -159,6 +161,11 @@ export function runActive12Warmup(
   exports.piano_all_notes_off(ctx);
   for (let i = 0; i < 8; i++) exports.piano_render(ctx, 128);
   warmPrepInstallers(raw, exports, ctx, sr, syncMemForBlob, perfConfig);
+  while (exports.piano_is_voicing_applying(ctx) !== 0) {
+    exports.piano_render(ctx, 128);
+  }
+  exports.piano_set_voicing_full(ctx, 0.5, 1.0, 1.0, 1.0, 440.0, 0, 0.0);
+  for (let i = 0; i < 32; i++) exports.piano_render(ctx, 128);
 }
 
 export function defaultCachedWorkletState(): CachedWorkletState {

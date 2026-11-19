@@ -41,6 +41,7 @@ pub struct SpaceCrossfadeGuard {
     total_samples: usize,
     crossfading: bool,
     recent_envelope: f32,
+    standby_delay_dirty: bool,
 }
 
 impl SpaceCrossfadeGuard {
@@ -58,6 +59,7 @@ impl SpaceCrossfadeGuard {
             total_samples: 0,
             crossfading: false,
             recent_envelope: 0.0,
+            standby_delay_dirty: false,
         }
     }
 
@@ -71,6 +73,7 @@ impl SpaceCrossfadeGuard {
         self.recent_envelope = 0.0;
         if self.crossfading {
             self.active_radiator_idx = 1 - self.active_radiator_idx;
+            self.standby_delay_dirty = true;
             self.current_body = self.target_body;
             self.current_perspective = self.target_perspective;
             self.current_lid = self.target_lid;
@@ -197,6 +200,19 @@ impl SpaceCrossfadeGuard {
     }
     #[inline]
     #[must_use]
+    pub const fn standby_delay_dirty(&self) -> bool {
+        self.standby_delay_dirty
+    }
+    #[inline]
+    pub fn clear_standby_delay_dirty(&mut self) {
+        self.standby_delay_dirty = false;
+    }
+    #[inline]
+    pub fn mark_standby_delay_dirty(&mut self) {
+        self.standby_delay_dirty = true;
+    }
+    #[inline]
+    #[must_use]
     pub const fn elapsed_samples(&self) -> usize {
         self.elapsed_samples
     }
@@ -252,6 +268,7 @@ impl SpaceCrossfadeGuard {
         self.target_lid = lid;
         if self.recent_envelope <= SPACE_SILENCE_ENV_THRESHOLD {
             self.active_radiator_idx = 1 - self.active_radiator_idx;
+            self.standby_delay_dirty = true;
             self.current_body = body;
             self.current_perspective = perspective;
             self.current_lid = lid;
@@ -283,6 +300,7 @@ impl SpaceCrossfadeGuard {
         self.elapsed_samples += frames;
         if self.elapsed_samples >= self.total_samples {
             self.active_radiator_idx = 1 - self.active_radiator_idx;
+            self.standby_delay_dirty = true;
             self.current_body = self.target_body;
             self.current_perspective = self.target_perspective;
             self.current_lid = self.target_lid;

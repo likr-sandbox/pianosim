@@ -10,6 +10,7 @@ pub(crate) mod perf_control;
 pub mod space_control;
 pub mod space_guard;
 pub mod telemetry;
+pub(crate) mod voicing_commit;
 
 pub use engine::PianoEngine;
 pub use event_queue::{EventQueue, MAX_EVENTS};
@@ -60,3 +61,6 @@ mod wave4_tests;
 
 #[cfg(test)]
 mod half_pedal_tests;
+
+#[cfg(test)]
+mod m4_wiring_tests;

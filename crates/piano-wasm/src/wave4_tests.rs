@@ -5,10 +5,11 @@ use core::ptr;
 use core::slice;
 
 use crate::{
-    piano_apply_voicing_blob_ex, piano_destroy, piano_init, piano_note_on, piano_out_l_ptr,
-    piano_out_r_ptr, piano_prep_destroy, piano_prep_init, piano_prep_out_ptr,
-    piano_prep_voicing_ex, piano_render, piano_set_concert_pitch, piano_set_condition,
-    piano_set_temperament, piano_set_voicing_full, piano_staging_offset_ptr, piano_staging_ptr,
+    piano_apply_voicing_blob_ex, piano_destroy, piano_init, piano_is_voicing_applying,
+    piano_note_on, piano_out_l_ptr, piano_out_r_ptr, piano_prep_destroy, piano_prep_init,
+    piano_prep_out_ptr, piano_prep_voicing_ex, piano_render, piano_set_concert_pitch,
+    piano_set_condition, piano_set_temperament, piano_set_voicing_full, piano_staging_offset_ptr,
+    piano_staging_ptr,
 };
 
 #[test]
@@ -29,6 +30,7 @@ fn c_abi_wave4_null_guards_and_temperament_validation() {
         piano_prep_voicing_ex(ptr::null_mut(), 0.5, 1.0, 1.0, 1.0, 440.0, 0, 0.0),
         0
     );
+    assert_eq!(piano_is_voicing_applying(ptr::null()), 0);
     assert_eq!(
         piano_apply_voicing_blob_ex(ptr::null_mut(), 0.5, 1.0, 1.0, 1.0, 440.0, 0, 0.0, 100),
         -1
@@ -103,6 +105,23 @@ fn c_abi_wave4_prep_voicing_ex_chunked_staging_and_default_parity() {
         piano_apply_voicing_blob_ex(ctx_ex, 0.65, 1.25, 1.1, 1.0, 392.0, 1, 0.8, vc_len),
         0
     );
+    assert_eq!(piano_is_voicing_applying(ctx_ex), 1);
+
+    // Concurrent staging or voicing apply while time-sliced commit is active must be rejected.
+    assert!(piano_staging_offset_ptr(ctx_ex, 0, 16).is_null());
+    assert!(piano_staging_ptr(ctx_ex, 16).is_null());
+    assert_eq!(
+        piano_apply_voicing_blob_ex(ctx_ex, 0.5, 1.0, 1.0, 1.0, 440.0, 0, 0.0, vc_len),
+        -3
+    );
+
+    let mut commit_blocks = 0_usize;
+    while piano_is_voicing_applying(ctx_ex) != 0 {
+        piano_render(ctx_ex, 128);
+        commit_blocks += 1;
+        assert!(commit_blocks <= 16, "voicing commit did not finish");
+    }
+    assert_eq!(commit_blocks, 11);
 
     // Invalid len_f32 rejected with -3
     assert_eq!(
@@ -121,6 +140,9 @@ fn c_abi_wave4_prep_voicing_ex_chunked_staging_and_default_parity() {
         piano_apply_voicing_blob_ex(ctx_ex, 0.5, 1.0, 1.0, 1.0, 440.0, 0, 0.0, def_len),
         0
     );
+    while piano_is_voicing_applying(ctx_ex) != 0 {
+        piano_render(ctx_ex, 128);
+    }
 
     // Compare rendered output of restored ctx_ex vs untouched ctx_default (close match; exact on fresh init)
     piano_note_on(ctx_default, 69, 52_000, 0);

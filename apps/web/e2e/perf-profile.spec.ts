@@ -47,7 +47,7 @@ test.describe('E2E PerfProfile UI, URL Query, and 3-Tier Reconfiguration', () =>
     await expect(page.getByTestId('perf-preset-realtime')).toHaveClass(/active/);
   });
 
-  test('3-tier preset switching and 18-knob overrides preserve voicing/space state cleanly', async ({
+  test('3-tier preset switching and 19-knob overrides preserve voicing/space state cleanly', async ({
     page,
   }) => {
     await page.goto('./');
@@ -104,7 +104,7 @@ test.describe('E2E PerfProfile UI, URL Query, and 3-Tier Reconfiguration', () =>
     await waitForPrepIdle(page, 8);
     await expect(page.getByTestId('perf-custom-badge')).toBeHidden();
     const resetCfg = await page.evaluate(() => window.__PIANO_DIAG__?.perfConfig);
-    expect(resetCfg?.energyHorizonDb).toBe(-92);
+    expect(resetCfg?.energyHorizonDb).toBe(-96);
     expect(resetCfg?.firHeadTaps).toBe(64);
     expect(resetCfg?.deadModePruneDb).toBe(-50);
   });

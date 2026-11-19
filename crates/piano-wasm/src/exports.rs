@@ -205,6 +205,30 @@ pub extern "C" fn piano_set_hammer_hardness(ctx: *mut WasmContext, hammer_hardne
     0
 }
 
+/// Returns mutable pointer to the dedicated `2048`-float `SpaceBlob` chunk buffer.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_space_chunk_ptr(ctx: *mut WasmContext) -> *mut f32 {
+    if ctx.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: `ctx` is a valid non-null pointer from `piano_init*`.
+    let ctx = unsafe { &mut *ctx };
+    ctx.space_chunk_mut_ptr()
+}
+
+/// Returns `1` while a time-sliced `VoicingBlob` commit is in flight, else `0`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn piano_is_voicing_applying(ctx: *const WasmContext) -> u32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    // SAFETY: `ctx` is a valid non-null pointer from `piano_init*`.
+    let ctx = unsafe { &*ctx };
+    u32::from(ctx.is_voicing_applying())
+}
+
 /// Returns mutable pointer to pre-allocated staging memory at `off_f32`.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
@@ -220,7 +244,7 @@ pub extern "C" fn piano_staging_offset_ptr(
     ctx.staging_offset_mut_ptr(off_f32, len_f32)
 }
 
-/// Streams a precomputed space blob chunk from `staging[0..chunk_len]` into standby.
+/// Streams a precomputed space blob chunk from `space_chunk_buf[0..chunk_len]` into standby.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn piano_stage_space_chunk(

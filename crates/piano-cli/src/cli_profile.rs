@@ -30,7 +30,7 @@ impl CliProfileArgs {
     /// Returns usage summary for performance profile CLI options.
     #[must_use]
     pub const fn usage() -> &'static str {
-        "[--perf-profile <full|balanced|realtime>] [--horiz-max-hz <f32>] [--dead-mode-prune-db <f32>] [--energy-horizon-db <f32>] [--sav-dormancy-db <f32>] [--sav-max-key <0..=52>] [--bass-phantom-sparse <bool>] [--passive-res-max-hz <f32>] [--ir-duration-secs <f32>] [--spatial-tail-split-tap <u16>] [--fir-head-taps <16|32|64>] [--fir-block-fft <bool>] [--hall-fdn-lines <4|8|16>] [--action-oversample <2|4|8>] [--polynomial-adaa <bool>] [--shank-flex <bool>] [--damper-decim <1|2|4>] [--hertz-nonlinear <bool>] [--active-bridge-poles <4..=10>]"
+        "[--perf-profile <full|balanced|realtime>] [--horiz-max-hz <f32>] [--dead-mode-prune-db <f32>] [--energy-horizon-db <f32>] [--sav-dormancy-db <f32>] [--sav-max-key <0..=52>] [--bass-phantom-sparse <bool>] [--passive-res-max-hz <f32>] [--ir-duration-secs <f32>] [--spatial-tail-split-tap <u16>] [--fir-head-taps <16|32|64>] [--fir-block-fft <bool>] [--hall-fdn-lines <4|8|16>] [--action-oversample <2|4|8>] [--polynomial-adaa <bool>] [--shank-flex <bool>] [--damper-decim <1|2|4|8|16>] [--hertz-nonlinear <bool>] [--active-bridge-poles <4..=10>]"
     }
 
     /// Resolves base preset + individual overrides into a sanitized [`PerfProfile`].
@@ -166,7 +166,7 @@ impl CliProfileArgs {
             "--polynomial-adaa" => self.polynomial_adaa = Some(parse_bool(val, flag)?),
             "--shank-flex" => self.shank_flex_enabled = Some(parse_bool(val, flag)?),
             "--damper-decim" => {
-                self.damper_control_decim = Some(parse_u8_set(val, flag, &[1, 2, 4])?)
+                self.damper_control_decim = Some(parse_u8_set(val, flag, &[1, 2, 4, 8, 16])?)
             }
             "--hertz-nonlinear" => self.hertz_nonlinear = Some(parse_bool(val, flag)?),
             "--active-bridge-poles" => {

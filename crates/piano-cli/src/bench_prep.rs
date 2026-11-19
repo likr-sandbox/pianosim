@@ -16,7 +16,7 @@ use crate::bench_rt::{compute_percentiles, Percentiles};
 
 const BLOCK_FRAMES: usize = 128;
 const SAMPLE_RATE: f32 = 48_000.0;
-const BLOB_STREAM_CHUNK: usize = 8_192;
+const BLOB_STREAM_CHUNK: usize = 2_048;
 const WARMUP_HALF_PEDAL_BLOCKS: usize = 64;
 const STEADY_HALF_PEDAL_BLOCKS: usize = 256;
 const PREP_SWAPS: usize = 8;
@@ -312,7 +312,7 @@ pub fn measure_prep_isolation(profile: PerfProfile) -> PrepIsolationReport {
         }
     }
 
-    // 2b. Half-pedal + VoicingBlob commit
+    // 2b. Half-pedal + VoicingBlob time-sliced commit
     let mut engine = init_half_pedal_engine(profile);
     let mut voicing_total = Vec::with_capacity(PREP_SWAPS * BLOCKS_PER_SWAP);
     let (mut voicing_apply, mut voicing_commit_render) = (Vec::new(), Vec::new());
@@ -324,14 +324,15 @@ pub fn measure_prep_isolation(profile: PerfProfile) -> PrepIsolationReport {
             let e = &voicings[(b / BLOCKS_PER_SWAP) % voicings.len()];
             engine.set_hammer_hardness(e.spec.hammer_hardness);
             let t_vc0 = Instant::now();
-            assert!(engine.apply_precomputed_voicing(e.spec.clone(), &e.blob));
+            assert!(engine.begin_voicing_commit(e.spec.clone(), &e.blob));
             voicing_apply.push(t_vc0.elapsed().as_secs_f64() * 1e6);
         }
+        let was_applying = engine.is_voicing_applying();
         let t_ren0 = Instant::now();
         engine.render_block(evs, &mut out_l, &mut out_r);
         let ren_us = t_ren0.elapsed().as_secs_f64() * 1e6;
         voicing_total.push(t_blk0.elapsed().as_secs_f64() * 1e6);
-        if is_commit {
+        if is_commit || was_applying {
             voicing_commit_render.push(ren_us);
         }
         black_box((&out_l, &out_r));
@@ -351,11 +352,11 @@ pub fn measure_prep_isolation(profile: PerfProfile) -> PrepIsolationReport {
             comb_swap += 1;
         }
         let t_blk0 = Instant::now();
-        if b.is_multiple_of(BLOCKS_PER_SWAP) {
+        if b.is_multiple_of(BLOCKS_PER_SWAP) && !engine.is_voicing_applying() {
             let e = &voicings[(b / BLOCKS_PER_SWAP) % voicings.len()];
             engine.set_hammer_hardness(e.spec.hammer_hardness);
             let t_vc0 = Instant::now();
-            assert!(engine.apply_precomputed_voicing(e.spec.clone(), &e.blob));
+            assert!(engine.begin_voicing_commit(e.spec.clone(), &e.blob));
             comb_vc_max = comb_vc_max.max(t_vc0.elapsed().as_secs_f64() * 1e6);
         }
         if let Some((idx, off)) = active_sp {

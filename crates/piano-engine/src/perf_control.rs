@@ -37,6 +37,7 @@ impl PianoEngine {
         self.core.action.set_perf_profile(&next);
 
         if stage2_structural_changed(&cur, &next) {
+            self.voicing_commit.active = false;
             let sr = self.core.bank.sample_rate();
             self.core.bank =
                 StringBank::new_bridge_coupled_with_profile(sr, &self.core.current_voicing, &next);
@@ -77,6 +78,7 @@ impl PianoEngine {
             || actual_poly_adaa != next.polynomial_adaa;
 
         self.core.perf_profile.energy_horizon_db = next.energy_horizon_db;
+        self.core.perf_profile.low_order_energy_horizon_db = next.low_order_energy_horizon_db;
         self.core.perf_profile.sav_dormancy_db = next.sav_dormancy_db;
         self.core.perf_profile.sav_max_key_idx = next.sav_max_key_idx;
         self.core.perf_profile.passive_res_max_hz = next.passive_res_max_hz;

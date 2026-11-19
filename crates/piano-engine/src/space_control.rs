@@ -254,6 +254,11 @@ impl PianoEngine {
         let target_idx = self.space_guard.target_radiator_idx();
         let stage4_refresh =
             same_space && !blob_matches_radiator_stage4(blob, &self.core.radiators[active_idx]);
+        if target_idx != active_idx && self.space_guard.standby_delay_dirty() {
+            self.core.radiators[target_idx].reset();
+            self.space_guard.clear_standby_delay_dirty();
+            self.core.standby_clear_slice_next = 0;
+        }
         if !self.core.radiators[target_idx].install_precomputed_space(persp, lid_state, blob) {
             return false;
         }
@@ -307,10 +312,22 @@ impl PianoEngine {
         };
         let standby = self.space_guard.standby_radiator_idx();
         if blob_off == 0 {
-            self.core.radiators[standby].reset();
+            self.core.standby_clear_slice_next = 0;
             self.core.staged_standby_body = None;
             if self.core.radiator_bodies[standby] != Some(body) {
                 self.core.radiator_bodies[standby] = None;
+            }
+        }
+        const STANDBY_CLEAR_SLICES: usize = 16;
+        if self.space_guard.standby_delay_dirty() {
+            let slice_idx = usize::from(self.core.standby_clear_slice_next);
+            if slice_idx < STANDBY_CLEAR_SLICES {
+                self.core.radiators[standby]
+                    .clear_runtime_state_slice(slice_idx, STANDBY_CLEAR_SLICES);
+                self.core.standby_clear_slice_next += 1;
+                if usize::from(self.core.standby_clear_slice_next) >= STANDBY_CLEAR_SLICES {
+                    self.space_guard.clear_standby_delay_dirty();
+                }
             }
         }
         let ok = self.core.radiators[standby]
@@ -353,6 +370,16 @@ impl PianoEngine {
         let rad = &self.core.radiators[standby];
         if rad.perspective() != persp || rad.lid_state() != lid_state {
             return false;
+        }
+        const STANDBY_CLEAR_SLICES: usize = 16;
+        if self.space_guard.standby_delay_dirty() {
+            while usize::from(self.core.standby_clear_slice_next) < STANDBY_CLEAR_SLICES {
+                let slice_idx = usize::from(self.core.standby_clear_slice_next);
+                self.core.radiators[standby]
+                    .clear_runtime_state_slice(slice_idx, STANDBY_CLEAR_SLICES);
+                self.core.standby_clear_slice_next += 1;
+            }
+            self.space_guard.clear_standby_delay_dirty();
         }
         let force = stage4_structural_changed(
             self.core.radiators[active].perf_profile(),
