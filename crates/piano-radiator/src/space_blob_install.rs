@@ -19,6 +19,14 @@ pub(crate) struct ParsedSpaceHeader {
     pub(crate) expected_len: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StagedSpaceStream {
+    pub(crate) perspective: ListenerPerspective,
+    pub(crate) lid_state: LidState,
+    pub(crate) total_len: usize,
+    pub(crate) next_off: usize,
+}
+
 fn parse_space_header(
     header: &[f32],
     sample_rate: f64,
@@ -110,6 +118,7 @@ impl RadiatorBank {
         lid_state: LidState,
         blob: &[f32],
     ) -> bool {
+        self.staged_space_stream = None;
         let Some(hdr) = parse_space_header(
             blob,
             self.sample_rate,
@@ -174,6 +183,14 @@ impl RadiatorBank {
         chunk: &[f32],
         total_len: usize,
     ) -> bool {
+        let Some(chunk_end) = blob_off.checked_add(chunk.len()) else {
+            self.staged_space_stream = None;
+            return false;
+        };
+        if chunk.is_empty() || total_len == 0 {
+            self.staged_space_stream = None;
+            return false;
+        }
         if blob_off == 0 {
             let Some(hdr) = parse_space_header(
                 chunk,
@@ -182,29 +199,40 @@ impl RadiatorBank {
                 perspective,
                 lid_state,
             ) else {
+                self.staged_space_stream = None;
                 return false;
             };
-            if total_len != hdr.expected_len || blob_off + chunk.len() > total_len {
+            if total_len != hdr.expected_len || chunk_end > total_len {
+                self.staged_space_stream = None;
                 return false;
             }
             self.staged_blob_has_head_spectra = hdr.has_head_spectra;
+            self.staged_space_stream = Some(StagedSpaceStream {
+                perspective,
+                lid_state,
+                total_len,
+                next_off: chunk_end,
+            });
             self.apply_blob_stage4_config(&hdr, false);
         } else {
-            let extra = if self.staged_blob_has_head_spectra {
-                head_spectra_float_len(self.fir_block_fft, self.profile.fir_head_taps)
-            } else {
-                0
+            let Some(stream) = self.staged_space_stream else {
+                return false;
             };
-            let expected_len = space_blob_len_for_params(
-                self.tail.active_ir_len(),
-                self.profile.spatial_tail_split_tap,
-            ) + extra;
-            if total_len != expected_len || blob_off + chunk.len() > total_len {
+            if stream.perspective != perspective
+                || stream.lid_state != lid_state
+                || stream.total_len != total_len
+                || blob_off != stream.next_off
+                || chunk_end > total_len
+            {
+                self.staged_space_stream = None;
                 return false;
             }
+            self.staged_space_stream = Some(StagedSpaceStream {
+                next_off: chunk_end,
+                ..stream
+            });
         }
 
-        let chunk_end = blob_off + chunk.len();
         let fir_start = SPACE_BLOB_HEADER_LEN;
         let fir_end = fir_start + FIR_COEFFS_LEN;
         let f_lo = blob_off.max(fir_start);
@@ -248,6 +276,7 @@ impl RadiatorBank {
             self.perspective = perspective;
             self.lid_state = lid_state;
             self.hall_fdn.set_perspective(perspective);
+            self.staged_space_stream = None;
         }
         true
     }

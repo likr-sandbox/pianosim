@@ -218,3 +218,181 @@ fn space_blob_precomputed_head_spectra_and_legacy_v2_fallback() {
         assert_eq!(ref_r, out_r);
     }
 }
+
+#[test]
+fn space_blob_chunk_stream_rejects_invalid_headers_overflow_mismatches_and_supports_restart() {
+    let sr = 48_000.0;
+    let mut prep = SpacePrepContext::new_with_profile(sr, &PerfProfile::balanced());
+    let blob_a = prep
+        .prepare_space(ListenerPerspective::ConcertHall, LidState::Half)
+        .to_vec();
+    let blob_b = prep
+        .prepare_space(ListenerPerspective::BinauralHrtf, LidState::Closed)
+        .to_vec();
+    let total_a = blob_a.len();
+    let total_b = blob_b.len();
+
+    let mut bank = RadiatorBank::new_with_profile(
+        sr,
+        ListenerPerspective::Player,
+        LidState::Open,
+        &PerfProfile::balanced(),
+    );
+
+    // 1. Skipped chunk 0 (`blob_off > 0` without active stream) must fail.
+    assert!(!bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        2_048,
+        &blob_a[2_048..4_096],
+        total_a,
+    ));
+    assert_eq!(bank.perspective(), ListenerPerspective::Player);
+
+    // 2. `< 8` float header at `blob_off == 0` and empty chunks must fail.
+    assert!(!bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        0,
+        &blob_a[..7],
+        total_a,
+    ));
+    assert!(!bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        0,
+        &[],
+        total_a,
+    ));
+
+    // 3. `total_len` mismatch at chunk 0 must fail.
+    assert!(!bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        0,
+        &blob_a[..2_048],
+        total_a - 1,
+    ));
+
+    // 4. `blob_off = usize::MAX` overflow guard (with and without an active stream).
+    assert!(!bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        usize::MAX,
+        &blob_a[..16],
+        total_a,
+    ));
+
+    // Start valid stream A, then reject mismatched `(perspective, lid_state)`, `total_len`,
+    // gap-skipped `blob_off`, and `usize::MAX` overflow without committing A.
+    assert!(bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        0,
+        &blob_a[..2_048],
+        total_a,
+    ));
+    assert!(!bank.install_precomputed_space_chunk(
+        ListenerPerspective::BinauralHrtf,
+        LidState::Half,
+        2_048,
+        &blob_a[2_048..4_096],
+        total_a,
+    ));
+    assert_eq!(bank.perspective(), ListenerPerspective::Player);
+
+    // Re-start A, test `total_len` mismatch mid-stream.
+    assert!(bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        0,
+        &blob_a[..2_048],
+        total_a,
+    ));
+    assert!(!bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        2_048,
+        &blob_a[2_048..4_096],
+        total_a + 4,
+    ));
+
+    // Re-start A, test gap-skipping straight to the final chunk (must not commit).
+    assert!(bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        0,
+        &blob_a[..2_048],
+        total_a,
+    ));
+    assert!(!bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        total_a - 2_048,
+        &blob_a[total_a - 2_048..],
+        total_a,
+    ));
+    assert_eq!(bank.perspective(), ListenerPerspective::Player);
+
+    // Re-start A, interrupt mid-stream with `usize::MAX` overflow.
+    assert!(bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        0,
+        &blob_a[..2_048],
+        total_a,
+    ));
+    assert!(!bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        usize::MAX,
+        &blob_a[..8],
+        total_a,
+    ));
+
+    // Interrupted stream restart from `blob_off == 0` with stream B must succeed and match ref.
+    assert!(bank.install_precomputed_space_chunk(
+        ListenerPerspective::ConcertHall,
+        LidState::Half,
+        0,
+        &blob_a[..2_048],
+        total_a,
+    ));
+    let mut off = 0_usize;
+    while off < total_b {
+        let n = 2_048.min(total_b - off);
+        assert!(bank.install_precomputed_space_chunk(
+            ListenerPerspective::BinauralHrtf,
+            LidState::Closed,
+            off,
+            &blob_b[off..off + n],
+            total_b,
+        ));
+        off += n;
+    }
+    assert_eq!(bank.perspective(), ListenerPerspective::BinauralHrtf);
+    assert_eq!(bank.lid_state(), LidState::Closed);
+
+    // Trailing chunk after completion must fail without an active stream.
+    assert!(!bank.install_precomputed_space_chunk(
+        ListenerPerspective::BinauralHrtf,
+        LidState::Closed,
+        total_b - 2_048,
+        &blob_b[total_b - 2_048..],
+        total_b,
+    ));
+
+    let frames = [[0.20_f32; PRESET_RADIATOR_ZONES]; 128];
+    let (mut ref_l, mut ref_r) = ([0.0_f32; 128], [0.0_f32; 128]);
+    let (mut out_l, mut out_r) = ([0.0_f32; 128], [0.0_f32; 128]);
+    let mut ref_bank = RadiatorBank::new_with_profile(
+        sr,
+        ListenerPerspective::BinauralHrtf,
+        LidState::Closed,
+        &PerfProfile::balanced(),
+    );
+    ref_bank.process_block(&frames, &mut ref_l, &mut ref_r);
+    bank.process_block(&frames, &mut out_l, &mut out_r);
+    assert_eq!(ref_l, out_l);
+    assert_eq!(ref_r, out_r);
+}

@@ -32,6 +32,7 @@ pub(crate) fn empty_fallback_preset() -> BodyPreset {
 impl RadiatorBank {
     /// Update the active [`PerfProfile`] (rebuilding IR/NUPOLS if structural Stage 4 knobs changed).
     pub fn set_perf_profile(&mut self, profile: &PerfProfile) {
+        self.staged_space_stream = None;
         let next = profile.sanitized();
         self.hall_fdn.set_fdn_lines(next.hall_fdn_lines);
         let ir_changed = (next.ir_duration_secs - self.profile.ir_duration_secs).abs() > 1.0e-6;
@@ -65,6 +66,7 @@ impl RadiatorBank {
 
     /// Re-synthesize all 18 spatialized IRs and reload FIR/NUPOLS partitions in-place.
     pub fn reconfigure_space(&mut self, perspective: ListenerPerspective, lid_state: LidState) {
+        self.staged_space_stream = None;
         if self.perspective == perspective && self.lid_state == lid_state {
             return;
         }
@@ -94,6 +96,7 @@ impl RadiatorBank {
         perspective: ListenerPerspective,
         lid_state: LidState,
     ) {
+        self.staged_space_stream = None;
         self.preset = preset;
         self.perspective = perspective;
         self.lid_state = lid_state;

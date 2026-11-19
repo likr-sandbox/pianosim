@@ -81,6 +81,7 @@ pub struct RadiatorBank {
     profile: PerfProfile,
     fir_block_fft: bool,
     staged_blob_has_head_spectra: bool,
+    staged_space_stream: Option<space_blob_install::StagedSpaceStream>,
     scratch: IrSynthScratch,
     head: FirHead,
     block_fft_head: BlockFftHead,
@@ -184,6 +185,7 @@ impl RadiatorBank {
             profile: prof,
             fir_block_fft: prof.fir_block_fft,
             staged_blob_has_head_spectra: false,
+            staged_space_stream: None,
             scratch: IrSynthScratch::new(max_ir_len),
             head: FirHead::new_with_taps(prof.fir_head_taps),
             block_fft_head: BlockFftHead::new(),
@@ -340,6 +342,7 @@ impl RadiatorBank {
     /// Zero all convolution delay lines, FDN/ER/IACC buffers, limiter state,
     /// and pending NUPOLS rings immediately.
     pub fn reset(&mut self) {
+        self.staged_space_stream = None;
         self.head.reset();
         self.block_fft_head.reset();
         self.tail.reset();
