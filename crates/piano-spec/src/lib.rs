@@ -8,6 +8,7 @@ pub mod condition;
 pub mod dispersion;
 pub mod dispersion_tuning;
 pub mod events;
+pub mod perf_profile;
 pub mod preset_codec;
 pub mod scale_design;
 pub mod temperament;
@@ -23,6 +24,7 @@ pub use dispersion::{
     MAX_TRANSVERSE_PARTIALS_PER_STRING,
 };
 pub use events::{u16_to_unit_f32, u7_to_u16, EventKind, PedalKind, SampleEvent};
+pub use perf_profile::{PerfPreset, PerfProfile};
 pub use preset_codec::{
     crc32_ieee, BodyModeRecord, BodyPreset, LidState, ListenerPerspective, PresetDecodeError,
     PresetReducedPole, PRESET_BRIDGE_ZONES, PRESET_MAGIC, PRESET_RADIATOR_ZONES, PRESET_RAD_COEFFS,
