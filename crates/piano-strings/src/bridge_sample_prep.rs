@@ -5,7 +5,7 @@ use core::ops::Range;
 use piano_simd::F32x4;
 use piano_spec::NUM_KEYS;
 
-use crate::bridge_tails::{add_zone_n, BridgeRun, ChunkPlan, HammerStepForce, TailDampPartial};
+use crate::bridge_tails::{add_zone_n, BridgeRun, ChunkPlan, HammerStepForce, TailPortPartial};
 use crate::contact::{eval_hammer_choir, sample_damper_with_r, KeyActionDriver};
 use crate::contact_ports::{refresh_string_ports_bp, ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
 use crate::modal_soa::ModalSoa;
@@ -13,93 +13,145 @@ use crate::zoh_kernel::{step_string_modes, zoh_rotate};
 
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn step_tail_pol_tl(
+fn step_tail_pol_tl_with_ports(
     tl_soa: &mut ModalSoa,
     ports: &ContactPorts,
     tl_r: Range<usize>,
     port_r: Range<usize>,
     f_h: f32,
-    alpha_w: f32,
+    alpha_inj: f32,
+    alpha_post: f32,
     f_d: f32,
     has_damper: bool,
-) -> f32 {
+) -> (f32, f32, f32, f32, f32) {
     if tl_r.is_empty() {
-        return 0.0;
+        return (0.0, 0.0, 0.0, 0.0, 0.0);
     }
-    if f_h == 0.0 && f_d == 0.0 {
-        return step_string_modes(
-            &mut tl_soa.u.as_f32x4_slice_mut()[tl_r.clone()],
-            &mut tl_soa.v.as_f32x4_slice_mut()[tl_r.clone()],
-            &tl_soa.d_coeff.as_f32x4_slice()[tl_r.clone()],
-            &tl_soa.s_coeff.as_f32x4_slice()[tl_r.clone()],
-            &tl_soa.c_bridge.as_f32x4_slice()[tl_r],
-        );
-    }
-    if alpha_w > 0.0 && f_h != 0.0 {
-        step_tail_pol_tl_inner::<true>(tl_soa, ports, tl_r, port_r, f_h, alpha_w, f_d, has_damper)
-    } else {
-        step_tail_pol_tl_inner::<false>(tl_soa, ports, tl_r, port_r, f_h, 0.0, f_d, has_damper)
+    let eff_inj = if f_h != 0.0 { alpha_inj } else { 0.0 };
+    let has_alpha = eff_inj > 0.0 || alpha_post > 0.0;
+    match (has_alpha, has_damper) {
+        (true, true) => step_tail_pol_tl_ports_inner::<true, true>(
+            tl_soa, ports, tl_r, port_r, f_h, eff_inj, alpha_post, f_d,
+        ),
+        (true, false) => step_tail_pol_tl_ports_inner::<true, false>(
+            tl_soa, ports, tl_r, port_r, f_h, eff_inj, alpha_post, 0.0,
+        ),
+        (false, true) => step_tail_pol_tl_ports_inner::<false, true>(
+            tl_soa, ports, tl_r, port_r, f_h, 0.0, 0.0, f_d,
+        ),
+        (false, false) => step_tail_pol_tl_ports_inner::<false, false>(
+            tl_soa, ports, tl_r, port_r, f_h, 0.0, 0.0, 0.0,
+        ),
     }
 }
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn step_tail_pol_tl_inner<const HAS_ALPHA: bool>(
+fn step_tail_pol_tl_ports_inner<const HAS_ALPHA: bool, const HAS_DAMPER: bool>(
     tl_soa: &mut ModalSoa,
     ports: &ContactPorts,
     tl_r: Range<usize>,
     port_r: Range<usize>,
     f_h: f32,
-    alpha_w: f32,
+    alpha_inj: f32,
+    alpha_post: f32,
     f_d: f32,
-    has_damper: bool,
-) -> f32 {
+) -> (f32, f32, f32, f32, f32) {
     let (u, v) = (tl_soa.u.as_f32x4_slice_mut(), tl_soa.v.as_f32x4_slice_mut());
     let (u_sl, v_sl) = (&mut u[tl_r.clone()], &mut v[tl_r.clone()]);
     let d = &tl_soa.d_coeff.as_f32x4_slice()[tl_r.clone()];
     let s = &tl_soa.s_coeff.as_f32x4_slice()[tl_r.clone()];
     let c = &tl_soa.c_bridge.as_f32x4_slice()[tl_r];
     let bh = &ports.b_strike.as_f32x4_slice()[port_r.clone()];
+    let ah = &ports.a_strike.as_f32x4_slice()[port_r.clone()];
     let bh_diff = &ports.b_strike_diff.as_f32x4_slice()[port_r.clone()];
-    let bd = &ports.b_damp.as_f32x4_slice()[port_r];
-    let (fh_v, alpha_v, fd_v) = (
+    let ah_diff = &ports.a_strike_diff.as_f32x4_slice()[port_r.clone()];
+    let bd = &ports.b_damp.as_f32x4_slice()[port_r.clone()];
+    let ad = &ports.a_damp.as_f32x4_slice()[port_r];
+    let (fh_v, a_inj_v, a_post_v, fd_v) = (
         F32x4::splat(f_h),
-        F32x4::splat(alpha_w),
-        F32x4::splat(if has_damper { f_d } else { 0.0 }),
+        F32x4::splat(alpha_inj),
+        F32x4::splat(alpha_post),
+        F32x4::splat(f_d),
     );
-    let mut acc = F32x4::zero();
+    let (mut acc_c, mut acc_yh, mut acc_vh, mut acc_yd, mut acc_vd) = (
+        F32x4::zero(),
+        F32x4::zero(),
+        F32x4::zero(),
+        F32x4::zero(),
+        F32x4::zero(),
+    );
     let n = u_sl.len();
     let mut i = 0usize;
     while i + 1 < n {
-        let (bh0, bh1) = if HAS_ALPHA {
+        let (bh_i0, bh_i1, bh_r0, bh_r1, ah_r0, ah_r1) = if HAS_ALPHA {
             (
-                alpha_v.mul_add(bh_diff[i], bh[i]),
-                alpha_v.mul_add(bh_diff[i + 1], bh[i + 1]),
+                a_inj_v.mul_add(bh_diff[i], bh[i]),
+                a_inj_v.mul_add(bh_diff[i + 1], bh[i + 1]),
+                a_post_v.mul_add(bh_diff[i], bh[i]),
+                a_post_v.mul_add(bh_diff[i + 1], bh[i + 1]),
+                a_post_v.mul_add(ah_diff[i], ah[i]),
+                a_post_v.mul_add(ah_diff[i + 1], ah[i + 1]),
             )
         } else {
-            (bh[i], bh[i + 1])
+            (bh[i], bh[i + 1], bh[i], bh[i + 1], ah[i], ah[i + 1])
         };
-        let inj0 = fd_v.mul_add(bd[i], fh_v.mul_add(bh0, u_sl[i]));
-        let inj1 = fd_v.mul_add(bd[i + 1], fh_v.mul_add(bh1, u_sl[i + 1]));
+        let (inj0, inj1) = if HAS_DAMPER {
+            (
+                fd_v.mul_add(bd[i], fh_v.mul_add(bh_i0, u_sl[i])),
+                fd_v.mul_add(bd[i + 1], fh_v.mul_add(bh_i1, u_sl[i + 1])),
+            )
+        } else {
+            (
+                fh_v.mul_add(bh_i0, u_sl[i]),
+                fh_v.mul_add(bh_i1, u_sl[i + 1]),
+            )
+        };
         let (un0, vn0) = zoh_rotate(inj0, v_sl[i], d[i], s[i]);
         let (un1, vn1) = zoh_rotate(inj1, v_sl[i + 1], d[i + 1], s[i + 1]);
         (u_sl[i], v_sl[i]) = (un0, vn0);
         (u_sl[i + 1], v_sl[i + 1]) = (un1, vn1);
-        acc = vn0.mul_add(c[i], vn1.mul_add(c[i + 1], acc));
+        acc_c = vn0.mul_add(c[i], vn1.mul_add(c[i + 1], acc_c));
+        acc_yh = vn0.mul_add(ah_r0, vn1.mul_add(ah_r1, acc_yh));
+        acc_vh = un0.mul_add(bh_r0, un1.mul_add(bh_r1, acc_vh));
+        if HAS_DAMPER {
+            acc_yd = vn0.mul_add(ad[i], vn1.mul_add(ad[i + 1], acc_yd));
+            acc_vd = un0.mul_add(bd[i], un1.mul_add(bd[i + 1], acc_vd));
+        }
         i += 2;
     }
     if i < n {
-        let bhi = if HAS_ALPHA {
-            alpha_v.mul_add(bh_diff[i], bh[i])
+        let (bh_i, bh_r, ah_r) = if HAS_ALPHA {
+            (
+                a_inj_v.mul_add(bh_diff[i], bh[i]),
+                a_post_v.mul_add(bh_diff[i], bh[i]),
+                a_post_v.mul_add(ah_diff[i], ah[i]),
+            )
         } else {
-            bh[i]
+            (bh[i], bh[i], ah[i])
         };
-        let inj = fd_v.mul_add(bd[i], fh_v.mul_add(bhi, u_sl[i]));
+        let inj = if HAS_DAMPER {
+            fd_v.mul_add(bd[i], fh_v.mul_add(bh_i, u_sl[i]))
+        } else {
+            fh_v.mul_add(bh_i, u_sl[i])
+        };
         let (un, vn) = zoh_rotate(inj, v_sl[i], d[i], s[i]);
         (u_sl[i], v_sl[i]) = (un, vn);
-        acc = vn.mul_add(c[i], acc);
+        acc_c = vn.mul_add(c[i], acc_c);
+        acc_yh = vn.mul_add(ah_r, acc_yh);
+        acc_vh = un.mul_add(bh_r, acc_vh);
+        if HAS_DAMPER {
+            acc_yd = vn.mul_add(ad[i], acc_yd);
+            acc_vd = un.mul_add(bd[i], acc_vd);
+        }
     }
-    acc.reduce_sum()
+    (
+        acc_c.reduce_sum(),
+        acc_yh.reduce_sum(),
+        acc_vh.reduce_sum(),
+        acc_yd.reduce_sum(),
+        acc_vd.reduce_sum(),
+    )
 }
 
 #[inline(always)]
@@ -255,7 +307,7 @@ pub(crate) fn prepare_sample_tails_and_hammers(
             };
         }
         let has_hammer = plan.key_has_hammer[k];
-        let alpha_w = if has_hammer {
+        let alpha_inj = if has_hammer {
             (driver.hammer_compression_norm(k) / 0.65).clamp(0.0, 1.0)
         } else {
             0.0
@@ -267,11 +319,17 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                 k,
                 sr.clone(),
                 usize::from(key.choir_size),
-                alpha_w,
+                alpha_inj,
             )
         } else {
             [0.0; 3]
         };
+        let alpha_post = if has_hammer {
+            (driver.hammer_compression_norm(k) / 0.65).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        plan.key_alpha_post[k] = alpha_post;
         let yc = r.ports.y_clear_scratch[k][t];
         let damp_on = key.has_damper && yc < DAMPER_CLEAR_THRESHOLD_M;
         for (c, s_idx) in sr.enumerate() {
@@ -293,7 +351,7 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                 fh,
                 fd_v,
                 fd_h,
-                alpha_w,
+                alpha_w: alpha_inj,
             };
             if fh != 0.0 {
                 r.ports.tail_nonzero[s_idx] = true;
@@ -326,15 +384,32 @@ pub(crate) fn prepare_sample_tails_and_hammers(
             let (tv, th) = if has_hammer {
                 let tl = &mut r.bridge_ports.tl_soa;
                 let hd = key.has_damper;
-                (
-                    step_tail_pol_tl(tl, r.ports, tl_v, v_tail, fh, alpha_w, fd_v, hd),
-                    step_tail_pol_tl(tl, r.ports, tl_h, h_tail, fh, alpha_w, fd_h, hd),
-                )
+                let (tv, yhv, vhv_raw, ydv, vdv_raw) = step_tail_pol_tl_with_ports(
+                    tl, r.ports, tl_v, v_tail, fh, alpha_inj, alpha_post, fd_v, hd,
+                );
+                let (th, yhh, vhh_raw, ydh, vdh_raw) = step_tail_pol_tl_with_ports(
+                    tl, r.ports, tl_h, h_tail, fh, alpha_inj, alpha_post, fd_h, hd,
+                );
+                plan.tail_partial_ports[s_idx] = TailPortPartial {
+                    yhv,
+                    vhv_raw,
+                    yhh,
+                    vhh_raw,
+                    ydv,
+                    vdv_raw,
+                    ydh,
+                    vdh_raw,
+                };
+                (tv, th)
             } else {
                 let tl = &mut r.bridge_ports.tl_soa;
                 let (tv, ydv, vdv_raw) = step_tail_pol_damp_tl(tl, r.ports, tl_v, v_tail, fd_v);
                 let (th, ydh, vdh_raw) = step_tail_pol_damp_tl(tl, r.ports, tl_h, h_tail, fd_h);
-                plan.tail_partial_damp[s_idx] = TailDampPartial {
+                plan.tail_partial_ports[s_idx] = TailPortPartial {
+                    yhv: 0.0,
+                    vhv_raw: 0.0,
+                    yhh: 0.0,
+                    vhh_raw: 0.0,
                     ydv,
                     vdv_raw,
                     ydh,

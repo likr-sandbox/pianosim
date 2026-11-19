@@ -32,14 +32,22 @@ impl StringBank {
             self.bp_dirty = false;
         }
         self.soa_dirty = true;
+        let sav_max_key_idx =
+            usize::from(self.perf.sav_max_key_idx).min(piano_spec::LONGITUDINAL_MAX_KEY_IDX);
         crate::bridge_coupled::render_subblock_bridge_coupled_core(
             &mut self.ports,
             &mut self.bridge_ports,
             &self.long_bank,
             &mut self.sav,
             &self.choir_map,
+            &mut self.scratch,
             action,
             bridge,
+            &self.passive_v_vecs,
+            &self.passive_h_vecs,
+            sav_max_key_idx,
+            self.perf.sav_dormancy_ratio(),
+            self.perf.energy_horizon_sq(),
             self.longitudinal_enabled,
             self.sav_phantom_enabled,
             self.lossless,

@@ -4,16 +4,18 @@ use core::ops::Range;
 
 use piano_simd::F32x4;
 use piano_spec::{
-    bridge_pin_couplings, build_scale_design, count_transverse_partials, effective_string_f0_hz,
-    Polarization, StringPhysicalParams, VoicingSpec, MAX_AUDIBLE_FREQ_HZ, NUM_KEYS,
+    bridge_pin_couplings, build_scale_design, effective_string_f0_hz, PerfProfile, Polarization,
+    StringPhysicalParams, VoicingSpec, NUM_KEYS,
 };
 
 use crate::bridge_port::{
     count_prefix_modes, fill_pol_beta, BridgePorts, FastPrefixMeta, PrefixCoef,
 };
-use crate::choir_map::StringMapEntry;
-use crate::contact_ports::populate_string_ports;
-use crate::modal_soa::{populate_string_modes_with_mode, sqrt_f64, ModalSoa, NYQUIST_CUTOFF_RATIO};
+use crate::choir_map::{compute_string_pol_modes, StringMapEntry};
+use crate::contact_ports::populate_string_ports_with_profile;
+use crate::modal_soa::{
+    populate_string_modes_with_profile, sqrt_f64, ModalSoa, NYQUIST_CUTOFF_RATIO,
+};
 use crate::sav_spec::SavStringSpec;
 use crate::StringBank;
 
@@ -121,14 +123,14 @@ fn update_string_bridge_ports(
     b_damp: &[f32],
     ts: f64,
     nyquist: f64,
+    perf: &PerfProfile,
 ) {
     let s_choir = usize::from(entry.string_in_choir);
     let f0_v = effective_string_f0_hz(k, s_choir, Polarization::Vertical, voicing_specs, voicing);
     let f0_h = effective_string_f0_hz(k, s_choir, Polarization::Horizontal, voicing_specs, voicing);
-    let v_modes = count_transverse_partials(f0_v, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ)
-        .min(entry.vert_vecs.len() * 4);
-    let h_modes = count_transverse_partials(f0_h, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ)
-        .min(entry.horiz_vecs.len() * 4);
+    let (v_raw, h_raw) = compute_string_pol_modes(k, spec, f0_v, f0_h, perf);
+    let v_modes = v_raw.min(entry.vert_vecs.len() * 4);
+    let h_modes = h_raw.min(entry.horiz_vecs.len() * 4);
 
     let (v_br, h_br, v_tail, h_tail, tl_v, tl_h, tl_l, beta_v_off, beta_h_off) = {
         let m = &bp.meta[s_idx];
@@ -240,13 +242,14 @@ impl StringBank {
         let specs = build_scale_design(voicing);
         let strings = self.choir_map.strings();
 
+        let perf = self.perf;
         for (k, key) in self.choir_map.keys().iter().enumerate() {
             let spec = specs[k];
             for s_idx in key.string_range.clone() {
                 let entry = &strings[s_idx];
                 let gamma_old = self.ports.gamma_s[s_idx];
 
-                populate_string_modes_with_mode(
+                populate_string_modes_with_profile(
                     &mut self.soa,
                     entry,
                     sr64,
@@ -254,8 +257,17 @@ impl StringBank {
                     &specs,
                     self.lossless,
                     self.bridge_coupled,
+                    &perf,
                 );
-                populate_string_ports(&mut self.ports, s_idx, entry, sr64, voicing, &specs);
+                populate_string_ports_with_profile(
+                    &mut self.ports,
+                    s_idx,
+                    entry,
+                    sr64,
+                    voicing,
+                    &specs,
+                    &perf,
+                );
 
                 let gamma_new = self.ports.gamma_s[s_idx];
                 if self.ports.may_be_nonzero[s_idx] {
@@ -274,13 +286,14 @@ impl StringBank {
 
                 self.long_bank
                     .populate_string(s_idx, entry, sr64, &specs, gamma_new);
-                let (sav_spec, sav_slopes) = SavStringSpec::build(
+                let (sav_spec, sav_slopes) = SavStringSpec::build_with_profile(
                     entry,
                     sr64,
                     voicing,
                     &specs,
                     gamma_new,
                     self.ports.beta_s[s_idx],
+                    perf.bass_phantom_sparse,
                 );
                 self.sav.specs[s_idx] = sav_spec;
                 self.sav.slopes[s_idx] = sav_slopes;
@@ -299,6 +312,7 @@ impl StringBank {
                     self.ports.b_damp.as_slice(),
                     ts,
                     nyquist,
+                    &perf,
                 );
             }
             let s0 = key.string_range.start;
@@ -306,6 +320,9 @@ impl StringBank {
             self.bridge_ports.key_tails[k].tail_n_long = self.bridge_ports.tail_n_long[s0];
         }
         self.bridge_ports.sync_damp_ports(&self.ports);
+        self.bridge_ports.a_waves_dirty = true;
+        self.last_voicing = voicing.sanitized();
+        self.recompute_passive_res_caps(voicing, &specs);
     }
 }
 

@@ -1,8 +1,8 @@
 //! Stage 2: 230-string ZOH modal bank, SAV nonlinearity, and longitudinal coupling.
 //!
-//! M2 implements all 88 keys, 230 physical strings, and ~26,184 SIMD4-padded
-//! modes using Exact Coupled-Form Incremental ZOH updated unconditionally on
-//! every audio sample with zero heap allocations after [`StringBank::new`].
+//! M3 implements all 88 keys, 230 physical strings, and up to ~26,184 SIMD4-padded
+//! modes using Exact Coupled-Form Incremental ZOH with parameterized [`PerfProfile`]
+//! quality/speed trade-offs and zero heap allocations after [`StringBank::new_with_profile`].
 
 #![cfg_attr(not(test), no_std)]
 
@@ -10,9 +10,11 @@ extern crate alloc;
 
 pub mod action_driver;
 mod bank_energy;
+mod bank_profile;
 pub mod bridge_coupled;
 pub(crate) mod bridge_damp_kernels;
 mod bridge_diag;
+mod bridge_flush;
 pub(crate) mod bridge_kernels;
 pub(crate) mod bridge_open_kernels;
 pub(crate) mod bridge_port;
@@ -22,10 +24,13 @@ mod bridge_prefix_step;
 mod bridge_prefix_wdf;
 pub(crate) mod bridge_sample_prep;
 pub(crate) mod bridge_sav;
+mod bridge_scratch;
+mod bridge_tail_routing;
 pub(crate) mod bridge_tails;
 mod bridge_zones;
 pub mod choir_map;
 pub mod contact;
+mod contact_phi;
 mod contact_port_sync;
 pub(crate) mod contact_ports;
 pub(crate) mod damping_law;
@@ -34,9 +39,11 @@ pub(crate) mod math;
 pub mod modal_soa;
 pub(crate) mod phantom;
 mod phantom_3x6;
+mod phantom_sparse;
 pub(crate) mod sav_drift;
 mod sav_kernels;
 pub(crate) mod sav_pair;
+mod sav_pair_tile;
 pub(crate) mod sav_spec;
 pub(crate) mod sav_tile;
 mod sav_tile_3x6;
@@ -44,14 +51,17 @@ mod voicing_blob;
 mod voicing_blob_sav;
 mod voicing_update;
 pub mod zoh_kernel;
+mod zoh_subblock;
 
 pub use bridge_port::BridgePortDriver;
 pub use contact::KeyActionDriver;
-pub use voicing_blob::{voicing_blob_len, VoicingPrepContext};
+pub use voicing_blob::{voicing_blob_len, voicing_blob_len_with_profile, VoicingPrepContext};
 
-use piano_spec::{build_scale_design, VoicingSpec};
+use alloc::boxed::Box;
+use piano_spec::{PerfProfile, VoicingSpec, LONGITUDINAL_MAX_KEY_IDX, TOTAL_STRINGS};
 
 use crate::bridge_port::BridgePorts;
+use crate::bridge_scratch::BridgeScratch;
 use crate::choir_map::ChoirMap;
 use crate::contact_ports::ContactPorts;
 use crate::longitudinal::LongitudinalBank;
@@ -68,12 +78,17 @@ use crate::zoh_kernel::{
 #[derive(Clone, Debug)]
 pub struct StringBank {
     sample_rate: f32,
+    perf: PerfProfile,
+    last_voicing: VoicingSpec,
     choir_map: ChoirMap,
     soa: ModalSoa,
     ports: ContactPorts,
     bridge_ports: BridgePorts,
     long_bank: LongitudinalBank,
     sav: SavBank,
+    passive_v_vecs: [u16; TOTAL_STRINGS],
+    passive_h_vecs: [u16; TOTAL_STRINGS],
+    scratch: Box<BridgeScratch>,
     longitudinal_enabled: bool,
     sav_phantom_enabled: bool,
     soa_dirty: bool,
@@ -83,71 +98,6 @@ pub struct StringBank {
 }
 
 impl StringBank {
-    fn build_internal(
-        sample_rate: f32,
-        voicing: &VoicingSpec,
-        lossless: bool,
-        bridge_coupled: bool,
-    ) -> Self {
-        let safe_rate = if sample_rate.is_finite() {
-            sample_rate.clamp(8_000.0, 384_000.0)
-        } else {
-            48_000.0
-        };
-        let sr64 = f64::from(safe_rate);
-        let specs = build_scale_design(voicing);
-        let choir_map = ChoirMap::build_with_specs(&specs, voicing);
-        let soa =
-            ModalSoa::build_with_mode(sr64, voicing, &specs, &choir_map, lossless, bridge_coupled);
-        let ports = ContactPorts::build(sr64, voicing, &specs, &choir_map);
-        let bridge_ports = BridgePorts::build(sr64, voicing, &specs, &choir_map, &ports, &soa);
-        let long_bank = LongitudinalBank::build(sr64, &specs, &choir_map, &ports.gamma_s);
-        let sav = SavBank::build(
-            sr64,
-            voicing,
-            &specs,
-            &choir_map,
-            &ports.gamma_s,
-            &ports.beta_s,
-        );
-
-        Self {
-            sample_rate: safe_rate,
-            choir_map,
-            soa,
-            ports,
-            bridge_ports,
-            long_bank,
-            sav,
-            longitudinal_enabled: true,
-            sav_phantom_enabled: true,
-            soa_dirty: false,
-            bp_dirty: false,
-            lossless,
-            bridge_coupled,
-        }
-    }
-
-    /// Allocates and precomputes permanent standalone SoA mode tables and physical SI
-    /// dual-port projections for `sample_rate` and `voicing`.
-    #[must_use]
-    pub fn new(sample_rate: f32, voicing: &VoicingSpec) -> Self {
-        Self::build_internal(sample_rate, voicing, false, false)
-    }
-
-    /// Allocates the string bank configured with intrinsic-only wire/air damping for
-    /// coupled Stage 3 `BridgeBank` radiation (eliminating standalone double damping).
-    #[must_use]
-    pub fn new_bridge_coupled(sample_rate: f32, voicing: &VoicingSpec) -> Self {
-        Self::build_internal(sample_rate, voicing, false, true)
-    }
-
-    /// Allocates a lossless (`r_hold = 1.0`) bank for SAV symplectic conservation checks.
-    #[must_use]
-    pub fn new_lossless(sample_rate: f32, voicing: &VoicingSpec) -> Self {
-        Self::build_internal(sample_rate, voicing, true, false)
-    }
-
     /// Injects a single-sample force impulse into `key_idx` across its choir strings
     /// weighted by `string_weights`. Intended for sample-accurate test/external impulses.
     pub fn apply_excitation_sample(
@@ -201,16 +151,18 @@ impl StringBank {
             }
             return frame;
         }
+        let sav_max = usize::from(self.perf.sav_max_key_idx).min(LONGITUDINAL_MAX_KEY_IDX);
         let (mut l1, mut r1) = ([0.0_f32; 1], [0.0_f32; 1]);
         for (s_idx, entry) in self.choir_map.strings().iter().enumerate() {
             if self.ports.may_be_nonzero[s_idx] {
+                let sav_active = self.sav_phantom_enabled && usize::from(entry.key_idx) < sav_max;
                 step_ringing_string_tile(
                     &mut self.soa,
                     &mut self.sav,
                     s_idx,
                     entry,
                     self.longitudinal_enabled,
-                    self.sav_phantom_enabled,
+                    sav_active,
                     &mut l1,
                     &mut r1,
                 );
@@ -235,6 +187,7 @@ impl StringBank {
         out_l.fill(0.0);
         out_r.fill(0.0);
         let strings = self.choir_map.strings();
+        let sav_max = usize::from(self.perf.sav_max_key_idx).min(LONGITUDINAL_MAX_KEY_IDX);
         let mut base = 0usize;
         while base < frames {
             let sub = (frames - base).min(128);
@@ -242,12 +195,24 @@ impl StringBank {
             let mut sav_pairs =
                 SavPairQueue::new(self.longitudinal_enabled, self.sav_phantom_enabled);
             for (s_idx, entry) in strings.iter().enumerate() {
-                if self.ports.may_be_nonzero[s_idx] {
+                if self.ports.may_be_nonzero[s_idx] && usize::from(entry.key_idx) < sav_max {
                     sav_pairs.push_ringing(
                         &mut self.soa,
                         &mut self.sav,
                         strings,
                         s_idx,
+                        sub_l,
+                        sub_r,
+                    );
+                    self.ports.ports_synced[s_idx] = false;
+                } else if self.ports.may_be_nonzero[s_idx] {
+                    step_ringing_string_tile(
+                        &mut self.soa,
+                        &mut self.sav,
+                        s_idx,
+                        entry,
+                        self.longitudinal_enabled,
+                        false,
                         sub_l,
                         sub_r,
                     );
@@ -322,14 +287,21 @@ impl StringBank {
             self.bp_dirty = false;
         }
         self.soa_dirty = true;
+        let sav_max_key_idx = usize::from(self.perf.sav_max_key_idx).min(LONGITUDINAL_MAX_KEY_IDX);
         bridge_coupled::render_subblock_bridge_coupled_core(
             &mut self.ports,
             &mut self.bridge_ports,
             &self.long_bank,
             &mut self.sav,
             &self.choir_map,
+            &mut self.scratch,
             action,
             bridge,
+            &self.passive_v_vecs,
+            &self.passive_h_vecs,
+            sav_max_key_idx,
+            self.perf.sav_dormancy_ratio(),
+            self.perf.energy_horizon_sq(),
             self.longitudinal_enabled,
             self.sav_phantom_enabled,
             self.lossless,
@@ -347,3 +319,9 @@ mod tests;
 
 #[cfg(test)]
 mod m5_tests;
+
+#[cfg(test)]
+mod m3_profile_tests;
+
+#[cfg(test)]
+mod phantom_sparse_tests;

@@ -8,16 +8,17 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::f64::consts::FRAC_PI_2;
+use core::f64::consts::{FRAC_PI_2, LN_10};
 use core::ops::Range;
 
 use piano_spec::{
     analyze_bank_mode_counts, build_scale_design, count_longitudinal_partials,
-    count_transverse_partials, effective_string_f0_hz, pad_to_simd4, BankModeCounts, Polarization,
-    StringPhysicalParams, VoicingSpec, CHOIR_LAYOUTS, MAX_AUDIBLE_FREQ_HZ, NUM_KEYS, TOTAL_STRINGS,
+    count_transverse_partials, effective_string_f0_hz, pad_to_simd4, partial_frequency_hz,
+    BankModeCounts, PerfProfile, Polarization, StringPhysicalParams, VoicingSpec, CHOIR_LAYOUTS,
+    MAX_AUDIBLE_FREQ_HZ, NUM_KEYS, TOTAL_STRINGS,
 };
 
-use crate::modal_soa::sin_cos_f64;
+use crate::modal_soa::{exp_f64, sin_cos_f64, sqrt_f64};
 
 /// Contiguous vector-range and stereo-pan descriptor for one physical string.
 #[derive(Clone, Debug, PartialEq)]
@@ -101,6 +102,17 @@ impl ChoirMap {
         specs: &[StringPhysicalParams; NUM_KEYS],
         voicing: &VoicingSpec,
     ) -> Self {
+        Self::build_with_profile(specs, voicing, &PerfProfile::full())
+    }
+
+    /// Constructs the choir and vector layout honoring Stage 2 `PerfProfile` mode limits.
+    #[must_use]
+    pub fn build_with_profile(
+        specs: &[StringPhysicalParams; NUM_KEYS],
+        voicing: &VoicingSpec,
+        perf: &PerfProfile,
+    ) -> Self {
+        let p = perf.sanitized();
         let mut keys = Vec::with_capacity(NUM_KEYS);
         let mut strings = Vec::with_capacity(TOTAL_STRINGS);
         let mut vec_cursor = 0usize;
@@ -130,11 +142,6 @@ impl ChoirMap {
                     specs,
                     voicing,
                 );
-                let vert_modes =
-                    count_transverse_partials(f0_vert, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ);
-                let vert_padded = pad_to_simd4(vert_modes);
-                let vert_vec_len = vert_padded / 4;
-
                 let f0_horiz = effective_string_f0_hz(
                     key_idx,
                     string_in_choir,
@@ -142,8 +149,10 @@ impl ChoirMap {
                     specs,
                     voicing,
                 );
-                let horiz_modes =
-                    count_transverse_partials(f0_horiz, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ);
+                let (vert_modes, horiz_modes) =
+                    compute_string_pol_modes(key_idx, spec, f0_vert, f0_horiz, &p);
+                let vert_padded = pad_to_simd4(vert_modes);
+                let vert_vec_len = vert_padded / 4;
                 let horiz_padded = pad_to_simd4(horiz_modes);
                 let horiz_vec_len = horiz_padded / 4;
 
@@ -190,7 +199,9 @@ impl ChoirMap {
             total_unpadded: t_raw + l_raw,
             total_padded: t_pad + l_pad,
         };
-        debug_assert_eq!(mode_counts, analyze_bank_mode_counts(voicing));
+        if p.is_full_mode_counts() {
+            debug_assert_eq!(mode_counts, analyze_bank_mode_counts(voicing));
+        }
         debug_assert_eq!(strings.len(), TOTAL_STRINGS);
         debug_assert_eq!(vec_cursor * 4, mode_counts.total_padded);
 
@@ -257,6 +268,122 @@ impl ChoirMap {
     pub const fn active_unpadded_modes(&self) -> usize {
         self.mode_counts.total_unpadded
     }
+}
+
+#[inline]
+fn prune_dead_tail_modes(
+    key_idx: usize,
+    f0_hz: f64,
+    spec: &StringPhysicalParams,
+    n_max: usize,
+    n_floor: usize,
+    prune_db: f32,
+) -> usize {
+    if n_max <= n_floor || prune_db <= -120.0 {
+        return n_max;
+    }
+    let (w_narrow, _) = crate::contact_phi::hammer_contact_width_bounds_m(key_idx);
+    let tau_c = crate::contact_phi::hammer_contact_time_s(key_idx);
+    let l_m = spec.speaking_length_m;
+    let thresh_ratio = exp_f64((f64::from(prune_db) / 20.0) * LN_10);
+    let env_at = |j: usize| -> f64 {
+        let f_j = partial_frequency_hz(f0_hz, spec.inharmonicity_b, j);
+        if f_j <= 0.0 {
+            return 0.0;
+        }
+        let u = if l_m > 0.0 {
+            (j as f64) * w_narrow / l_m
+        } else {
+            0.0
+        };
+        let w_env = if u <= 0.65 {
+            1.0
+        } else {
+            (core::f64::consts::FRAC_PI_4 / (u * u)).min(1.0)
+        };
+        let ft = 2.0 * f_j * tau_c;
+        w_env / sqrt_f64(1.0 + ft * ft)
+    };
+    let mut peak_env = 0.0_f64;
+    for j in 1..=n_max {
+        peak_env = peak_env.max(env_at(j));
+    }
+    let cutoff = peak_env * thresh_ratio;
+    let mut keep = n_floor;
+    for j in (n_floor + 1)..=n_max {
+        if env_at(j) >= cutoff {
+            keep = j;
+        }
+    }
+    keep
+}
+
+/// Computes `(vert_modes, horiz_modes)` for a string under `perf` (respecting M2 prefix & SAV floors).
+pub(crate) fn compute_string_pol_modes(
+    key_idx: usize,
+    spec: &StringPhysicalParams,
+    f0_vert: f64,
+    f0_horiz: f64,
+    perf: &PerfProfile,
+) -> (usize, usize) {
+    let v_20k = count_transverse_partials(f0_vert, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ);
+    let h_20k = count_transverse_partials(f0_horiz, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ);
+    if perf.is_full_mode_counts() {
+        return (v_20k, h_20k);
+    }
+    let nv_pre = crate::bridge_port::count_prefix_modes(
+        key_idx,
+        v_20k,
+        f0_vert,
+        spec.inharmonicity_b,
+        MAX_AUDIBLE_FREQ_HZ,
+    );
+    let nh_pre = crate::bridge_port::count_prefix_modes(
+        key_idx,
+        h_20k,
+        f0_horiz,
+        spec.inharmonicity_b,
+        MAX_AUDIBLE_FREQ_HZ,
+    );
+    let sav_min_modes =
+        crate::phantom_sparse::phantom_transverse_vecs_for_key(key_idx, perf.bass_phantom_sparse)
+            * 4;
+    let v_floor = nv_pre.max(nh_pre).max(sav_min_modes).max(1).min(v_20k);
+    let v_modes = if perf.is_dead_mode_pruning_enabled() {
+        prune_dead_tail_modes(
+            key_idx,
+            f0_vert,
+            spec,
+            v_20k,
+            v_floor,
+            perf.dead_mode_prune_db,
+        )
+    } else {
+        v_20k
+    };
+
+    let h_lim = f64::from(perf.horiz_max_hz).clamp(500.0, MAX_AUDIBLE_FREQ_HZ);
+    let h_raw = count_transverse_partials(f0_horiz, spec.inharmonicity_b, h_lim).min(h_20k);
+    let h_floor = nv_pre
+        .max(nh_pre)
+        .max(sav_min_modes)
+        .max(1)
+        .min(v_modes)
+        .min(h_20k);
+    let h_capped = h_raw.max(h_floor);
+    let h_modes = if perf.is_dead_mode_pruning_enabled() {
+        prune_dead_tail_modes(
+            key_idx,
+            f0_horiz,
+            spec,
+            h_capped,
+            h_floor,
+            perf.dead_mode_prune_db,
+        )
+    } else {
+        h_capped
+    };
+    (v_modes, h_modes)
 }
 
 #[inline]

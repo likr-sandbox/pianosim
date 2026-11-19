@@ -28,32 +28,6 @@ pub(crate) const MAX_PHANTOM_LONG_MODES: usize = MAX_PHANTOM_LONG_VECS * 4;
 /// 1-based longitudinal projection buffer length (`0` unused, `1..=24` active).
 pub(crate) const PHANTOM_ARRAY_LEN: usize = MAX_PHANTOM_LONG_MODES + 1;
 
-/// Maximum coupled transverse SIMD4 vectors per polarization for `key_idx`.
-#[inline]
-#[must_use]
-pub(crate) const fn max_phantom_transverse_vecs_for_key(key_idx: usize) -> usize {
-    if key_idx < BASS_PHANTOM_MAX_KEY_IDX {
-        MAX_PHANTOM_TRANSVERSE_VECS
-    } else if key_idx < piano_spec::LONGITUDINAL_MAX_KEY_IDX {
-        BASE_PHANTOM_TRANSVERSE_VECS
-    } else {
-        0
-    }
-}
-
-/// Maximum coupled longitudinal SIMD4 vectors for `key_idx`.
-#[inline]
-#[must_use]
-pub(crate) const fn max_phantom_long_vecs_for_key(key_idx: usize) -> usize {
-    if key_idx < BASS_PHANTOM_MAX_KEY_IDX {
-        MAX_PHANTOM_LONG_VECS
-    } else if key_idx < piano_spec::LONGITUDINAL_MAX_KEY_IDX {
-        BASE_PHANTOM_LONG_VECS
-    } else {
-        0
-    }
-}
-
 /// Maps modal oscillator state `v_{p,n}` to regularized physical modal slope `d_{p,n}`.
 #[inline]
 #[must_use]

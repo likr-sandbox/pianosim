@@ -8,6 +8,9 @@ use crate::phantom::{
     MAX_PHANTOM_LONG_VECS, MAX_PHANTOM_TRANSVERSE_VECS,
 };
 use crate::phantom_3x6::{accum_phantom_grad_vh_simd_3x6, convolve_transverse_slopes_f32_3x6};
+use crate::phantom_sparse::{
+    accum_phantom_grad_vh_simd_2x2, convolve_transverse_slopes_f32_2x2, SPARSE_PHANTOM_LONG_VECS,
+};
 use crate::sav_drift::{C0_SAV, DELTA_U_SAV};
 use crate::sav_spec::SavStringSpec;
 
@@ -180,7 +183,12 @@ pub(crate) fn step_sav_phantom_spec_n<const NL_MAX: usize>(
     }
     let den_u = f64::from(u_sq4.reduce_sum()) + DELTA_U_SAV;
     let inv_u = 1.0 / den_u;
-    let phi4 = convolve_transverse_slopes_f32_n::<NL_MAX>(&dv4, &dh4);
+    let phi4 = if NL_MAX == SPARSE_PHANTOM_LONG_VECS {
+        let p2 = convolve_transverse_slopes_f32_2x2(&dv4, &dh4);
+        core::array::from_fn(|i| p2[i])
+    } else {
+        convolve_transverse_slopes_f32_n::<NL_MAX>(&dv4, &dh4)
+    };
     let c_phi_scale4 = F32x4::splat((sp.quarter_l * sp.kappa_ph) as f32);
     let mut r2_4 = F32x4::zero();
     let mut c_phi4 = [F32x4::zero(); NL_MAX];
@@ -198,7 +206,12 @@ pub(crate) fn step_sav_phantom_spec_n<const NL_MAX: usize>(
     let reg = lambda_reg * (r_n - psi) * inv_u;
 
     let c_sum = (0.5 * sp.length_m * sp.kappa_0 * s_val) as f32;
-    let (mut gv4, mut gh4) = accum_phantom_grad_vh_simd_n::<NL_MAX>(&dv4, &dh4, c_sum, &c_phi4);
+    let (mut gv4, mut gh4) = if NL_MAX == SPARSE_PHANTOM_LONG_VECS {
+        let cp2 = [c_phi4[0], c_phi4[1]];
+        accum_phantom_grad_vh_simd_2x2(&dv4, &dh4, c_sum, &cp2)
+    } else {
+        accum_phantom_grad_vh_simd_n::<NL_MAX>(&dv4, &dh4, c_sum, &c_phi4)
+    };
 
     let half_ts = 0.5 * ts;
     let kg = F32x4::splat((half_ts * inv_psi) as f32);

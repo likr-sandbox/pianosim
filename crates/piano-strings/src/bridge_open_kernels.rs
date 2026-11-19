@@ -202,6 +202,18 @@ impl BridgePorts {
         let z = F32x4::zero();
         self.state.fill(PrefixState { u: z, v: z });
         self.tl_soa.reset_resting();
+        self.a_waves.fill(0.0);
+        self.a_waves_dirty = false;
+    }
+
+    #[inline]
+    pub fn sync_a_waves(&mut self, may_be_nonzero: &[bool; TOTAL_STRINGS]) {
+        if self.a_waves_dirty {
+            let mut tmp = [0.0_f32; TOTAL_STRINGS];
+            self.compute_a_waves(may_be_nonzero, &mut tmp);
+            self.a_waves = tmp;
+            self.a_waves_dirty = false;
+        }
     }
 
     pub fn compute_a_waves(

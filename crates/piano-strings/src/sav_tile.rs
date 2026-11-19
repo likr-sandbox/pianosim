@@ -7,6 +7,7 @@ use piano_simd::F32x4;
 use crate::choir_map::StringMapEntry;
 use crate::modal_soa::ModalSoa;
 use crate::phantom::BASE_PHANTOM_LONG_VECS;
+use crate::phantom_sparse::SPARSE_PHANTOM_LONG_VECS;
 use crate::sav_drift::{
     load_nl_state_n, load_vh_state, step_sav_no_phantom_spec, step_sav_phantom_spec_n,
     store_nl_state_n, SavBank, LAMBDA_REG_DEFAULT,
@@ -399,6 +400,10 @@ pub(crate) fn step_ringing_string_tile(
         );
     } else if nl_vecs == 1 {
         step_phantom_sav_tile::<1>(soa, sav, s_idx, entry, nv_vecs, nh_vecs, 1, out_l, out_r);
+    } else if nl_vecs == SPARSE_PHANTOM_LONG_VECS {
+        step_phantom_sav_tile::<SPARSE_PHANTOM_LONG_VECS>(
+            soa, sav, s_idx, entry, nv_vecs, nh_vecs, nl_vecs, out_l, out_r,
+        );
     } else {
         step_phantom_sav_tile::<BASE_PHANTOM_LONG_VECS>(
             soa, sav, s_idx, entry, nv_vecs, nh_vecs, nl_vecs, out_l, out_r,

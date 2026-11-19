@@ -1,7 +1,7 @@
 //! Coupled-string prefix WDF + hammer/damper stepping kernel (`no_std`).
 
 use piano_simd::F32x4;
-use piano_spec::{DAMPED_KEYS, LONGITUDINAL_MAX_KEY_IDX, TOTAL_STRINGS};
+use piano_spec::{DAMPED_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_kernels::{
     step_pol_prefix_wdf_inj, step_string_prefix_wdf_br, step_string_prefix_wdf_symp_damp_vh,
@@ -132,7 +132,7 @@ pub(crate) fn step_coupled_prefixes(
             let hf = plan.hammer_forces[s_idx];
             if hf.fh != 0.0 && !r.ports.struck_active[s_idx] {
                 r.ports.struck_active[s_idx] = true;
-                if r.sav_on && k < LONGITUDINAL_MAX_KEY_IDX && r.sav.string_n_vh(s_idx) > 0 {
+                if r.sav_on && k < r.sav_max_key_idx && r.sav.string_n_vh(s_idx) > 0 {
                     plan.sav_strings[plan.n_sav] = s_idx as u8;
                     plan.n_sav += 1;
                 }
@@ -185,13 +185,13 @@ pub(crate) fn step_coupled_prefixes(
                         hf.fd_v + f_peel,
                         hf.fd_h,
                     );
-                let tp = plan.tail_partial_damp[s_idx];
+                let tp = plan.tail_partial_ports[s_idx];
                 r.ports.y_dv[s_idx] = ydv_br + tp.ydv;
                 r.ports.y_dh[s_idx] = ydh_br + tp.ydh;
                 if !(r.sav_on
                     && r.ports.struck_active[s_idx]
                     && !r.ports.sav_dormant[s_idx]
-                    && k < LONGITUDINAL_MAX_KEY_IDX
+                    && k < r.sav_max_key_idx
                     && r.sav.string_n_vh(s_idx) > 0)
                 {
                     let alpha = r.ports.alpha_vel[s_idx];

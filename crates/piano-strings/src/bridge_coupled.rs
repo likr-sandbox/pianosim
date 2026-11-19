@@ -2,108 +2,25 @@
 //! bridge port coupling, `1x` unilateral dampers, key-batched `CHUNK = 128` tails,
 //! 2-string paired SAV drift regulation, and zero `ModalSoa` touches in steady state.
 
-use piano_spec::{DAMPED_KEYS, LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS};
+use piano_spec::{NUM_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_damp_kernels::refresh_chunk_damp_y;
-use crate::bridge_diag::{flush_bridge_subnormals_core, update_sav_dormancy};
-use crate::bridge_kernels::step_uncoupled_prefixes_fast;
+use crate::bridge_flush::{flush_bridge_subnormals_core, update_sav_dormancy};
 use crate::bridge_port::{BridgePortDriver, BridgePorts};
 use crate::bridge_prefix_step::{
-    step_clearance_subblock_with_peel, step_coupled_prefixes, step_idle_clearance_check_peel,
+    step_clearance_subblock_with_peel, step_idle_clearance_check_peel,
 };
-use crate::bridge_sav::step_sav_scheduled;
+use crate::bridge_scratch::{step_all_strings_prefix_wdf, BridgeScratch, MAX_PEEL_SLOTS};
 use crate::bridge_tails::{
     key_clear_of_open_damper, key_needs_active_tail, prepare_sample_tails_and_hammers,
-    route_damped_symp_key, sav_long_vecs, step_uncoupled_tails, BridgeRun, ChunkPlan,
-    HammerStepForce, KeyCat, SavLongSlice, TailDampPartial, SUB,
+    route_damped_symp_key, sav_long_vecs, step_uncoupled_tails, BridgeRun, KeyCat, SavLongSlice,
+    SUB,
 };
 use crate::choir_map::ChoirMap;
 use crate::contact::KeyActionDriver;
-use crate::contact_ports::{
-    accum_prefix_damp_vel_bp, refresh_string_ports_bp, ContactPorts, DAMPER_CLEAR_THRESHOLD_M,
-};
+use crate::contact_ports::{ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
 use crate::longitudinal::LongitudinalBank;
 use crate::sav_drift::SavBank;
-
-const MAX_PEEL_SLOTS: usize = 24;
-
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn step_all_strings_prefix_wdf(
-    r: &mut BridgeRun<'_>,
-    driver: &mut impl KeyActionDriver,
-    plan: &mut ChunkPlan,
-    a_waves: &mut [f32; TOTAL_STRINGS],
-    b_waves: &[f32; TOTAL_STRINGS],
-    out_pair: (&mut [f32], &mut [f32]),
-    ts: usize,
-    peel_slot: &[u8; DAMPED_KEYS],
-    peel_buf: &[[f32; SUB]; MAX_PEEL_SLOTS],
-) {
-    let n_cp = plan.n_coupled_strs;
-    let (ul, ur) =
-        step_uncoupled_prefixes_fast(r.bridge_ports, r.ports, plan, ts, a_waves, b_waves);
-    out_pair.0[ts] += ul;
-    out_pair.1[ts] += ur;
-
-    if n_cp > 0 {
-        step_coupled_prefixes(
-            r, driver, plan, n_cp, a_waves, b_waves, out_pair, ts, peel_slot, peel_buf,
-        );
-    }
-
-    if r.sav_on && plan.n_sav > 0 {
-        step_sav_scheduled(
-            r.bridge_ports,
-            r.sav,
-            &plan.sav_strings[..plan.n_sav],
-            r.long_on,
-        );
-        for &s_u8 in &plan.sav_strings[..plan.n_sav] {
-            let s_idx = usize::from(s_u8);
-            if !r.ports.may_be_nonzero[s_idx] || !r.strings[s_idx].has_damper {
-                continue;
-            }
-            let k = usize::from(r.strings[s_idx].key_idx);
-            if plan.key_has_hammer[k] {
-                continue;
-            }
-            if plan.str_coupled[s_idx] || plan.symp_has_gains[s_idx] {
-                let m = &r.bridge_ports.meta[s_idx];
-                let vdv_br =
-                    accum_prefix_damp_vel_bp(r.bridge_ports, r.ports, m.beta_v_off, m.v_br.clone());
-                let vdh_br =
-                    accum_prefix_damp_vel_bp(r.bridge_ports, r.ports, m.beta_h_off, m.h_br.clone());
-                let (tv, th) = if plan.key_cat[k] == KeyCat::ActiveContact {
-                    let tp = plan.tail_partial_damp[s_idx];
-                    (tp.vdv_raw, tp.vdh_raw)
-                } else {
-                    (0.0, 0.0)
-                };
-                let alpha = r.ports.alpha_vel[s_idx];
-                r.ports.v_dv[s_idx] = alpha * (vdv_br + tv);
-                r.ports.v_dh[s_idx] = alpha * (vdh_br + th);
-            }
-        }
-    }
-    for idx in 0..plan.n_a {
-        let k = usize::from(plan.active_keys[idx]);
-        if plan.key_has_hammer[k] {
-            let alpha_w = (driver.hammer_compression_norm(k) / 0.65).clamp(0.0, 1.0);
-            for s_idx in r.keys[k].string_range.clone() {
-                if r.ports.may_be_nonzero[s_idx] {
-                    refresh_string_ports_bp(
-                        r.bridge_ports,
-                        r.ports,
-                        s_idx,
-                        r.strings[s_idx].has_damper,
-                        alpha_w,
-                    );
-                }
-            }
-        }
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_subblock_bridge_coupled_core(
@@ -112,8 +29,14 @@ pub(crate) fn render_subblock_bridge_coupled_core(
     long_bank: &LongitudinalBank,
     sav: &mut SavBank,
     map: &ChoirMap,
+    scratch: &mut BridgeScratch,
     driver: &mut impl KeyActionDriver,
     bridge: &mut impl BridgePortDriver,
+    passive_v_vecs: &[u16; TOTAL_STRINGS],
+    passive_h_vecs: &[u16; TOTAL_STRINGS],
+    sav_max_key_idx: usize,
+    sav_dormancy_ratio: f64,
+    energy_horizon_sq: f32,
     long_on: bool,
     sav_on: bool,
     lossless: bool,
@@ -132,6 +55,8 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         return;
     }
     let zone_weights = *bridge.zone_weights();
+    bridge_ports.sync_a_waves(&ports.may_be_nonzero);
+    let mut a_waves = bridge_ports.a_waves;
     let mut r = BridgeRun {
         ports,
         bridge_ports,
@@ -140,44 +65,21 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         keys: map.keys(),
         strings: map.strings(),
         zone_weights,
+        passive_v_vecs,
+        passive_h_vecs,
+        sav_max_key_idx,
+        sav_dormancy_ratio,
         long_on,
         sav_on,
         lossless,
     };
-    let (mut chunk_base, mut a_waves, mut b_waves, mut zone_out, mut dup_zone) = (
-        0usize,
-        [0.0_f32; TOTAL_STRINGS],
-        [0.0_f32; TOTAL_STRINGS],
-        [0.0_f32; 8],
-        [0.0_f32; 8],
-    );
-    let mut plan = ChunkPlan {
-        key_cat: [KeyCat::Uncoupled; NUM_KEYS],
-        key_has_hammer: [false; NUM_KEYS],
-        key_has_mid_ev: [false; NUM_KEYS],
-        str_coupled: [false; TOTAL_STRINGS],
-        was_nz: [false; TOTAL_STRINGS],
-        was_tail_nz: [false; TOTAL_STRINGS],
-        active_keys: [0; NUM_KEYS],
-        coupled_strs: [0; TOTAL_STRINGS],
-        sav_long_slices: [SavLongSlice::ZERO; TOTAL_STRINGS],
-        sav_strings: [0; TOTAL_STRINGS],
-        hammer_forces: [HammerStepForce::ZERO; TOTAL_STRINGS],
-        tail_partial_damp: [TailDampPartial::ZERO; TOTAL_STRINGS],
-        symp_gv: [0.0; TOTAL_STRINGS],
-        symp_gh: [0.0; TOTAL_STRINGS],
-        symp_mask: [0.0; TOTAL_STRINGS],
-        symp_y_lim: [0.0; TOTAL_STRINGS],
-        symp_has_gains: [false; TOTAL_STRINGS],
-        zone_tail_n: [[0.0; 8]; SUB],
-        n_a: 0,
-        n_coupled_strs: 0,
-        n_sl: 0,
-        n_sav: 0,
-    };
-
-    let mut peel_buf = [[0.0_f32; SUB]; MAX_PEEL_SLOTS];
-    let mut peel_slot = [u8::MAX; DAMPED_KEYS];
+    let plan = &mut scratch.plan;
+    let peel_buf = &mut scratch.peel_buf;
+    let peel_slot = &mut scratch.peel_slot;
+    let b_waves = &mut scratch.b_waves;
+    let zone_out = &mut scratch.zone_out;
+    let dup_zone = &mut scratch.dup_zone;
+    let mut chunk_base = 0usize;
 
     while chunk_base < total {
         let sub = (total - chunk_base).min(SUB);
@@ -187,7 +89,6 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         );
         plan.was_nz = r.ports.may_be_nonzero;
         plan.was_tail_nz = r.ports.tail_nonzero;
-        r.bridge_ports.compute_a_waves(&plan.was_nz, &mut a_waves);
         plan.key_cat.fill(KeyCat::Uncoupled);
         plan.key_has_hammer.fill(false);
         plan.key_has_mid_ev.fill(false);
@@ -199,7 +100,13 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         plan.symp_y_lim.fill(0.0);
         peel_slot.fill(u8::MAX);
         let mut n_peel_slots = 0usize;
-        (plan.n_a, plan.n_coupled_strs, plan.n_sl, plan.n_sav) = (0, 0, 0, 0);
+        (
+            plan.n_a,
+            plan.n_coupled_strs,
+            plan.n_sl,
+            plan.n_sav,
+            plan.n_sav_cd,
+        ) = (0, 0, 0, 0, 0);
         plan.zone_tail_n[..sub].fill([0.0; 8]);
 
         for (k, key) in r.keys.iter().enumerate() {
@@ -209,6 +116,17 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             let any_nz = plan.was_nz[sr.clone()].iter().any(|&b| b);
             let (min_c, has_peel) = if mid_ev {
                 (0.0, false)
+            } else if let Some(cur_c) = driver
+                .is_damper_settled_open(k, DAMPER_CLEAR_THRESHOLD_M)
+                .filter(|&c| c >= DAMPER_CLEAR_THRESHOLD_M)
+            {
+                if !hammer && !any_nz {
+                    continue;
+                }
+                if hammer {
+                    r.ports.y_clear_scratch[k][..sub].fill(cur_c);
+                }
+                (cur_c, false)
             } else if !hammer && !any_nz {
                 if key.has_damper {
                     if n_peel_slots < MAX_PEEL_SLOTS {
@@ -258,10 +176,16 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             } else {
                 (f32::MAX, false)
             };
-            if r.sav_on && k < LONGITUDINAL_MAX_KEY_IDX && !r.lossless && !hammer && !mid_ev {
+            if r.sav_on && k < r.sav_max_key_idx && !r.lossless && !hammer && !mid_ev {
                 for s_idx in sr.clone() {
                     if r.ports.struck_active[s_idx] {
-                        update_sav_dormancy(r.ports, r.bridge_ports, r.sav, s_idx);
+                        update_sav_dormancy(
+                            r.ports,
+                            r.bridge_ports,
+                            r.sav,
+                            s_idx,
+                            r.sav_dormancy_ratio,
+                        );
                     }
                 }
             }
@@ -294,15 +218,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                 } else {
                     plan.key_cat[k] = KeyCat::DampedSymp;
                     if key.has_damper {
-                        route_damped_symp_key(
-                            &mut r,
-                            driver,
-                            &mut plan,
-                            k,
-                            sr.clone(),
-                            sub,
-                            has_peel,
-                        );
+                        route_damped_symp_key(&mut r, driver, plan, k, sr.clone(), sub, has_peel);
                     }
                 }
             }
@@ -322,7 +238,9 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                     }
                 }
             }
-            if r.sav_on && k < LONGITUDINAL_MAX_KEY_IDX {
+            if r.sav_on && k < r.sav_max_key_idx {
+                let damp_cand =
+                    key.has_damper && (!plan.key_has_hammer[k] || plan.key_has_mid_ev[k]);
                 for s_idx in sr {
                     if r.ports.struck_active[s_idx]
                         && !r.ports.sav_dormant[s_idx]
@@ -330,22 +248,24 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                     {
                         plan.sav_strings[plan.n_sav] = s_idx as u8;
                         plan.n_sav += 1;
+                        if damp_cand && (plan.str_coupled[s_idx] || plan.symp_has_gains[s_idx]) {
+                            plan.sav_coupled_damp_strs[plan.n_sav_cd] = s_idx as u8;
+                            plan.n_sav_cd += 1;
+                        }
                     }
                 }
             }
         }
 
-        step_uncoupled_tails(&mut r, &mut plan, sub_l, sub_r);
+        step_uncoupled_tails(&mut r, plan, sub_l, sub_r);
         for ts in 0..sub {
-            prepare_sample_tails_and_hammers(
-                &mut r, driver, &mut plan, chunk_base, ts, sub_l, sub_r,
-            );
+            prepare_sample_tails_and_hammers(&mut r, driver, plan, chunk_base, ts, sub_l, sub_r);
             let (dup_l, dup_r) = bridge.step_bridge_sample_with_duplex_zones(
                 &a_waves,
                 &plan.zone_tail_n[ts],
-                &mut b_waves,
-                &mut zone_out,
-                &mut dup_zone,
+                b_waves,
+                zone_out,
+                dup_zone,
             );
             if let Some(zf) = zone_frames.as_deref_mut() {
                 for (dst, (&zo, &dz)) in zf[chunk_base + ts]
@@ -364,13 +284,13 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             step_all_strings_prefix_wdf(
                 &mut r,
                 driver,
-                &mut plan,
+                plan,
                 &mut a_waves,
-                &b_waves,
+                b_waves,
                 (sub_l, sub_r),
                 ts,
-                &peel_slot,
-                &peel_buf,
+                peel_slot,
+                peel_buf,
             );
         }
         refresh_chunk_damp_y(r.bridge_ports, r.ports, &plan.symp_has_gains);
@@ -384,6 +304,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         }
         chunk_base += sub;
     }
+    r.bridge_ports.a_waves = a_waves;
 
     if !flush_end {
         for (s_idx, entry) in r.strings.iter().enumerate() {
@@ -414,6 +335,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         r.strings,
         &plan.key_has_hammer,
         &flush_closed_damp,
+        energy_horizon_sq,
         r.lossless,
     );
 }

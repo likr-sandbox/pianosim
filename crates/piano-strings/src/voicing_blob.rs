@@ -3,7 +3,9 @@
 
 use alloc::vec::Vec;
 use piano_simd::F32x4;
-use piano_spec::{VoicingSpec, LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS};
+use piano_spec::{
+    build_scale_design, PerfProfile, VoicingSpec, LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS,
+};
 
 use crate::voicing_blob_sav::{
     push_copy, push_f64_bits, push_sav_entry, read_copy, read_f64_bits, read_sav_entry,
@@ -21,6 +23,12 @@ pub fn voicing_blob_len(sample_rate: f32) -> usize {
     VoicingPrepContext::new(sample_rate).blob_len()
 }
 
+/// Computes the exact serialized `f32` length of a `VoicingBlob` under `perf`.
+#[must_use]
+pub fn voicing_blob_len_with_profile(sample_rate: f32, perf: &PerfProfile) -> usize {
+    VoicingPrepContext::new_with_profile(sample_rate, perf).blob_len()
+}
+
 /// Off-thread Stage 2/3 tuning table builder for non-blocking `AudioWorklet` swaps.
 pub struct VoicingPrepContext {
     bank: StringBank,
@@ -31,11 +39,43 @@ impl VoicingPrepContext {
     /// Initializes a headless Stage 2/3 precomputation context at `sample_rate`.
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
-        let bank = StringBank::new_bridge_coupled(sample_rate, &VoicingSpec::default());
+        Self::new_with_profile(sample_rate, &PerfProfile::full())
+    }
+
+    /// Initializes a headless Stage 2/3 precomputation context honoring `perf`.
+    #[must_use]
+    pub fn new_with_profile(sample_rate_hz: f32, perf: &PerfProfile) -> Self {
+        let bank = StringBank::new_bridge_coupled_with_profile(
+            sample_rate_hz,
+            &VoicingSpec::default(),
+            perf,
+        );
         let len = Self::compute_blob_len(&bank);
         Self {
             bank,
             out_blob: Vec::with_capacity(len),
+        }
+    }
+
+    /// Updates the Stage 2 `PerfProfile`, rebuilding internal tables if structural mode counts change.
+    pub fn set_perf_profile(&mut self, perf: &PerfProfile) {
+        let p = perf.sanitized();
+        let cur = self.bank.perf_profile();
+        if (p.horiz_max_hz - cur.horiz_max_hz).abs() > f32::EPSILON
+            || (p.dead_mode_prune_db - cur.dead_mode_prune_db).abs() > f32::EPSILON
+            || p.bass_phantom_sparse != cur.bass_phantom_sparse
+        {
+            self.bank = StringBank::new_bridge_coupled_with_profile(
+                self.bank.sample_rate(),
+                &VoicingSpec::default(),
+                &p,
+            );
+            let len = Self::compute_blob_len(&self.bank);
+            if self.out_blob.capacity() < len {
+                self.out_blob.reserve(len - self.out_blob.capacity());
+            }
+        } else {
+            self.bank.set_perf_profile_runtime(&p);
         }
     }
 
@@ -287,6 +327,10 @@ impl StringBank {
         }
         debug_assert_eq!(cur, expected_len);
         self.bridge_ports.sync_damp_ports(&self.ports);
+        self.bridge_ports.a_waves_dirty = true;
+        let specs = build_scale_design(&v);
+        self.recompute_passive_res_caps(&v, &specs);
+        self.last_voicing = v;
         true
     }
 }

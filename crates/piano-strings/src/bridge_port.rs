@@ -156,6 +156,8 @@ pub(crate) struct BridgePorts {
     pub r_damp_prefix_h: [f32; TOTAL_STRINGS],
     pub tail_n_trans: [f32; TOTAL_STRINGS],
     pub tail_n_long: [f32; TOTAL_STRINGS],
+    pub a_waves: [f32; TOTAL_STRINGS],
+    pub a_waves_dirty: bool,
     pub meta: [StringBridgeMeta; TOTAL_STRINGS],
 }
 

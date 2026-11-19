@@ -8,12 +8,12 @@
 use core::f64::consts::{LN_10, TAU};
 use piano_simd::AlignedBuf;
 use piano_spec::{
-    bridge_pin_couplings, count_longitudinal_partials, count_transverse_partials,
-    effective_string_f0_hz, partial_frequency_hz, Polarization, StringPhysicalParams, VoicingSpec,
+    bridge_pin_couplings, count_longitudinal_partials, effective_string_f0_hz,
+    partial_frequency_hz, PerfProfile, Polarization, StringPhysicalParams, VoicingSpec,
     MAX_AUDIBLE_FREQ_HZ, NUM_KEYS,
 };
 
-use crate::choir_map::{ChoirMap, StringMapEntry};
+use crate::choir_map::{compute_string_pol_modes, ChoirMap, StringMapEntry};
 use crate::contact_ports::{hammer_contact_time_s, strike_phi};
 use crate::damping_law::t60_transverse_partial;
 #[allow(unused_imports)]
@@ -84,7 +84,7 @@ impl ModalSoa {
             b_exc: AlignedBuf::zeroed(len),
         };
         for entry in map.strings() {
-            populate_string_modes_with_mode(
+            populate_string_modes_with_profile(
                 &mut soa,
                 entry,
                 sample_rate,
@@ -92,6 +92,42 @@ impl ModalSoa {
                 specs,
                 lossless,
                 bridge_coupled,
+                &PerfProfile::full(),
+            );
+        }
+        soa
+    }
+
+    /// Allocates and initializes SoA mode tables honoring `perf`.
+    #[must_use]
+    pub(crate) fn build_with_profile(
+        sample_rate: f64,
+        voicing: &VoicingSpec,
+        specs: &[StringPhysicalParams; NUM_KEYS],
+        map: &ChoirMap,
+        lossless: bool,
+        bridge_coupled: bool,
+        perf: &PerfProfile,
+    ) -> Self {
+        let len = map.total_padded_modes();
+        let mut soa = Self {
+            u: AlignedBuf::zeroed(len),
+            v: AlignedBuf::zeroed(len),
+            d_coeff: AlignedBuf::filled(len, 1.0),
+            s_coeff: AlignedBuf::zeroed(len),
+            c_bridge: AlignedBuf::zeroed(len),
+            b_exc: AlignedBuf::zeroed(len),
+        };
+        for entry in map.strings() {
+            populate_string_modes_with_profile(
+                &mut soa,
+                entry,
+                sample_rate,
+                voicing,
+                specs,
+                lossless,
+                bridge_coupled,
+                perf,
             );
         }
         soa
@@ -170,7 +206,8 @@ pub(crate) fn coupled_pole_f32(
     Some((d_f32, s_f32))
 }
 
-pub(crate) fn populate_string_modes_with_mode(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn populate_string_modes_with_profile(
     soa: &mut ModalSoa,
     entry: &StringMapEntry,
     sample_rate: f64,
@@ -178,6 +215,7 @@ pub(crate) fn populate_string_modes_with_mode(
     specs: &[StringPhysicalParams; NUM_KEYS],
     lossless: bool,
     bridge_coupled: bool,
+    perf: &PerfProfile,
 ) {
     let k = entry.key_idx as usize;
     let s_choir = entry.string_in_choir as usize;
@@ -196,8 +234,9 @@ pub(crate) fn populate_string_modes_with_mode(
         entry.horiz_vecs.len() * 4,
         entry.long_vecs.len() * 4,
     );
-    let v_modes = count_transverse_partials(f0_vert, b_inharm, MAX_AUDIBLE_FREQ_HZ).min(v_cap);
-    let h_modes = count_transverse_partials(f0_horiz, b_inharm, MAX_AUDIBLE_FREQ_HZ).min(h_cap);
+    let (v_raw, h_raw) = compute_string_pol_modes(k, &spec, f0_vert, f0_horiz, perf);
+    let v_modes = v_raw.min(v_cap);
+    let h_modes = h_raw.min(h_cap);
     let l_modes = count_longitudinal_partials(k, spec.f_long_hz, MAX_AUDIBLE_FREQ_HZ).min(l_cap);
 
     let mut energy_sq = 0.0_f64;
@@ -260,7 +299,12 @@ pub(crate) fn populate_string_modes_with_mode(
 
     let long_base = entry.long_vecs.start * 4;
     for m in 1..=l_modes {
-        let f_init = crate::longitudinal::long_init_freq_hz(k, spec.f_long_hz, m);
+        let f_init = crate::longitudinal::long_init_freq_hz_profile(
+            k,
+            spec.f_long_hz,
+            m,
+            perf.bass_phantom_sparse,
+        );
         let t60_l = if lossless {
             f64::INFINITY
         } else {

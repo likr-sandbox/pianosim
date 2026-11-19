@@ -4,6 +4,7 @@ use piano_simd::F32x4;
 
 use crate::bridge_port::{BridgePorts, PrefixState};
 use crate::phantom::{BASE_PHANTOM_LONG_VECS, MAX_PHANTOM_LONG_VECS, MAX_PHANTOM_TRANSVERSE_VECS};
+use crate::phantom_sparse::SPARSE_PHANTOM_LONG_VECS;
 use crate::sav_drift::{
     load_nl_state_n, step_sav_no_phantom_spec_n, step_sav_phantom_spec_3x6,
     step_sav_phantom_spec_n, SavBank, LAMBDA_REG_DEFAULT,
@@ -176,6 +177,10 @@ pub(crate) fn step_sav_scheduled(
                 run_sav_no_phantom::<2>(sav, s_idx, &mut uv, &vv, &mut uh, &vh);
             } else if nl == 1 {
                 run_sav_phantom::<1>(bp, sav, s_idx, lb, nl, &mut uv, &vv, &mut uh, &vh);
+            } else if nl == SPARSE_PHANTOM_LONG_VECS {
+                run_sav_phantom::<SPARSE_PHANTOM_LONG_VECS>(
+                    bp, sav, s_idx, lb, nl, &mut uv, &vv, &mut uh, &vh,
+                );
             } else {
                 run_sav_phantom::<BASE_PHANTOM_LONG_VECS>(
                     bp, sav, s_idx, lb, nl, &mut uv, &vv, &mut uh, &vh,

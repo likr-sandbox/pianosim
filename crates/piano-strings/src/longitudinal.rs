@@ -11,7 +11,7 @@ use piano_spec::{
 
 use crate::choir_map::{ChoirMap, StringMapEntry};
 use crate::modal_soa::{exp_f64, sin_cos_f64, sqrt_f64};
-use crate::phantom::max_phantom_long_vecs_for_key;
+use crate::phantom_sparse::phantom_long_vecs_for_key;
 use crate::zoh_kernel::inject_excitation;
 
 pub(crate) const LONG_AA_KNEE_HZ: f64 = 5_200.0;
@@ -58,10 +58,15 @@ pub(crate) fn w_phantom(freq_hz: f64) -> f64 {
 
 #[inline]
 #[must_use]
-pub(crate) fn long_init_freq_hz(key_idx: usize, f_long_hz: f64, partial_m: usize) -> f64 {
+pub(crate) fn long_init_freq_hz_profile(
+    key_idx: usize,
+    f_long_hz: f64,
+    partial_m: usize,
+    bass_sparse: bool,
+) -> f64 {
     let f_nom = (partial_m as f64) * f_long_hz;
     let w_reg = nonlinear_register_weight(key_idx);
-    let max_phantom_modes = max_phantom_long_vecs_for_key(key_idx) * 4;
+    let max_phantom_modes = phantom_long_vecs_for_key(key_idx, bass_sparse) * 4;
     if w_reg > 0.0 && partial_m <= max_phantom_modes {
         let wp = w_phantom(f_nom);
         f_nom / sqrt_f64(1.0 + w_reg * wp * wp)

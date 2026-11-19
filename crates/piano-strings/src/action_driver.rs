@@ -14,6 +14,13 @@ pub trait KeyActionDriver {
     }
     /// Instantaneous geometric clearance `y_clear` (m) of damper pad `key_idx`.
     fn damper_clearance_m(&self, key_idx: usize) -> f32;
+    /// Returns `Some(clearance_m)` when damper `key_idx` is completely settled open
+    /// (`!settling`, `peel_pos >= peel_len`, and `clearance_m >= clear_threshold_m`),
+    /// allowing Stage 2 to skip per-chunk clearance tile stepping.
+    #[inline]
+    fn is_damper_settled_open(&self, _key_idx: usize, _clear_threshold_m: f32) -> Option<f32> {
+        None
+    }
     /// Returns per-choir-string hammer strike weights `[w0, w1, w2]` (Una Corda support).
     fn strike_weights(&self, key_idx: usize) -> [f32; 3];
     /// Advances damper rail smoother by 1 sample for `key_idx` and returns `y_clear` (m).

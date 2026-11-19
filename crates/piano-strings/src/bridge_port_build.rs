@@ -16,18 +16,19 @@ use crate::bridge_port::{
 use crate::choir_map::ChoirMap;
 use crate::contact_ports::ContactPorts;
 use crate::modal_soa::{sqrt_f64, ModalSoa, NYQUIST_CUTOFF_RATIO};
-use crate::phantom::max_phantom_transverse_vecs_for_key;
+use crate::phantom_sparse::phantom_transverse_vecs_for_key;
 
 impl BridgePorts {
-    /// Precomputes L1d-packed `state`/`coef` and key-grouped contiguous `tl_soa`.
+    /// Precomputes L1d-packed `state`/`coef` and `tl_soa` honoring `bass_sparse`.
     #[must_use]
-    pub fn build(
+    pub fn build_with_profile(
         sample_rate: f64,
         voicing: &VoicingSpec,
         specs: &[StringPhysicalParams; NUM_KEYS],
         map: &ChoirMap,
         ports: &ContactPorts,
         soa: &ModalSoa,
+        bass_sparse: bool,
     ) -> Self {
         let ts = 1.0 / sample_rate;
         let nyquist = NYQUIST_CUTOFF_RATIO * sample_rate;
@@ -51,7 +52,7 @@ impl BridgePorts {
                 count_prefix_modes(k, entry.vert_modes, f0_v, spec.inharmonicity_b, nyquist);
             let nh_cut =
                 count_prefix_modes(k, entry.horiz_modes, f0_h, spec.inharmonicity_b, nyquist);
-            let sav_min = max_phantom_transverse_vecs_for_key(k);
+            let sav_min = phantom_transverse_vecs_for_key(k, bass_sparse);
             let n_pol = nv_cut
                 .max(nh_cut)
                 .div_ceil(4)
@@ -304,6 +305,8 @@ impl BridgePorts {
             r_damp_prefix_h,
             tail_n_trans,
             tail_n_long,
+            a_waves: [0.0; TOTAL_STRINGS],
+            a_waves_dirty: false,
             meta,
         };
         built.sync_damp_ports(ports);

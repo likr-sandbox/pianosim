@@ -5,6 +5,7 @@ use core::ops::Range;
 use piano_simd::F32x4;
 
 use crate::bridge_port::BridgePorts;
+use crate::bridge_tails::TailPortPartial;
 use crate::choir_map::StringMapEntry;
 use crate::contact_ports::ContactPorts;
 use crate::modal_soa::ModalSoa;
@@ -197,6 +198,90 @@ fn refresh_string_ports_bp_inner<const HAS_ALPHA: bool>(
     };
     (ports.y_dh[s_idx], ports.v_dh[s_idx]) = if has_damper {
         (ydh, alpha * vdh)
+    } else {
+        (0.0, 0.0)
+    };
+    ports.ports_synced[s_idx] = true;
+}
+
+#[inline]
+pub(crate) fn refresh_prefix_ports_with_tail_bp(
+    bp: &BridgePorts,
+    ports: &mut ContactPorts,
+    s_idx: usize,
+    has_damper: bool,
+    alpha_w: f32,
+    tail: &TailPortPartial,
+) {
+    if alpha_w > 0.0 {
+        refresh_prefix_ports_with_tail_bp_inner::<true>(
+            bp, ports, s_idx, has_damper, alpha_w, tail,
+        );
+    } else {
+        refresh_prefix_ports_with_tail_bp_inner::<false>(bp, ports, s_idx, has_damper, 0.0, tail);
+    }
+}
+
+#[inline]
+fn refresh_prefix_ports_with_tail_bp_inner<const HAS_ALPHA: bool>(
+    bp: &BridgePorts,
+    ports: &mut ContactPorts,
+    s_idx: usize,
+    has_damper: bool,
+    alpha_w: f32,
+    tail: &TailPortPartial,
+) {
+    let m = &bp.meta[s_idx];
+    let (bh, ah) = (
+        ports.b_strike.as_f32x4_slice(),
+        ports.a_strike.as_f32x4_slice(),
+    );
+    let (bh_diff, ah_diff) = (
+        ports.b_strike_diff.as_f32x4_slice(),
+        ports.a_strike_diff.as_f32x4_slice(),
+    );
+    let (bd, ad) = (ports.b_damp.as_f32x4_slice(), ports.a_damp.as_f32x4_slice());
+    let alpha_v = F32x4::splat(alpha_w);
+
+    let accum_prefix = |p_off: usize, vr_br: Range<usize>| {
+        let (mut ayh, mut avh, mut ayd, mut avd) =
+            (F32x4::zero(), F32x4::zero(), F32x4::zero(), F32x4::zero());
+        for (k, i) in vr_br.enumerate() {
+            let st = bp.state[p_off + k];
+            let (ah_eff, bh_eff) = if HAS_ALPHA {
+                (
+                    alpha_v.mul_add(ah_diff[i], ah[i]),
+                    alpha_v.mul_add(bh_diff[i], bh[i]),
+                )
+            } else {
+                (ah[i], bh[i])
+            };
+            ayh = st.v.mul_add(ah_eff, ayh);
+            avh = st.u.mul_add(bh_eff, avh);
+            if has_damper {
+                ayd = st.v.mul_add(ad[i], ayd);
+                avd = st.u.mul_add(bd[i], avd);
+            }
+        }
+        (
+            ayh.reduce_sum(),
+            avh.reduce_sum(),
+            ayd.reduce_sum(),
+            avd.reduce_sum(),
+        )
+    };
+    let (yh_v, vh_v, ydv, vdv) = accum_prefix(m.beta_v_off, m.v_br.clone());
+    let (yh_h, vh_h, ydh, vdh) = accum_prefix(m.beta_h_off, m.h_br.clone());
+    let alpha = ports.alpha_vel[s_idx];
+    ports.y_h[s_idx] = (yh_v + tail.yhv) + (yh_h + tail.yhh);
+    ports.v_h[s_idx] = alpha * ((vh_v + tail.vhv_raw) + (vh_h + tail.vhh_raw));
+    (ports.y_dv[s_idx], ports.v_dv[s_idx]) = if has_damper {
+        (ydv + tail.ydv, alpha * (vdv + tail.vdv_raw))
+    } else {
+        (0.0, 0.0)
+    };
+    (ports.y_dh[s_idx], ports.v_dh[s_idx]) = if has_damper {
+        (ydh + tail.ydh, alpha * (vdh + tail.vdh_raw))
     } else {
         (0.0, 0.0)
     };

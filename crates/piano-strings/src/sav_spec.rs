@@ -11,14 +11,14 @@ use piano_spec::{
 
 use crate::choir_map::StringMapEntry;
 use crate::longitudinal::{
-    long_init_freq_hz, nonlinear_register_weight, w_phantom, LONG_AA_CUTOFF_HZ,
+    long_init_freq_hz_profile, nonlinear_register_weight, w_phantom, LONG_AA_CUTOFF_HZ,
 };
 use crate::modal_soa::NYQUIST_CUTOFF_RATIO;
 use crate::phantom::{
-    max_phantom_long_vecs_for_key, max_phantom_transverse_vecs_for_key, slope_factor,
-    MAX_PHANTOM_LONG_MODES, MAX_PHANTOM_LONG_VECS, MAX_PHANTOM_TRANSVERSE_MODES,
+    slope_factor, MAX_PHANTOM_LONG_MODES, MAX_PHANTOM_LONG_VECS, MAX_PHANTOM_TRANSVERSE_MODES,
     MAX_PHANTOM_TRANSVERSE_VECS,
 };
+use crate::phantom_sparse::{phantom_long_vecs_for_key, phantom_transverse_vecs_for_key};
 
 fn pack_vec4<const N: usize>(vals: &[f64]) -> [F32x4; N] {
     let mut out = [F32x4::zero(); N];
@@ -153,13 +153,14 @@ impl SavStringSpec {
     }
 
     #[must_use]
-    pub fn build(
+    pub fn build_with_profile(
         entry: &StringMapEntry,
         sample_rate: f64,
         voicing: &VoicingSpec,
         specs: &[StringPhysicalParams; NUM_KEYS],
         gamma_s: f64,
         beta_s: f64,
+        bass_sparse: bool,
     ) -> (Self, SavEnergySlopes) {
         let k = entry.key_idx as usize;
         let w_reg = nonlinear_register_weight(k);
@@ -179,7 +180,7 @@ impl SavStringSpec {
             0.0
         };
 
-        let max_t_modes = max_phantom_transverse_vecs_for_key(k) * 4;
+        let max_t_modes = phantom_transverse_vecs_for_key(k, bass_sparse) * 4;
         let max_t_shared = max_t_modes.min(entry.vert_vecs.len().min(entry.horiz_vecs.len()) * 4);
         let v_modes = count_transverse_partials(f0_v, spec.inharmonicity_b, MAX_AUDIBLE_FREQ_HZ)
             .min(entry.vert_vecs.len() * 4);
@@ -205,13 +206,13 @@ impl SavStringSpec {
         } else {
             0.0
         };
-        let max_l_modes = max_phantom_long_vecs_for_key(k) * 4;
+        let max_l_modes = phantom_long_vecs_for_key(k, bass_sparse) * 4;
         let l_modes = count_longitudinal_partials(k, spec.f_long_hz, MAX_AUDIBLE_FREQ_HZ)
             .min(entry.long_vecs.len() * 4)
             .min(max_l_modes);
         for m in 1..=l_modes {
             let f_nom = (m as f64) * spec.f_long_hz;
-            let f_init = long_init_freq_hz(k, spec.f_long_hz, m);
+            let f_init = long_init_freq_hz_profile(k, spec.f_long_hz, m, bass_sparse);
             if f_init > 0.0 && f_init < nyquist && f_nom < LONG_AA_CUTOFF_HZ {
                 m_ph = m;
                 let al = alpha_pref * w_phantom(f_nom);

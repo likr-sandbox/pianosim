@@ -7,14 +7,15 @@ use crate::modal_soa::ModalSoa;
 use crate::phantom::{
     accum_phantom_grad_vh_simd_n, convolve_transverse_slopes_f32_n, BASE_PHANTOM_LONG_VECS,
 };
+use crate::phantom_sparse::{
+    accum_phantom_grad_vh_simd_2x2, convolve_transverse_slopes_f32_2x2, SPARSE_PHANTOM_LONG_VECS,
+};
 use crate::sav_drift::{
-    apply_cayley_u, eval_p_vec_slice, load_nl_state_n, load_vh_state, prepare_vh, store_nl_state_n,
-    SavBank, C0_SAV, DELTA_U_SAV, LAMBDA_REG_DEFAULT,
+    apply_cayley_u, eval_p_vec_slice, prepare_vh, SavBank, C0_SAV, DELTA_U_SAV, LAMBDA_REG_DEFAULT,
 };
+use crate::sav_pair_tile::step_sav_pair_tile;
 use crate::sav_spec::SavStringSpec;
-use crate::sav_tile::{
-    step_2_slices, step_nl_slices, step_ringing_string_tile, step_tails, store_vh_state,
-};
+use crate::sav_tile::step_ringing_string_tile;
 
 /// Batches ringing SAV strings with identical `(nv>=2, nh>=2, nl)` layouts into pairs
 /// so independent `sqrt`/`div`/`reduce_sum` chains execute in parallel across the two strings.
@@ -241,8 +242,18 @@ pub(crate) fn eval_phantom_pair<const NL_MAX: usize>(
     }
     let inv_u0 = 1.0 / (f64::from(usq0.reduce_sum()) + DELTA_U_SAV);
     let inv_u1 = 1.0 / (f64::from(usq1.reduce_sum()) + DELTA_U_SAV);
-    let phi0 = convolve_transverse_slopes_f32_n::<NL_MAX>(&dv0, &dh0);
-    let phi1 = convolve_transverse_slopes_f32_n::<NL_MAX>(&dv1, &dh1);
+    let phi0 = if NL_MAX == SPARSE_PHANTOM_LONG_VECS {
+        let p = convolve_transverse_slopes_f32_2x2(&dv0, &dh0);
+        core::array::from_fn(|i| p[i])
+    } else {
+        convolve_transverse_slopes_f32_n::<NL_MAX>(&dv0, &dh0)
+    };
+    let phi1 = if NL_MAX == SPARSE_PHANTOM_LONG_VECS {
+        let p = convolve_transverse_slopes_f32_2x2(&dv1, &dh1);
+        core::array::from_fn(|i| p[i])
+    } else {
+        convolve_transverse_slopes_f32_n::<NL_MAX>(&dv1, &dh1)
+    };
     let cs0 = F32x4::splat((sp0.quarter_l * sp0.kappa_ph) as f32);
     let cs1 = F32x4::splat((sp1.quarter_l * sp1.kappa_ph) as f32);
     let (mut r2_0, mut r2_1) = (F32x4::zero(), F32x4::zero());
@@ -261,18 +272,20 @@ pub(crate) fn eval_phantom_pair<const NL_MAX: usize>(
     let e1 = sp1.kappa_0 * s1 * s1 + sp1.kappa_ph * f64::from(r2_1.reduce_sum());
     let ((psi0, ip0), (psi1, ip1)) = psi_and_inv_pair(e0 + C0_SAV, e1 + C0_SAV);
     let (rn0, rn1) = (*r0_ref, *r1_ref);
-    let (mut gv0, mut gh0) = accum_phantom_grad_vh_simd_n::<NL_MAX>(
-        &dv0,
-        &dh0,
-        (0.5 * sp0.length_m * sp0.kappa_0 * s0) as f32,
-        &cp0,
-    );
-    let (mut gv1, mut gh1) = accum_phantom_grad_vh_simd_n::<NL_MAX>(
-        &dv1,
-        &dh1,
-        (0.5 * sp1.length_m * sp1.kappa_0 * s1) as f32,
-        &cp1,
-    );
+    let c_sum0 = (0.5 * sp0.length_m * sp0.kappa_0 * s0) as f32;
+    let c_sum1 = (0.5 * sp1.length_m * sp1.kappa_0 * s1) as f32;
+    let (mut gv0, mut gh0) = if NL_MAX == SPARSE_PHANTOM_LONG_VECS {
+        let cp = [cp0[0], cp0[1]];
+        accum_phantom_grad_vh_simd_2x2(&dv0, &dh0, c_sum0, &cp)
+    } else {
+        accum_phantom_grad_vh_simd_n::<NL_MAX>(&dv0, &dh0, c_sum0, &cp0)
+    };
+    let (mut gv1, mut gh1) = if NL_MAX == SPARSE_PHANTOM_LONG_VECS {
+        let cp = [cp1[0], cp1[1]];
+        accum_phantom_grad_vh_simd_2x2(&dv1, &dh1, c_sum1, &cp)
+    } else {
+        accum_phantom_grad_vh_simd_n::<NL_MAX>(&dv1, &dh1, c_sum1, &cp1)
+    };
     let half_ts = 0.5 * ts;
     let kg0 = F32x4::splat((half_ts * ip0) as f32);
     let kr0 = F32x4::splat((half_ts * LAMBDA_REG_DEFAULT * (rn0 - psi0) * inv_u0) as f32);
@@ -308,175 +321,4 @@ pub(crate) fn eval_phantom_pair<const NL_MAX: usize>(
     apply_cayley_u(uv1, &gv1, t1);
     apply_cayley_u(uh1, &gh1, t1);
     apply_cayley_u(ul1, &cp1, t1);
-}
-
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn step_no_phantom_pair_tile(
-    soa: &mut ModalSoa,
-    sav: &mut SavBank,
-    s0: usize,
-    e0: &StringMapEntry,
-    s1: usize,
-    e1: &StringMapEntry,
-    longitudinal_enabled: bool,
-    out_l: &mut [f32],
-    out_r: &mut [f32],
-) {
-    for e in [e0, e1] {
-        let (vb, hb) = (e.vert_vecs.start, e.horiz_vecs.start);
-        let (r1, r2) = if longitudinal_enabled {
-            (hb + 2..e.long_vecs.end, 0..0)
-        } else {
-            (hb + 2..e.horiz_vecs.end, e.long_vecs.clone())
-        };
-        step_tails(soa, vb + 2..e.vert_vecs.end, r1, r2, e, out_l, out_r);
-    }
-    let (vb0, hb0, vb1, hb1) = (
-        e0.vert_vecs.start,
-        e0.horiz_vecs.start,
-        e1.vert_vecs.start,
-        e1.horiz_vecs.start,
-    );
-    let (mut uv0, mut vv0) = load_vh_state(soa, vb0, 2);
-    let (mut uh0, mut vh0) = load_vh_state(soa, hb0, 2);
-    let (mut uv1, mut vv1) = load_vh_state(soa, vb1, 2);
-    let (mut uh1, mut vh1) = load_vh_state(soa, hb1, 2);
-    let (sp0, sp1, ts) = (sav.spec(s0), sav.spec(s1), sav.ts());
-    let (mut r0, mut r1) = (sav.r_sav[s0], sav.r_sav[s1]);
-    let steps = out_l.len().min(out_r.len());
-    {
-        let (d_s, s_s, c_s) = (
-            soa.d_coeff.as_f32x4_slice(),
-            soa.s_coeff.as_f32x4_slice(),
-            soa.c_bridge.as_f32x4_slice(),
-        );
-        let min_len = d_s.len().min(s_s.len()).min(c_s.len());
-        assert!(
-            vb0 + 2 <= min_len && hb0 + 2 <= min_len && vb1 + 2 <= min_len && hb1 + 2 <= min_len
-        );
-        for (lo, ro) in out_l[..steps].iter_mut().zip(out_r[..steps].iter_mut()) {
-            let av0 = step_2_slices(&mut uv0, &mut vv0, vb0, d_s, s_s, c_s);
-            let ah0 = step_2_slices(&mut uh0, &mut vh0, hb0, d_s, s_s, c_s);
-            let av1 = step_2_slices(&mut uv1, &mut vv1, vb1, d_s, s_s, c_s);
-            let ah1 = step_2_slices(&mut uh1, &mut vh1, hb1, d_s, s_s, c_s);
-            eval_no_phantom_pair(
-                sp0, sp1, ts, &mut r0, &mut r1, &mut uv0, &vv0, &mut uh0, &vh0, &mut uv1, &vv1,
-                &mut uh1, &vh1,
-            );
-            let f0 = (av0 + ah0).reduce_sum();
-            let f1 = (av1 + ah1).reduce_sum();
-            *lo += f0 * e0.pan_l + f1 * e1.pan_l;
-            *ro += f0 * e0.pan_r + f1 * e1.pan_r;
-        }
-    }
-    sav.r_sav[s0] = r0;
-    sav.r_sav[s1] = r1;
-    store_vh_state(soa, vb0, 2, &uv0, &vv0);
-    store_vh_state(soa, hb0, 2, &uh0, &vh0);
-    store_vh_state(soa, vb1, 2, &uv1, &vv1);
-    store_vh_state(soa, hb1, 2, &uh1, &vh1);
-}
-
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn step_phantom_pair_tile<const NL_MAX: usize>(
-    soa: &mut ModalSoa,
-    sav: &mut SavBank,
-    s0: usize,
-    e0: &StringMapEntry,
-    s1: usize,
-    e1: &StringMapEntry,
-    nl: usize,
-    out_l: &mut [f32],
-    out_r: &mut [f32],
-) {
-    let n = if NL_MAX == 1 { 1 } else { nl.min(NL_MAX) };
-    for e in [e0, e1] {
-        let (vb, hb, lb) = (e.vert_vecs.start, e.horiz_vecs.start, e.long_vecs.start);
-        step_tails(
-            soa,
-            vb + 2..e.vert_vecs.end,
-            hb + 2..e.horiz_vecs.end,
-            lb + n..e.long_vecs.end,
-            e,
-            out_l,
-            out_r,
-        );
-    }
-    let (vb0, hb0, lb0) = (e0.vert_vecs.start, e0.horiz_vecs.start, e0.long_vecs.start);
-    let (vb1, hb1, lb1) = (e1.vert_vecs.start, e1.horiz_vecs.start, e1.long_vecs.start);
-    let (mut uv0, mut vv0) = load_vh_state(soa, vb0, 2);
-    let (mut uh0, mut vh0) = load_vh_state(soa, hb0, 2);
-    let (mut ul0, mut vl0) = load_nl_state_n::<NL_MAX>(soa, lb0, n);
-    let (mut uv1, mut vv1) = load_vh_state(soa, vb1, 2);
-    let (mut uh1, mut vh1) = load_vh_state(soa, hb1, 2);
-    let (mut ul1, mut vl1) = load_nl_state_n::<NL_MAX>(soa, lb1, n);
-    let (sp0, sp1, ts) = (sav.spec(s0), sav.spec(s1), sav.ts());
-    let (mut r0, mut r1) = (sav.r_sav[s0], sav.r_sav[s1]);
-    let steps = out_l.len().min(out_r.len());
-    {
-        let (d_s, s_s, c_s) = (
-            soa.d_coeff.as_f32x4_slice(),
-            soa.s_coeff.as_f32x4_slice(),
-            soa.c_bridge.as_f32x4_slice(),
-        );
-        let min_len = d_s.len().min(s_s.len()).min(c_s.len());
-        assert!(
-            vb0 + 2 <= min_len
-                && hb0 + 2 <= min_len
-                && lb0 + n <= min_len
-                && vb1 + 2 <= min_len
-                && hb1 + 2 <= min_len
-                && lb1 + n <= min_len
-        );
-        for (lo, ro) in out_l[..steps].iter_mut().zip(out_r[..steps].iter_mut()) {
-            let av0 = step_2_slices(&mut uv0, &mut vv0, vb0, d_s, s_s, c_s);
-            let ah0 = step_2_slices(&mut uh0, &mut vh0, hb0, d_s, s_s, c_s);
-            let al0 = step_nl_slices::<NL_MAX>(&mut ul0, &mut vl0, lb0, n, d_s, s_s, c_s);
-            let av1 = step_2_slices(&mut uv1, &mut vv1, vb1, d_s, s_s, c_s);
-            let ah1 = step_2_slices(&mut uh1, &mut vh1, hb1, d_s, s_s, c_s);
-            let al1 = step_nl_slices::<NL_MAX>(&mut ul1, &mut vl1, lb1, n, d_s, s_s, c_s);
-            eval_phantom_pair::<NL_MAX>(
-                sp0, sp1, ts, n, &mut r0, &mut r1, &mut uv0, &vv0, &mut uh0, &vh0, &mut ul0, &vl0,
-                &mut uv1, &vv1, &mut uh1, &vh1, &mut ul1, &vl1,
-            );
-            let f0 = (av0 + ah0 + al0).reduce_sum();
-            let f1 = (av1 + ah1 + al1).reduce_sum();
-            *lo += f0 * e0.pan_l + f1 * e1.pan_l;
-            *ro += f0 * e0.pan_r + f1 * e1.pan_r;
-        }
-    }
-    sav.r_sav[s0] = r0;
-    sav.r_sav[s1] = r1;
-    store_vh_state(soa, vb0, 2, &uv0, &vv0);
-    store_vh_state(soa, hb0, 2, &uh0, &vh0);
-    store_nl_state_n::<NL_MAX>(soa, lb0, n, &ul0, &vl0);
-    store_vh_state(soa, vb1, 2, &uv1, &vv1);
-    store_vh_state(soa, hb1, 2, &uh1, &vh1);
-    store_nl_state_n::<NL_MAX>(soa, lb1, n, &ul1, &vl1);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn step_sav_pair_tile(
-    soa: &mut ModalSoa,
-    sav: &mut SavBank,
-    s0: usize,
-    e0: &StringMapEntry,
-    s1: usize,
-    e1: &StringMapEntry,
-    bucket: usize,
-    longitudinal_enabled: bool,
-    out_l: &mut [f32],
-    out_r: &mut [f32],
-) {
-    if bucket == 0 {
-        step_no_phantom_pair_tile(soa, sav, s0, e0, s1, e1, longitudinal_enabled, out_l, out_r);
-    } else if bucket == 1 {
-        step_phantom_pair_tile::<1>(soa, sav, s0, e0, s1, e1, 1, out_l, out_r);
-    } else {
-        step_phantom_pair_tile::<BASE_PHANTOM_LONG_VECS>(
-            soa, sav, s0, e0, s1, e1, bucket, out_l, out_r,
-        );
-    }
 }

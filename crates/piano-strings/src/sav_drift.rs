@@ -13,6 +13,7 @@ use crate::phantom::{
     convolve_transverse_slopes, BASE_PHANTOM_LONG_VECS, MAX_PHANTOM_LONG_VECS,
     MAX_PHANTOM_TRANSVERSE_MODES, MAX_PHANTOM_TRANSVERSE_VECS,
 };
+use crate::phantom_sparse::SPARSE_PHANTOM_LONG_VECS;
 #[allow(unused_imports)]
 pub(crate) use crate::sav_kernels::{
     apply_cayley_u, eval_p_vec, eval_p_vec_slice, load_nl_state_n, load_vh_state, load_vh_state_n,
@@ -35,6 +36,7 @@ pub(crate) struct SavBank {
 }
 
 impl SavBank {
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub fn build(
         sample_rate: f64,
@@ -44,11 +46,31 @@ impl SavBank {
         gamma_s: &[f64; TOTAL_STRINGS],
         beta_s: &[f64; TOTAL_STRINGS],
     ) -> Self {
+        Self::build_with_profile(sample_rate, voicing, specs, map, gamma_s, beta_s, false)
+    }
+
+    #[must_use]
+    pub fn build_with_profile(
+        sample_rate: f64,
+        voicing: &VoicingSpec,
+        specs: &[StringPhysicalParams; NUM_KEYS],
+        map: &ChoirMap,
+        gamma_s: &[f64; TOTAL_STRINGS],
+        beta_s: &[f64; TOTAL_STRINGS],
+        bass_sparse: bool,
+    ) -> Self {
         let mut str_specs = Vec::with_capacity(map.strings().len());
         let mut str_slopes = Vec::with_capacity(map.strings().len());
         for (s, e) in map.strings().iter().enumerate() {
-            let (sp, sl) =
-                SavStringSpec::build(e, sample_rate, voicing, specs, gamma_s[s], beta_s[s]);
+            let (sp, sl) = SavStringSpec::build_with_profile(
+                e,
+                sample_rate,
+                voicing,
+                specs,
+                gamma_s[s],
+                beta_s[s],
+                bass_sparse,
+            );
             str_specs.push(sp);
             str_slopes.push(sl);
         }
@@ -206,6 +228,12 @@ impl SavBank {
                     sp, self.ts, 1, &mut r_n, &mut uv, &vv, &mut uh, &vh, &mut ul, &vl, lambda_reg,
                 );
                 soa.u.as_f32x4_slice_mut()[lb] = ul[0];
+            } else if nl == SPARSE_PHANTOM_LONG_VECS {
+                let (mut ul, vl) = load_nl_state_n::<SPARSE_PHANTOM_LONG_VECS>(soa, lb, nl);
+                step_sav_phantom_spec_n::<SPARSE_PHANTOM_LONG_VECS>(
+                    sp, self.ts, nl, &mut r_n, &mut uv, &vv, &mut uh, &vh, &mut ul, &vl, lambda_reg,
+                );
+                soa.u.as_f32x4_slice_mut()[lb..lb + nl].copy_from_slice(&ul[..nl]);
             } else {
                 let (mut ul, vl) = load_nl_state_n::<BASE_PHANTOM_LONG_VECS>(soa, lb, nl);
                 step_sav_phantom_spec_n::<BASE_PHANTOM_LONG_VECS>(
