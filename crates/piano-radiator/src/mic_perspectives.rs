@@ -154,14 +154,14 @@ fn stereo_rigs(perspective: ListenerPerspective, b: &PianoBounds) -> (CapsuleRig
                 aim: normalize3([0.14, 0.95, -0.28]),
                 cardioid: 0.24,
                 r_ref: 1.90,
-                persp_trim: 0.96,
+                persp_trim: 1.32,
             },
             CapsuleRig {
                 pos: [b.x_center + 0.78, b.y_front - 1.35, b.z_board + 0.95],
                 aim: normalize3([-0.18, 0.94, -0.28]),
                 cardioid: 0.24,
                 r_ref: 1.90,
-                persp_trim: 0.96,
+                persp_trim: 1.32,
             },
         ),
         ListenerPerspective::BinauralHrtf => (

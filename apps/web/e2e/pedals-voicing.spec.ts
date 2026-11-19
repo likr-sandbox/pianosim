@@ -8,6 +8,7 @@ import {
   setupErrorMonitoring,
   unlockAudioEngine,
   waitAudioBlocks,
+  waitForPrepIdle,
   waitForSilence,
 } from './helpers/audio-diag';
 
@@ -205,9 +206,9 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     const initialOpen = await sampleDestinationAudio(page);
     expect(initialOpen.rms).toBeGreaterThan(0.002);
 
-    // Closed lid: wait >=192 audio blocks (~512ms) for PrepWorker + BlobStreamer (108 chunks) + 8ms crossfade
+    // Closed lid: wait for PrepWorker + BlobStreamer + 8ms crossfade
     await page.getByTestId('lid-closed').click();
-    await waitBlocks(192);
+    await waitForPrepIdle(page, 32);
     let closedLid = initialOpen;
     await expect.poll(async () => {
       closedLid = await restrikeE5();
@@ -220,7 +221,7 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     // Open lid: verify clickless crossfade + restored HF energy & brightness
     await page.getByTestId('lid-open').click();
-    await waitBlocks(192);
+    await waitForPrepIdle(page, 32);
     let openLid = closedLid;
     await expect.poll(async () => {
       openLid = await restrikeE5();
@@ -234,11 +235,14 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
 
     for (const p of ['perspective-close', 'perspective-hall', 'perspective-binaural', 'perspective-player']) {
       await page.getByTestId(p).click();
-      await waitBlocks(48);
-      const stats = await sampleDestinationAudio(page);
-      expect(stats.nonFiniteCount).toBe(0);
-      expect(stats.peak).toBeLessThanOrEqual(1.0);
-      expect(stats.rms).toBeGreaterThan(0.001);
+      await waitForPrepIdle(page, 16);
+      const crossfadeStats = await sampleDestinationAudio(page);
+      expect(crossfadeStats.nonFiniteCount).toBe(0);
+      expect(crossfadeStats.peak).toBeLessThanOrEqual(1.0);
+      const struckStats = await restrikeE5();
+      expect(struckStats.nonFiniteCount).toBe(0);
+      expect(struckStats.peak).toBeLessThanOrEqual(1.0);
+      expect(struckStats.rms).toBeGreaterThan(0.002);
     }
 
     await e5Key.dispatchEvent('pointerup', { buttons: 0 });

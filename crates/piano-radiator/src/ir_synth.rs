@@ -161,9 +161,13 @@ fn apply_channel_post(
         delay_scratch[0] = direct_val;
         delay_scratch[1..n_len].fill(0.0);
         let tilt_lo = Biquad::high_shelf(165.0, -3.0, 0.55, sample_rate);
-        let tilt_hi = Biquad::high_shelf(900.0, -16.8, 0.55, sample_rate);
-        let mid_dip = Biquad::peaking_eq(385.0, 1.22, -7.8, sample_rate);
-        Biquad::process_chain_in_place(&[tilt_lo, tilt_hi, mid_dip], &mut delay_scratch[..n_len]);
+        let tilt_hi = Biquad::high_shelf(920.0, -8.0, 0.65, sample_rate);
+        let tilt_air = Biquad::high_shelf(3_180.0, -16.7, 0.85, sample_rate);
+        let mid_dip = Biquad::peaking_eq(385.0, 1.24, -8.6, sample_rate);
+        Biquad::process_chain_in_place(
+            &[tilt_lo, tilt_hi, tilt_air, mid_dip],
+            &mut delay_scratch[..n_len],
+        );
         let mut i = 0;
         while i < n_len {
             ir[i] += delay_scratch[i];

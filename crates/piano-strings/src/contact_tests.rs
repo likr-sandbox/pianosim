@@ -367,3 +367,29 @@ fn orthogonal_vh_damper_kills_null_space_decay() {
     }
     assert!(failures.is_empty(), "failures={failures:?}");
 }
+
+#[test]
+fn monochord_una_corda_strike_weight_attenuates_force_without_canceling() {
+    let mut bank_full = StringBank::new(48_000.0, &VoicingSpec::default());
+    let mut bank_uc = bank_full.clone();
+    let mut drv_full = MockAction::new(48_000.0);
+    drv_full.strike(0, 1.8);
+    let mut drv_uc = MockAction::new(48_000.0);
+    drv_uc.weights[0] = [0.78, 0.0, 0.0];
+    drv_uc.strike(0, 1.8);
+    let (mut l1, mut r1, mut l2, mut r2) = (
+        vec![0.0_f32; 512],
+        vec![0.0_f32; 512],
+        vec![0.0_f32; 512],
+        vec![0.0_f32; 512],
+    );
+    bank_full.render_subblock_coupled(&mut drv_full, &mut l1, &mut r1);
+    bank_uc.render_subblock_coupled(&mut drv_uc, &mut l2, &mut r2);
+    let rms_full = (l1.iter().map(|x| x * x).sum::<f32>() / 512.0).sqrt();
+    let rms_uc = (l2.iter().map(|x| x * x).sum::<f32>() / 512.0).sqrt();
+    let ratio = rms_uc / rms_full.max(1e-12);
+    assert!(
+        (ratio - 0.78).abs() < 0.05,
+        "monochord Una Corda RMS ratio={ratio:.4} expected ~0.78"
+    );
+}

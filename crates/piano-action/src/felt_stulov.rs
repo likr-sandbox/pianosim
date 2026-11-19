@@ -76,7 +76,8 @@ fn compute_key_felt_spec(
 
     // Smooth monotonic rigid-felt baseline tuned so coupled string contact durations hit
     // A0 ~ 3.2 ms, A4 mf ~ 1.5 ms, and C8 mf ~ 0.14 ms.
-    let tau_c = 4.2e-3 * exp_f64(-2.85 * x - 0.70 * x * x * x);
+    let y_tr = ((x - 0.66) / 0.19).clamp(0.0, 1.0);
+    let tau_c = 4.2e-3 * exp_f64(-2.85 * x - 0.52 * x * x * x + 2.05 * y_tr * y_tr * (1.0 - y_tr));
     let c_hertz = 3.21 + 0.34 * (exponent_p - 2.2);
     let delta_mf = tau_c * MF_REF_SPEED_MPS / c_hertz;
 

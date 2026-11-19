@@ -16,7 +16,7 @@ use crate::subrate_upsample::{DECIM, PAD_LEFT};
 pub(crate) const MODAL_BODY_BLEND: f64 = 53.0;
 const RAD_TILT_REF_HZ: f64 = 160.0;
 const RAD_TILT_MIN_HZ: f64 = 48.0;
-const RAD_TILT_EXP: f64 = 1.05;
+const RAD_TILT_EXP: f64 = 0.945;
 
 /// Sample-rate-invariant radiation admittance tilt targeting `-3..-4 dB/oct`
 /// downward modal spectral slope without `< 90 Hz` bass sag.

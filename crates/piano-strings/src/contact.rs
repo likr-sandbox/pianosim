@@ -128,10 +128,11 @@ pub(crate) fn eval_hammer_choir(
     }
     let f_tot =
         driver.step_hammer_sample(key_idx, y_eff * inv_w, v_eff * inv_w, r_eff * inv_w * inv_w);
+    let inv_force = 1.0 / w_sum.max(1.0);
     let mut f_out = [0.0_f32; 3];
     if f_tot.is_finite() {
         for (c, out) in f_out[..choir_size].iter_mut().enumerate() {
-            *out = f_tot * w_eff[c] * inv_w;
+            *out = f_tot * w_eff[c] * inv_force;
         }
     }
     f_out
