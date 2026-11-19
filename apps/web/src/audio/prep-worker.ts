@@ -2,6 +2,9 @@
 
 import {
   BODY_CONCERT_GRAND,
+  encodeKnobValue,
+  PERF_KNOB_SPECS,
+  type PerfProfileConfig,
   type PianoPrepWasmExports,
   type PrepInboundMessage,
   type PrepOutboundMessage,
@@ -17,6 +20,12 @@ const REQUIRED_PREP_EXPORTS: ReadonlyArray<keyof PianoPrepWasmExports> = [
   'piano_prep_voicing',
   'piano_prep_voicing_ex',
   'piano_prep_out_ptr',
+  'piano_prep_set_perf_preset',
+  'piano_prep_set_stage4_profile',
+  'piano_perf_builder_new',
+  'piano_perf_builder_set',
+  'piano_perf_builder_destroy',
+  'piano_prep_set_perf_builder',
 ];
 
 function validatePrepExports(raw: WebAssembly.Exports): PianoPrepWasmExports {
@@ -31,6 +40,35 @@ function validatePrepExports(raw: WebAssembly.Exports): PianoPrepWasmExports {
     }
   }
   return raw as PianoPrepWasmExports;
+}
+
+function applyPerfConfigToPrep(
+  exports: PianoPrepWasmExports,
+  prep: number,
+  perfConfig: PerfProfileConfig,
+): void {
+  const builder = exports.piano_perf_builder_new(0) >>> 0;
+  if (builder === 0) {
+    throw new Error('piano_perf_builder_new returned null pointer in PrepWorker');
+  }
+  try {
+    for (const spec of PERF_KNOB_SPECS) {
+      const rc = exports.piano_perf_builder_set(
+        builder,
+        spec.knobId,
+        encodeKnobValue(spec.key, perfConfig),
+      );
+      if (rc !== 0) {
+        throw new Error(`piano_perf_builder_set(${spec.knobId}) failed with ${rc}`);
+      }
+    }
+    const res = exports.piano_prep_set_perf_builder(prep, builder);
+    if (res !== 0) {
+      throw new Error(`piano_prep_set_perf_builder failed with ${res}`);
+    }
+  } finally {
+    exports.piano_perf_builder_destroy(builder);
+  }
 }
 
 let exportsRef: PianoPrepWasmExports | null = null;
@@ -62,6 +100,9 @@ async function initPrepWasm(
     const ptr = exports.piano_prep_init(msg.sampleRate) >>> 0;
     if (ptr === 0) {
       throw new Error('piano_prep_init returned null pointer.');
+    }
+    if (msg.perfConfig) {
+      applyPerfConfigToPrep(exports, ptr, msg.perfConfig);
     }
     exportsRef = exports;
     prepPtr = ptr;
@@ -95,6 +136,11 @@ self.onmessage = (event: MessageEvent<PrepInboundMessage>) => {
   switch (msg.type) {
     case 'init':
       void initPrepWasm(msg);
+      break;
+    case 'setPerfProfile':
+      if (exportsRef && prepPtr !== 0) {
+        applyPerfConfigToPrep(exportsRef, prepPtr, msg.perfConfig);
+      }
       break;
     case 'prepSpace': {
       if (!exportsRef || prepPtr === 0 || !workletPort) {

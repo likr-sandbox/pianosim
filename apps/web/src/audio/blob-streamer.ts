@@ -1,5 +1,8 @@
 import {
   BODY_CONCERT_GRAND,
+  encodeKnobValue,
+  PERF_KNOB_SPECS,
+  type PerfProfileConfig,
   type PianoWasmExports,
   type PrepToWorkletMessage,
 } from './abi';
@@ -33,6 +36,8 @@ interface PendingVoicingBlob {
  * `WasmContext::staging` buffer without allocation inside the audio loop.
  */
 export class BlobStreamer {
+  private minSpaceSeq = 0;
+  private minVoicingSeq = 0;
   private lastSpaceSeq = -1;
   private lastVoicingSeq = -1;
   private committedSpaceSeq = 0;
@@ -42,11 +47,18 @@ export class BlobStreamer {
   private pendingVoicing: PendingVoicingBlob | null = null;
   private queuedVoicing: PendingVoicingBlob | null = null;
 
-  reset(): void {
-    this.lastSpaceSeq = -1;
-    this.lastVoicingSeq = -1;
-    this.committedSpaceSeq = 0;
-    this.committedVoicingSeq = 0;
+  reset(minSpaceSeq = 0, minVoicingSeq = 0): void {
+    this.minSpaceSeq = minSpaceSeq;
+    this.minVoicingSeq = minVoicingSeq;
+    this.lastSpaceSeq = minSpaceSeq;
+    this.lastVoicingSeq = minVoicingSeq;
+    if (minSpaceSeq === 0 && minVoicingSeq === 0) {
+      this.committedSpaceSeq = 0;
+      this.committedVoicingSeq = 0;
+    } else {
+      this.committedSpaceSeq = Math.max(this.committedSpaceSeq, minSpaceSeq);
+      this.committedVoicingSeq = Math.max(this.committedVoicingSeq, minVoicingSeq);
+    }
     this.pendingSpace = null;
     this.queuedSpace = null;
     this.pendingVoicing = null;
@@ -63,7 +75,7 @@ export class BlobStreamer {
 
   onPrepBlob(msg: PrepToWorkletMessage): void {
     if (msg.type === 'spaceBlob') {
-      if (msg.seq < this.lastSpaceSeq) return;
+      if (msg.seq <= this.minSpaceSeq || msg.seq < this.lastSpaceSeq) return;
       this.lastSpaceSeq = msg.seq;
       const entry: PendingSpaceBlob = {
         seq: msg.seq,
@@ -82,7 +94,7 @@ export class BlobStreamer {
       return;
     }
     if (msg.type === 'voicingBlob') {
-      if (msg.seq < this.lastVoicingSeq) return;
+      if (msg.seq <= this.minVoicingSeq || msg.seq < this.lastVoicingSeq) return;
       this.lastVoicingSeq = msg.seq;
       const entry: PendingVoicingBlob = {
         seq: msg.seq,
@@ -214,6 +226,7 @@ export function warmPrepInstallers(
   ctx: number,
   sr: number,
   syncMemoryView: () => Float32Array,
+  perfConfig?: PerfProfileConfig,
 ): void {
   const p = raw as Record<string, ((...a: number[]) => number) | undefined>;
   if (
@@ -227,6 +240,25 @@ export function warmPrepInstallers(
   const prep = p.piano_prep_init(sr) >>> 0;
   if (!prep) return;
   try {
+    if (
+      perfConfig &&
+      p.piano_perf_builder_new &&
+      p.piano_perf_builder_set &&
+      p.piano_perf_builder_destroy &&
+      p.piano_prep_set_perf_builder
+    ) {
+      const builder = p.piano_perf_builder_new(0) >>> 0;
+      if (builder) {
+        try {
+          for (const spec of PERF_KNOB_SPECS) {
+            p.piano_perf_builder_set(builder, spec.knobId, encodeKnobValue(spec.key, perfConfig));
+          }
+          p.piano_prep_set_perf_builder(prep, builder);
+        } finally {
+          p.piano_perf_builder_destroy(builder);
+        }
+      }
+    }
     for (const [h, d] of [[0.501, 1.01], [0.5, 1.0]]) {
       const vcLen = p.piano_prep_voicing_ex(prep, h, d, 1.0, 1.0, 440.0, 0, 0.0) >>> 0;
       const src = p.piano_prep_out_ptr(prep) >>> 0;

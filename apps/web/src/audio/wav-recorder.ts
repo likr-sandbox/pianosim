@@ -198,3 +198,83 @@ export function triggerWavDownload(blob: Blob, format: WavFormat): void {
   document.body.removeChild(a);
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+export type RecordingUpdateListener = (frames: number, durationSec: number, recording: boolean) => void;
+
+/** Coordinates Worklet recording lifecycle, drain settlement, and WAV export for WasmAudioHost. */
+export class HostRecordingBridge {
+  private readonly recorder = new WavRecorder();
+  private stopResolver: (() => void) | null = null;
+  private listener: RecordingUpdateListener | null = null;
+
+  setListener(cb: RecordingUpdateListener | null): void {
+    this.listener = cb;
+  }
+
+  start(sampleRate: number, notifyWorklet: () => void): void {
+    this.recorder.start(sampleRate);
+    notifyWorklet();
+    this.notify();
+  }
+
+  stop(isReady: boolean, notifyWorkletStop: () => void): Promise<void> {
+    if (!this.recorder.isRecording()) return Promise.resolve();
+    this.recorder.stop();
+    if (!isReady) {
+      this.notify();
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        this.stopResolver = null;
+        this.notify();
+        resolve();
+      };
+      this.stopResolver = finish;
+      notifyWorkletStop();
+      window.setTimeout(finish, 250);
+    });
+  }
+
+  onChunk(samples: ArrayBuffer, frames: number): void {
+    this.recorder.pushInterleavedChunk(new Float32Array(samples, 0, frames * 2));
+    this.notify();
+  }
+
+  onStopped(): void {
+    this.stopResolver?.();
+  }
+
+  dispose(): void {
+    this.stopResolver?.();
+    this.stopResolver = null;
+    this.recorder.clear();
+  }
+
+  isRecording(): boolean {
+    return this.recorder.isRecording();
+  }
+
+  getFrameCount(): number {
+    return this.recorder.getFrameCount();
+  }
+
+  getDurationSeconds(): number {
+    return this.recorder.getDurationSeconds();
+  }
+
+  exportBlob(format: WavFormat): Blob | null {
+    return this.recorder.createBlob(format);
+  }
+
+  private notify(): void {
+    this.listener?.(
+      this.recorder.getFrameCount(),
+      this.recorder.getDurationSeconds(),
+      this.recorder.isRecording(),
+    );
+  }
+}

@@ -248,7 +248,7 @@ export async function waitForSilence(
     .toBeLessThan(thresholdRms);
 }
 
-/** Polls until Prep Worker space/voicing blobs are committed in the AudioWorklet, then settles blocks. */
+/** Polls until Prep Worker space/voicing/perf blobs are committed in the AudioWorklet, then settles blocks. */
 export async function waitForPrepIdle(page: Page, settleBlocks = 16): Promise<void> {
   await expect
     .poll(
@@ -257,7 +257,8 @@ export async function waitForPrepIdle(page: Page, settleBlocks = 16): Promise<vo
           const d = window.__PIANO_DIAG__;
           return d
             ? d.appliedSpaceSeq >= d.requestedSpaceSeq &&
-                d.appliedVoicingSeq >= d.requestedVoicingSeq
+                d.appliedVoicingSeq >= d.requestedVoicingSeq &&
+                d.appliedPerfSeq >= d.requestedPerfSeq
             : false;
         }),
       { timeout: 10_000, intervals: [15] },

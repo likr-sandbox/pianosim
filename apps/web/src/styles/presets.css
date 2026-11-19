@@ -117,3 +117,95 @@
   color: var(--muted);
   min-height: 1.2em;
 }
+
+.perf-slot {
+  width: 100%;
+}
+
+.perf-panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.perf-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.perf-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.perf-controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.perf-advanced-summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--muted);
+  user-select: none;
+}
+
+.perf-knob-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px 14px;
+  margin-top: 10px;
+}
+
+.perf-knob-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.perf-knob-bool {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.perf-range-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.perf-range-wrap input[type='range'] {
+  flex: 1 1 auto;
+  accent-color: var(--accent);
+}
+
+.perf-knob-val {
+  font-size: 12px;
+  min-width: 48px;
+  text-align: right;
+  color: var(--text);
+}
+
+.perf-stage {
+  opacity: 0.7;
+  font-size: 11px;
+}
+
+.select-perf-knob {
+  background: var(--panel-card);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+}

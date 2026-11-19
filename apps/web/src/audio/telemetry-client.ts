@@ -1,6 +1,10 @@
 import {
+  DEFAULT_LIVE_PERF_PRESET,
+  PERF_PRESET_CONFIGS,
   SPL_CALIBRATION_OFFSET_DB,
   type EngineStatus,
+  type PerfPresetId,
+  type PerfProfileConfig,
   type PianoDiagnostics,
   type TelemetrySnapshot,
 } from './abi';
@@ -15,6 +19,10 @@ const EMPTY_TELEMETRY: TelemetrySnapshot = {
   p50Us: 0,
   p99Us: 0,
   overrunCount: 0,
+  strideOverruns: 0,
+  singleBlockOverruns: 0,
+  stallCount: 0,
+  timingSource: 'date',
   clipped: false,
   blockCount: 0,
 };
@@ -66,6 +74,11 @@ export class TelemetryClient {
   private workletNode: AudioWorkletNode | null = null;
   private telemetry: TelemetrySnapshot = EMPTY_TELEMETRY;
   private telemetryBlocksReceived = 0;
+  private initialPerfPreset: PerfPresetId = DEFAULT_LIVE_PERF_PRESET;
+  private perfPreset: PerfPresetId = DEFAULT_LIVE_PERF_PRESET;
+  private perfConfig: PerfProfileConfig = PERF_PRESET_CONFIGS[DEFAULT_LIVE_PERF_PRESET];
+  private requestedPerfSeq = 0;
+  private appliedPerfSeq = 0;
   private requestedSpaceSeq = 0;
   private appliedSpaceSeq = 0;
   private requestedVoicingSeq = 0;
@@ -95,6 +108,10 @@ export class TelemetryClient {
       workletNode: this.workletNode,
       telemetry: this.telemetry,
       telemetryBlocksReceived: this.telemetryBlocksReceived,
+      perfPreset: this.perfPreset,
+      perfConfig: this.perfConfig,
+      requestedPerfSeq: this.requestedPerfSeq,
+      appliedPerfSeq: this.appliedPerfSeq,
       requestedSpaceSeq: this.requestedSpaceSeq,
       appliedSpaceSeq: this.appliedSpaceSeq,
       requestedVoicingSeq: this.requestedVoicingSeq,
@@ -109,6 +126,35 @@ export class TelemetryClient {
       p99Us: this.p99Us,
       error: this.error,
     };
+  }
+
+  setInitialPerf(presetId: PerfPresetId, config: PerfProfileConfig): void {
+    this.initialPerfPreset = presetId;
+    this.perfPreset = presetId;
+    this.perfConfig = config;
+    this.emit();
+  }
+
+  markPerfRequested(seq: number, presetId: PerfPresetId, config: PerfProfileConfig): void {
+    this.perfPreset = presetId;
+    this.perfConfig = config;
+    if (seq > this.requestedPerfSeq) {
+      this.requestedPerfSeq = seq;
+    }
+    this.emit();
+  }
+
+  updatePerfApplied(seq: number, presetId: PerfPresetId, config: PerfProfileConfig): void {
+    let changed = false;
+    if (seq > this.appliedPerfSeq) {
+      this.appliedPerfSeq = seq;
+      this.perfPreset = presetId;
+      this.perfConfig = config;
+      changed = true;
+    }
+    if (changed) {
+      this.emit();
+    }
   }
 
   setStatus(status: EngineStatus, error: string | null = null): void {
@@ -234,6 +280,10 @@ export class TelemetryClient {
     this.workletNode = null;
     this.telemetry = EMPTY_TELEMETRY;
     this.telemetryBlocksReceived = 0;
+    this.perfPreset = this.initialPerfPreset;
+    this.perfConfig = PERF_PRESET_CONFIGS[this.initialPerfPreset];
+    this.requestedPerfSeq = 0;
+    this.appliedPerfSeq = 0;
     this.requestedSpaceSeq = 0;
     this.appliedSpaceSeq = 0;
     this.requestedVoicingSeq = 0;

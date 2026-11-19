@@ -17,17 +17,22 @@ import {
   UNISON_DETUNE_DEFAULT,
   WEB_AUDIO_SAMPLE_RATE,
   type BodyId,
+  type CachedWorkletState,
   type LidState,
   type ListenerPerspective,
   type PedalKind,
+  type PerfKnobKey,
+  type PerfPresetId,
+  type PerfProfileConfig,
   type PrepInboundMessage,
   type TemperamentId,
   type WavFormat,
   type WorkletInboundMessage,
 } from './abi';
+import { PerfSyncController, type PerfSyncHooks } from './perf-sync';
 import { bootstrapAudioPipeline } from './pipeline-bootstrap';
 import { TelemetryClient } from './telemetry-client';
-import { WavRecorder } from './wav-recorder';
+import { HostRecordingBridge, type RecordingUpdateListener } from './wav-recorder';
 
 const MAX_PENDING_BEFORE_READY = 256;
 
@@ -58,10 +63,7 @@ export class WasmAudioHost {
   private voicingInFlight = false;
   private pendingVoicingReq: Extract<PrepInboundMessage, { type: 'prepVoicing' }> | null = null;
 
-  private readonly wavRecorder = new WavRecorder();
-  private stopRecordingResolver: (() => void) | null = null;
-  private recUpdateListener: ((frames: number, durationSec: number, recording: boolean) => void) | null =
-    null;
+  private readonly recBridge = new HostRecordingBridge();
 
   private lastSpace: { body: BodyId; persp: ListenerPerspective; lid: LidState } = {
     body: BODY_CONCERT_GRAND,
@@ -76,9 +78,76 @@ export class WasmAudioHost {
     decayS: REVERB_DECAY_DEFAULT,
     mix: REVERB_MIX_DEFAULT,
   };
+  private readonly perfSync: PerfSyncController;
 
-  constructor(telemetry: TelemetryClient) {
+  constructor(telemetry: TelemetryClient, initialPerfPreset?: PerfPresetId) {
     this.telemetry = telemetry;
+    this.perfSync = new PerfSyncController(telemetry, initialPerfPreset);
+  }
+
+  getPerfPreset(): PerfPresetId {
+    return this.perfSync.getPreset();
+  }
+
+  getPerfConfig(): PerfProfileConfig {
+    return this.perfSync.getConfig();
+  }
+
+  setPerfPreset(presetId: PerfPresetId): void {
+    this.perfSync.setPreset(presetId, this.createPerfSyncHooks());
+  }
+
+  setPerfKnob<K extends PerfKnobKey>(key: K, value: PerfProfileConfig[K]): void {
+    this.perfSync.setKnob(key, value, this.createPerfSyncHooks());
+  }
+
+  applyPerfProfile(presetId: PerfPresetId, config: PerfProfileConfig): void {
+    this.perfSync.applyProfile(presetId, config, this.createPerfSyncHooks());
+  }
+
+  private getCachedState(): CachedWorkletState {
+    return {
+      bodyId: this.lastSpace.body,
+      perspective: this.lastSpace.persp,
+      lidState: this.lastSpace.lid,
+      reverbDecayS: this.lastReverb.decayS,
+      reverbMix: this.lastReverb.mix,
+      hammerHardness: this.lastHammer,
+      unisonDetune: this.lastTuning.unison,
+      stretchTuning: this.lastTuning.stretch,
+      stringLengthScale: this.lastTuning.scale,
+      a4FreqHz: this.lastTuning.a4,
+      temperamentId: this.lastTuning.temperamentId,
+      condition: this.lastTuning.condition,
+    };
+  }
+
+  private createPerfSyncHooks(): PerfSyncHooks {
+    return {
+      isReady: () => this.pipelineReady && this.workletNode !== null,
+      postToWorklet: (msg) => this.postToWorklet(msg),
+      postToPrep: (msg) => this.prepWorker?.postMessage(msg),
+      getCachedState: () => this.getCachedState(),
+      bumpMinSeqs: () => {
+        this.pendingSpaceReq = null;
+        this.pendingVoicingReq = null;
+        return { minSpaceSeq: ++this.spaceSeq, minVoicingSeq: ++this.voicingSeq };
+      },
+      refreshSpaceBlob: () => this.requestSpacePrep(this.lastSpace.body, this.lastSpace.persp, this.lastSpace.lid),
+      refreshNonDefaultVoicingIfNeeded: () => {
+        const t = this.lastTuning;
+        const isDefault =
+          t.unison === UNISON_DETUNE_DEFAULT &&
+          t.stretch === STRETCH_TUNING_DEFAULT &&
+          t.scale === STRING_SCALE_DEFAULT &&
+          t.a4 === A4_FREQ_DEFAULT &&
+          t.temperamentId === TEMPERAMENT_EQUAL &&
+          t.condition === CONDITION_DEFAULT;
+        if (!isDefault) {
+          this.requestVoicingPrep();
+        }
+      },
+    };
   }
 
   isReady(): boolean {
@@ -180,103 +249,78 @@ export class WasmAudioHost {
         temperamentId,
         condition,
       };
-      const seq = ++this.voicingSeq;
-      this.telemetry.markVoicingRequested(seq);
-      if (!this.prepWorker) {
-        this.postToWorklet({
-          type: 'setVoicing',
-          hammerHardness,
-          unisonDetune,
-          stretchTuning,
-          stringLengthScale,
-          a4FreqHz,
-          temperamentId,
-          condition,
-        });
-        this.telemetry.updatePrepApplied(0, seq);
-        return;
-      }
-      const req: Extract<PrepInboundMessage, { type: 'prepVoicing' }> = {
-        type: 'prepVoicing',
-        hammerHardness,
-        unisonDetune,
-        stretchTuning,
-        stringLengthScale,
-        a4FreqHz,
-        temperamentId,
-        condition,
-        seq,
-      };
-      if (this.voicingInFlight) {
-        this.pendingVoicingReq = req;
-      } else {
-        this.voicingInFlight = true;
-        this.prepWorker.postMessage(req);
-      }
+      this.requestVoicingPrep();
     });
   }
 
-  onRecordingUpdate(
-    cb: ((frames: number, durationSec: number, recording: boolean) => void) | null,
-  ): void {
-    this.recUpdateListener = cb;
+  private requestVoicingPrep(): void {
+    const t = this.lastTuning;
+    const seq = ++this.voicingSeq;
+    this.telemetry.markVoicingRequested(seq);
+    if (!this.prepWorker) {
+      this.postToWorklet({
+        type: 'setVoicing',
+        hammerHardness: this.lastHammer,
+        unisonDetune: t.unison,
+        stretchTuning: t.stretch,
+        stringLengthScale: t.scale,
+        a4FreqHz: t.a4,
+        temperamentId: t.temperamentId,
+        condition: t.condition,
+      });
+      this.telemetry.updatePrepApplied(0, seq);
+      return;
+    }
+    const req: Extract<PrepInboundMessage, { type: 'prepVoicing' }> = {
+      type: 'prepVoicing',
+      hammerHardness: this.lastHammer,
+      unisonDetune: t.unison,
+      stretchTuning: t.stretch,
+      stringLengthScale: t.scale,
+      a4FreqHz: t.a4,
+      temperamentId: t.temperamentId,
+      condition: t.condition,
+      seq,
+    };
+    if (this.voicingInFlight) {
+      this.pendingVoicingReq = req;
+    } else {
+      this.voicingInFlight = true;
+      this.prepWorker.postMessage(req);
+    }
+  }
+
+  onRecordingUpdate(cb: RecordingUpdateListener | null): void {
+    this.recBridge.setListener(cb);
   }
 
   startRecording(): void {
     const sr = this.audioContext?.sampleRate ?? WEB_AUDIO_SAMPLE_RATE;
-    this.wavRecorder.start(sr);
-    this.enqueueOrRun(() => {
-      this.postToWorklet({ type: 'setRecording', active: true });
+    this.recBridge.start(sr, () => {
+      this.enqueueOrRun(() => this.postToWorklet({ type: 'setRecording', active: true }));
     });
-    this.notifyRecUpdate();
   }
 
   stopRecording(): Promise<void> {
-    if (!this.wavRecorder.isRecording()) {
-      return Promise.resolve();
-    }
-    this.wavRecorder.stop();
-    if (!this.pipelineReady || !this.workletNode) {
-      this.notifyRecUpdate();
-      return Promise.resolve();
-    }
-    return new Promise((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        this.stopRecordingResolver = null;
-        this.notifyRecUpdate();
-        resolve();
-      };
-      this.stopRecordingResolver = finish;
+    return this.recBridge.stop(this.pipelineReady && this.workletNode !== null, () => {
       this.postToWorklet({ type: 'setRecording', active: false });
-      window.setTimeout(finish, 250);
     });
   }
 
   isRecording(): boolean {
-    return this.wavRecorder.isRecording();
+    return this.recBridge.isRecording();
   }
 
   getRecordingFrameCount(): number {
-    return this.wavRecorder.getFrameCount();
+    return this.recBridge.getFrameCount();
   }
 
   getRecordingDurationSeconds(): number {
-    return this.wavRecorder.getDurationSeconds();
+    return this.recBridge.getDurationSeconds();
   }
 
   exportWavBlob(format: WavFormat): Blob | null {
-    return this.wavRecorder.createBlob(format);
-  }
-
-  private notifyRecUpdate(): void {
-    this.recUpdateListener?.(
-      this.wavRecorder.getFrameCount(),
-      this.wavRecorder.getDurationSeconds(),
-      this.wavRecorder.isRecording(),
-    );
+    return this.recBridge.exportBlob(format);
   }
 
   setSpace(
@@ -294,27 +338,35 @@ export class WasmAudioHost {
         return;
       }
       this.lastSpace = { body: targetBody, persp: perspective, lid: lidState };
-      const seq = ++this.spaceSeq;
-      this.telemetry.markSpaceRequested(seq);
-      if (!this.prepWorker) {
-        this.postToWorklet({ type: 'setSpace', bodyId: targetBody, perspective, lidState });
-        this.telemetry.updatePrepApplied(seq, 0);
-        return;
-      }
-      const req: Extract<PrepInboundMessage, { type: 'prepSpace' }> = {
-        type: 'prepSpace',
-        bodyId: targetBody,
-        perspective,
-        lidState,
-        seq,
-      };
-      if (this.spaceInFlight) {
-        this.pendingSpaceReq = req;
-      } else {
-        this.spaceInFlight = true;
-        this.prepWorker.postMessage(req);
-      }
+      this.requestSpacePrep(targetBody, perspective, lidState);
     });
+  }
+
+  private requestSpacePrep(
+    bodyId: BodyId,
+    perspective: ListenerPerspective,
+    lidState: LidState,
+  ): void {
+    const seq = ++this.spaceSeq;
+    this.telemetry.markSpaceRequested(seq);
+    if (!this.prepWorker) {
+      this.postToWorklet({ type: 'setSpace', bodyId, perspective, lidState });
+      this.telemetry.updatePrepApplied(seq, 0);
+      return;
+    }
+    const req: Extract<PrepInboundMessage, { type: 'prepSpace' }> = {
+      type: 'prepSpace',
+      bodyId,
+      perspective,
+      lidState,
+      seq,
+    };
+    if (this.spaceInFlight) {
+      this.pendingSpaceReq = req;
+    } else {
+      this.spaceInFlight = true;
+      this.prepWorker.postMessage(req);
+    }
   }
 
   setReverb(decayS: number, mix: number): void {
@@ -341,11 +393,10 @@ export class WasmAudioHost {
     this.pendingSpaceReq = null;
     this.voicingSeq = 0;
     this.spaceSeq = 0;
+    this.perfSync.resetSeq();
     this.voicingInFlight = false;
     this.spaceInFlight = false;
-    this.stopRecordingResolver?.();
-    this.stopRecordingResolver = null;
-    this.wavRecorder.clear();
+    this.recBridge.dispose();
     if (this.prepWorker) {
       this.prepWorker.postMessage({ type: 'destroy' } satisfies PrepInboundMessage);
       this.prepWorker.terminate();
@@ -378,6 +429,8 @@ export class WasmAudioHost {
     try {
       const handles = await bootstrapAudioPipeline({
         telemetry: this.telemetry,
+        perfPreset: this.perfSync.getPreset(),
+        perfConfig: this.perfSync.getConfig(),
         onSpaceDone: () => {
           if (this.pendingSpaceReq && this.prepWorker) {
             const next = this.pendingSpaceReq;
@@ -397,18 +450,16 @@ export class WasmAudioHost {
           }
         },
         onRecChunk: (samples, frames) => {
-          const view = new Float32Array(samples, 0, frames * 2);
-          this.wavRecorder.pushInterleavedChunk(view);
+          this.recBridge.onChunk(samples, frames);
           if (this.workletNode) {
             this.workletNode.port.postMessage(
               { type: 'recReturn', samples } satisfies WorkletInboundMessage,
               [samples],
             );
           }
-          this.notifyRecUpdate();
         },
         onRecStopped: () => {
-          this.stopRecordingResolver?.();
+          this.recBridge.onStopped();
         },
       });
       this.audioContext = handles.audioContext;

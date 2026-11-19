@@ -1,6 +1,8 @@
 import {
   WEB_AUDIO_SAMPLE_RATE,
   WORKLET_PROCESSOR_NAME,
+  type PerfPresetId,
+  type PerfProfileConfig,
   type PrepInboundMessage,
   type PrepOutboundMessage,
   type WorkletInboundMessage,
@@ -23,6 +25,8 @@ export interface AudioPipelineHandles {
 
 export interface PipelineCallbacks {
   readonly telemetry: TelemetryClient;
+  readonly perfPreset: PerfPresetId;
+  readonly perfConfig: PerfProfileConfig;
   readonly onSpaceDone: () => void;
   readonly onVoicingDone: () => void;
   readonly onRecChunk?: (samples: ArrayBuffer, frames: number) => void;
@@ -167,6 +171,10 @@ function handshakeWorklet(
           p50Us: msg.p50Us,
           p99Us: msg.p99Us,
           overrunCount: msg.overrunCount,
+          strideOverruns: msg.strideOverruns,
+          singleBlockOverruns: msg.singleBlockOverruns,
+          stallCount: msg.stallCount,
+          timingSource: msg.timingSource,
           clipped: msg.clipped,
           blockCount: msg.blockCount,
         });
@@ -180,13 +188,23 @@ function handshakeWorklet(
         telemetry.updatePrepApplied(msg.spaceSeq, msg.voicingSeq);
         return;
       }
+      if (msg.type === 'perfApplied') {
+        telemetry.updatePerfApplied(msg.perfSeq, msg.presetId, msg.perfConfig);
+        return;
+      }
       if (msg.type === 'recStopped') {
         callbacks.onRecStopped?.();
       }
     };
 
     node.port.postMessage(
-      { type: 'init', wasmModule, prepPort } satisfies WorkletInboundMessage,
+      {
+        type: 'init',
+        wasmModule,
+        prepPort,
+        perfPreset: callbacks.perfPreset,
+        perfConfig: callbacks.perfConfig,
+      } satisfies WorkletInboundMessage,
       [prepPort],
     );
   });
@@ -245,7 +263,13 @@ function handshakePrepWorker(
     };
 
     worker.postMessage(
-      { type: 'init', wasmModule, sampleRate, workletPort } satisfies PrepInboundMessage,
+      {
+        type: 'init',
+        wasmModule,
+        sampleRate,
+        workletPort,
+        perfConfig: callbacks.perfConfig,
+      } satisfies PrepInboundMessage,
       [workletPort],
     );
   });

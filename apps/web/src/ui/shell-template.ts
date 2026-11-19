@@ -66,6 +66,9 @@ export const STUDIO_SHELL_HTML = `
     <!-- Acoustic Parameter Presets Bar -->
     <div id="preset-mount" class="preset-slot"></div>
 
+    <!-- Real-Time Performance Profile Panel -->
+    <div id="perf-mount" class="perf-slot"></div>
+
     <!-- Voicing & Space Panels -->
     <div class="studio-panels-row">
       <div id="voicing-mount" class="panel-slot"></div>
