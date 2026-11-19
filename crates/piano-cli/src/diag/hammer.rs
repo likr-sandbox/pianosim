@@ -8,13 +8,14 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use piano_engine::PianoEngine;
+use piano_engine::{PerfProfile, PianoEngine};
 use piano_spec::{
     build_scale_design, key_tuned_f0_hz, midi_to_key, u7_to_u16, EventKind, SampleEvent,
     VoicingSpec, NUM_KEYS,
 };
 
 use super::parse_flag_value;
+use crate::cli_profile::CliProfileArgs;
 
 const SR: f32 = 48_000.0;
 const SR64: f64 = 48_000.0;
@@ -50,6 +51,8 @@ struct HammerDiagOptions {
     midi: u8,
     vel_u7: u8,
     duration_ms: f64,
+    profile: PerfProfile,
+    profile_label: String,
 }
 
 fn parse_options(args: &[String]) -> Result<HammerDiagOptions, String> {
@@ -59,9 +62,13 @@ fn parse_options(args: &[String]) -> Result<HammerDiagOptions, String> {
     let mut midi = 60_u8;
     let mut vel_u7 = 64_u8;
     let mut duration_ms = 10.0_f64;
+    let mut cli_profile = CliProfileArgs::default();
 
     let mut i = 0;
     while i < args.len() {
+        if cli_profile.try_consume_arg(args, &mut i)? {
+            continue;
+        }
         if let Some(v) = parse_flag_value(args, &mut i, "--in-csv", usage)? {
             in_csv = Some(PathBuf::from(v));
         } else if let Some(v) = parse_flag_value(args, &mut i, "--midi", usage)? {
@@ -98,6 +105,8 @@ fn parse_options(args: &[String]) -> Result<HammerDiagOptions, String> {
         midi,
         vel_u7,
         duration_ms,
+        profile: cli_profile.resolve(),
+        profile_label: cli_profile.label(),
     })
 }
 
@@ -288,17 +297,22 @@ pub fn read_hammer_csv(path: &Path) -> Result<HammerForceTrace, String> {
         }
         rows.push((t_ms, f_host, sub));
     }
-    Ok(trace_from_rows(&rows, SR64))
+    Ok(trace_from_rows(&rows, SR64, SUB_STEPS))
 }
 
-fn trace_from_rows(rows: &[(f64, f32, [f32; SUB_STEPS])], sr: f64) -> HammerForceTrace {
+fn trace_from_rows(
+    rows: &[(f64, f32, [f32; SUB_STEPS])],
+    sr: f64,
+    oversample: usize,
+) -> HammerForceTrace {
+    let os = oversample.clamp(1, SUB_STEPS);
     let dt_host_ms = 1_000.0 / sr;
-    let dt_sub_ms = dt_host_ms / (SUB_STEPS as f64);
+    let dt_sub_ms = dt_host_ms / (os as f64);
     let mut host_samples = Vec::with_capacity(rows.len());
-    let mut sub_samples = Vec::with_capacity(rows.len() * SUB_STEPS);
+    let mut sub_samples = Vec::with_capacity(rows.len() * os);
     for &(t_ms, f_host, sub) in rows {
         host_samples.push((t_ms, f_host));
-        for (k, &f_sub) in sub.iter().enumerate() {
+        for (k, &f_sub) in sub[..os].iter().enumerate() {
             sub_samples.push((t_ms + (k as f64) * dt_sub_ms, f_sub));
         }
     }
@@ -317,12 +331,12 @@ pub fn cmd_diag_hammer(args: &[String]) -> Result<(), String> {
     if let Some(ref csv_path) = opts.in_csv {
         let trace = read_hammer_csv(csv_path)?;
         let m = analyze_hammer_force(&trace, tau_agg_ms);
-        print_hammer_report(opts.midi, opts.vel_u7, &m);
+        print_hammer_report(opts.midi, opts.vel_u7, "csv", &m);
         return Ok(());
     }
 
     let total_samples = ((opts.duration_ms * 1.0e-3 * SR64).round() as usize).max(1);
-    let mut engine = PianoEngine::new(SR);
+    let mut engine = PianoEngine::new_with_profile(SR, VoicingSpec::default(), opts.profile);
     let ev = [SampleEvent {
         sample_offset: 0,
         kind: EventKind::NoteOn {
@@ -349,8 +363,8 @@ pub fn cmd_diag_hammer(args: &[String]) -> Result<(), String> {
 
     if !any_nonzero {
         println!(
-            "diag-hammer [midi={}, vel={}, tau_agg={tau_agg_ms:.3} ms]: [PENDING Wave 2 hook `engine.last_hammer_forces(midi)` in `diag/hammer.rs`]",
-            opts.midi, opts.vel_u7
+            "diag-hammer [midi={}, vel={}, perf={}, tau_agg={tau_agg_ms:.3} ms]: [PENDING Wave 2 hook `engine.last_hammer_forces(midi)` in `diag/hammer.rs`]",
+            opts.midi, opts.vel_u7, opts.profile_label
         );
         return Ok(());
     }
@@ -359,15 +373,16 @@ pub fn cmd_diag_hammer(args: &[String]) -> Result<(), String> {
         write_hammer_csv(csv_path, &rows)?;
     }
     let trace_rows: Vec<_> = rows.iter().map(|&(_, t, fh, s)| (t, fh, s)).collect();
-    let trace = trace_from_rows(&trace_rows, SR64);
+    let os = usize::from(opts.profile.action_oversample);
+    let trace = trace_from_rows(&trace_rows, SR64, os);
     let m = analyze_hammer_force(&trace, tau_agg_ms);
-    print_hammer_report(opts.midi, opts.vel_u7, &m);
+    print_hammer_report(opts.midi, opts.vel_u7, &opts.profile_label, &m);
     Ok(())
 }
 
-fn print_hammer_report(midi: u8, vel_u7: u8, m: &HammerForceMetrics) {
+fn print_hammer_report(midi: u8, vel_u7: u8, profile_label: &str, m: &HammerForceMetrics) {
     println!(
-        "diag-hammer [midi={midi}, vel={vel_u7}]: peak={:.2} N, contact_sub={:.3} ms (host={:.3} ms, target 1.5..2.5 ms), impulse={:.5} N*s, agraffe_peaks={} (target 2..3), tau_agg={:.3} ms, mean_dt_peak={}",
+        "diag-hammer [midi={midi}, vel={vel_u7}, perf={profile_label}]: peak={:.2} N, contact_sub={:.3} ms (host={:.3} ms, target 1.5..2.5 ms), impulse={:.5} N*s, agraffe_peaks={} (target 2..3), tau_agg={:.3} ms, mean_dt_peak={}",
         m.peak_force_n,
         m.contact_duration_ms,
         m.host_contact_duration_ms,
@@ -441,5 +456,21 @@ mod tests {
             (dt - tau_agg_ms).abs() < 0.15,
             "inter-peak {dt:.3} ms should track tau_agg {tau_agg_ms:.3} ms"
         );
+    }
+
+    #[test]
+    fn trace_from_rows_slices_active_substeps_without_trailing_zero_troughs() {
+        let rows = [
+            (0.0, 10.0, [8.0, 9.0, 10.0, 13.0, 0.0, 0.0, 0.0, 0.0]),
+            (
+                1.0 / 48.0,
+                12.0,
+                [11.0, 12.0, 13.0, 12.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+        ];
+        let trace = trace_from_rows(&rows, 48_000.0, 4);
+        assert_eq!(trace.sub_samples.len(), 8);
+        assert!((trace.dt_sub_ms - (1_000.0 / (48_000.0 * 4.0))).abs() < 1e-12);
+        assert!(trace.sub_samples.iter().all(|&(_, f)| f > 0.0));
     }
 }

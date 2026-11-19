@@ -7,12 +7,13 @@
 use std::fs;
 use std::path::PathBuf;
 
-use piano_engine::PianoEngine;
+use piano_engine::{PerfProfile, PianoEngine};
 use piano_spec::{
     build_scale_design, key_tuned_f0_hz, midi_to_key, partial_frequency_hz, u7_to_u16, EventKind,
     PedalKind, SampleEvent, VoicingSpec,
 };
 
+use crate::cli_profile::CliProfileArgs;
 use crate::scenarios::spectral_utils::{
     decay_slope_db_per_s, hann_windowed_spectrum, mono_mix, slice_rms,
 };
@@ -50,6 +51,8 @@ pub struct BridgeComparisonReport {
 struct BridgeDiagOptions {
     out_dir: Option<PathBuf>,
     keys: Vec<(String, u8)>,
+    profile: PerfProfile,
+    profile_label: String,
 }
 
 fn parse_key_token(tok: &str) -> Result<(String, u8), String> {
@@ -68,9 +71,13 @@ fn parse_options(args: &[String]) -> Result<BridgeDiagOptions, String> {
     let usage = super::diag_usage();
     let mut out_dir: Option<PathBuf> = None;
     let mut keys = vec![(String::from("c2"), 36_u8), (String::from("c4"), 60_u8)];
+    let mut cli_profile = CliProfileArgs::default();
 
     let mut i = 0;
     while i < args.len() {
+        if cli_profile.try_consume_arg(args, &mut i)? {
+            continue;
+        }
         if let Some(v) = parse_flag_value(args, &mut i, "--keys", usage)? {
             let mut parsed = Vec::new();
             for tok in v.split(',') {
@@ -91,7 +98,12 @@ fn parse_options(args: &[String]) -> Result<BridgeDiagOptions, String> {
             return Err(String::from(usage));
         }
     }
-    Ok(BridgeDiagOptions { out_dir, keys })
+    Ok(BridgeDiagOptions {
+        out_dir,
+        keys,
+        profile: cli_profile.resolve(),
+        profile_label: cli_profile.label(),
+    })
 }
 
 /// Measures prompt (`0.05..0.45 s`) vs late (`1.40..3.60 s`) decay slopes and initial break level.
@@ -230,8 +242,9 @@ fn render_note_stereo(
     sustain_u16: u16,
     secs: f64,
     fixed_end: bool,
+    profile: PerfProfile,
 ) -> (Vec<f32>, Vec<f32>) {
-    let mut engine = PianoEngine::new(SR);
+    let mut engine = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
     engine.set_bridge_fixed_end(fixed_end);
 
     let total = (secs * SR64).round() as usize;
@@ -271,7 +284,10 @@ pub fn cmd_diag_bridge(args: &[String]) -> Result<(), String> {
     }
 
     let vel_mf = u7_to_u16(64);
-    println!("diag-bridge [sr={SR_U32}, vel_mf={vel_mf}, duration=3.8s]");
+    println!(
+        "diag-bridge [sr={SR_U32}, vel_mf={vel_mf}, duration=3.8s, perf={}]",
+        opts.profile_label
+    );
     let mut c2_wdf_buf: Option<Vec<f32>> = None;
     let mut c2_fixed_buf: Option<Vec<f32>> = None;
     let mut c4_dry_wdf_buf: Option<Vec<f32>> = None;
@@ -280,8 +296,8 @@ pub fn cmd_diag_bridge(args: &[String]) -> Result<(), String> {
     let mut c4_sus_fixed_buf: Option<Vec<f32>> = None;
 
     for (slug, midi) in &opts.keys {
-        let (wl, wr) = render_note_stereo(*midi, vel_mf, 0, 3.8, false);
-        let (fl, fr) = render_note_stereo(*midi, vel_mf, 0, 3.8, true);
+        let (wl, wr) = render_note_stereo(*midi, vel_mf, 0, 3.8, false, opts.profile);
+        let (fl, fr) = render_note_stereo(*midi, vel_mf, 0, 3.8, true, opts.profile);
         if let Some(ref dir) = opts.out_dir {
             write_stereo_f32_wav(&dir.join(format!("{slug}_wdf.wav")), SR_U32, &wl, &wr)?;
             write_stereo_f32_wav(&dir.join(format!("{slug}_fixed.wav")), SR_U32, &fl, &fr)?;
@@ -304,8 +320,8 @@ pub fn cmd_diag_bridge(args: &[String]) -> Result<(), String> {
             c2_wdf_buf = Some(wdf_mono);
             c2_fixed_buf = Some(fixed_mono);
         } else if *midi == 60 {
-            let (sl, sr_buf) = render_note_stereo(60, vel_mf, u16::MAX, 3.8, false);
-            let (sfl, sfr_buf) = render_note_stereo(60, vel_mf, u16::MAX, 3.8, true);
+            let (sl, sr_buf) = render_note_stereo(60, vel_mf, u16::MAX, 3.8, false, opts.profile);
+            let (sfl, sfr_buf) = render_note_stereo(60, vel_mf, u16::MAX, 3.8, true, opts.profile);
             if let Some(ref dir) = opts.out_dir {
                 write_stereo_f32_wav(&dir.join("c4_sus_wdf.wav"), SR_U32, &sl, &sr_buf)?;
                 write_stereo_f32_wav(&dir.join("c4_sus_fixed.wav"), SR_U32, &sfl, &sfr_buf)?;
