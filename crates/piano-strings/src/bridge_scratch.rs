@@ -1,5 +1,6 @@
 //! Persistent Stage 2 <-> Stage 3 chunk scratch buffers and per-sample prefix WDF orchestrator.
 
+use piano_simd::F32x4;
 use piano_spec::{DAMPED_KEYS, NUM_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_kernels::step_uncoupled_prefixes_fast;
@@ -21,6 +22,8 @@ pub(crate) struct BridgeScratch {
     pub b_waves: [f32; TOTAL_STRINGS],
     pub zone_out: [f32; 8],
     pub dup_zone: [f32; 8],
+    pub acc_th: [F32x4; SUB],
+    pub acc_l: [F32x4; SUB],
 }
 
 impl BridgeScratch {
@@ -47,18 +50,22 @@ impl BridgeScratch {
                 symp_mask: [0.0; TOTAL_STRINGS],
                 symp_y_lim: [0.0; TOTAL_STRINGS],
                 symp_has_gains: [false; TOTAL_STRINGS],
+                symp_dirty_strs: [0; TOTAL_STRINGS],
                 zone_tail_n: [[0.0; 8]; SUB],
                 n_a: 0,
                 n_sl: 0,
                 n_sav: 0,
                 n_sav_cd: 0,
                 n_coupled_strs: 0,
+                n_symp_dirty: 0,
             },
             peel_buf: [[0.0_f32; SUB]; MAX_PEEL_SLOTS],
             peel_slot: [u8::MAX; DAMPED_KEYS],
             b_waves: [0.0_f32; TOTAL_STRINGS],
             zone_out: [0.0_f32; 8],
             dup_zone: [0.0_f32; 8],
+            acc_th: [F32x4::zero(); SUB],
+            acc_l: [F32x4::zero(); SUB],
         })
     }
 }
@@ -128,11 +135,14 @@ pub(crate) fn step_all_strings_prefix_wdf(
             let alpha_post = plan.key_alpha_post[k];
             for s_idx in r.keys[k].string_range.clone() {
                 if r.ports.may_be_nonzero[s_idx] {
+                    let hf = plan.hammer_forces[s_idx];
+                    let sync_damper = hf.fd_v != 0.0 || hf.fd_h != 0.0;
                     refresh_prefix_ports_with_tail_bp(
                         r.bridge_ports,
                         r.ports,
                         s_idx,
                         r.strings[s_idx].has_damper,
+                        sync_damper,
                         alpha_post,
                         &plan.tail_partial_ports[s_idx],
                     );

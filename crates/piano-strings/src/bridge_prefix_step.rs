@@ -135,6 +135,13 @@ pub(crate) fn step_coupled_prefixes(
                 if r.sav_on && k < r.sav_max_key_idx && r.sav.string_n_vh(s_idx) > 0 {
                     plan.sav_strings[plan.n_sav] = s_idx as u8;
                     plan.n_sav += 1;
+                    if entry.has_damper
+                        && (!plan.key_has_hammer[k] || plan.key_has_mid_ev[k])
+                        && (plan.str_coupled[s_idx] || plan.symp_has_gains[s_idx])
+                    {
+                        plan.sav_coupled_damp_strs[plan.n_sav_cd] = s_idx as u8;
+                        plan.n_sav_cd += 1;
+                    }
                 }
             }
             let nz_now = r.ports.may_be_nonzero[s_idx]
@@ -199,6 +206,7 @@ pub(crate) fn step_coupled_prefixes(
                     r.ports.v_dh[s_idx] = alpha * (vdh_br_raw + tp.vdh_raw);
                 }
                 r.ports.ports_synced[s_idx] = true;
+                r.ports.damp_ports_synced[s_idx] = true;
                 (acc_c, acc_br)
             }
         } else if cat == KeyCat::DampedSymp
@@ -237,6 +245,7 @@ pub(crate) fn step_coupled_prefixes(
                 r.ports.y_dh[s_idx] = ydh;
                 r.ports.v_dh[s_idx] = alpha * vdh_raw;
                 r.ports.ports_synced[s_idx] = true;
+                r.ports.damp_ports_synced[s_idx] = true;
                 (acc_c, acc_br)
             } else {
                 plan.symp_has_gains[s_idx] = false;
@@ -296,6 +305,7 @@ pub(crate) fn step_coupled_prefixes(
                         r.ports.y_dh[s_idx] = ydh;
                         r.ports.v_dh[s_idx] = alpha * vdh_raw;
                         r.ports.ports_synced[s_idx] = true;
+                        r.ports.damp_ports_synced[s_idx] = true;
                         (acc_c, acc_br)
                     }
                 } else if f_peel != 0.0 {
@@ -319,6 +329,7 @@ pub(crate) fn step_coupled_prefixes(
                     r.ports.y_dh[s_idx] = ydh;
                     r.ports.v_dh[s_idx] = alpha * vdh_raw;
                     r.ports.ports_synced[s_idx] = true;
+                    r.ports.damp_ports_synced[s_idx] = true;
                     (acc_c, acc_br)
                 } else {
                     let (acc_c, acc_br) = step_string_prefix_wdf_br(

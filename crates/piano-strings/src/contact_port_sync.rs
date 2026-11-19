@@ -85,6 +85,7 @@ pub(crate) fn refresh_string_ports(
     (ports.y_dv[s_idx], ports.v_dv[s_idx]) = if d { (ydv, alpha * vdv) } else { (0.0, 0.0) };
     (ports.y_dh[s_idx], ports.v_dh[s_idx]) = if d { (ydh, alpha * vdh) } else { (0.0, 0.0) };
     ports.ports_synced[s_idx] = true;
+    ports.damp_ports_synced[s_idx] = true;
 }
 
 #[inline]
@@ -202,6 +203,7 @@ fn refresh_string_ports_bp_inner<const HAS_ALPHA: bool>(
         (0.0, 0.0)
     };
     ports.ports_synced[s_idx] = true;
+    ports.damp_ports_synced[s_idx] = true;
 }
 
 #[inline]
@@ -210,20 +212,29 @@ pub(crate) fn refresh_prefix_ports_with_tail_bp(
     ports: &mut ContactPorts,
     s_idx: usize,
     has_damper: bool,
+    sync_damper: bool,
     alpha_w: f32,
     tail: &TailPortPartial,
 ) {
-    if alpha_w > 0.0 {
-        refresh_prefix_ports_with_tail_bp_inner::<true>(
+    let sync_d = has_damper && sync_damper;
+    match (alpha_w > 0.0, sync_d) {
+        (true, true) => refresh_prefix_ports_with_tail_bp_inner::<true, true>(
             bp, ports, s_idx, has_damper, alpha_w, tail,
-        );
-    } else {
-        refresh_prefix_ports_with_tail_bp_inner::<false>(bp, ports, s_idx, has_damper, 0.0, tail);
+        ),
+        (true, false) => refresh_prefix_ports_with_tail_bp_inner::<true, false>(
+            bp, ports, s_idx, has_damper, alpha_w, tail,
+        ),
+        (false, true) => refresh_prefix_ports_with_tail_bp_inner::<false, true>(
+            bp, ports, s_idx, has_damper, 0.0, tail,
+        ),
+        (false, false) => refresh_prefix_ports_with_tail_bp_inner::<false, false>(
+            bp, ports, s_idx, has_damper, 0.0, tail,
+        ),
     }
 }
 
 #[inline]
-fn refresh_prefix_ports_with_tail_bp_inner<const HAS_ALPHA: bool>(
+fn refresh_prefix_ports_with_tail_bp_inner<const HAS_ALPHA: bool, const SYNC_DAMPER: bool>(
     bp: &BridgePorts,
     ports: &mut ContactPorts,
     s_idx: usize,
@@ -258,7 +269,7 @@ fn refresh_prefix_ports_with_tail_bp_inner<const HAS_ALPHA: bool>(
             };
             ayh = st.v.mul_add(ah_eff, ayh);
             avh = st.u.mul_add(bh_eff, avh);
-            if has_damper {
+            if SYNC_DAMPER {
                 ayd = st.v.mul_add(ad[i], ayd);
                 avd = st.u.mul_add(bd[i], avd);
             }
@@ -275,16 +286,17 @@ fn refresh_prefix_ports_with_tail_bp_inner<const HAS_ALPHA: bool>(
     let alpha = ports.alpha_vel[s_idx];
     ports.y_h[s_idx] = (yh_v + tail.yhv) + (yh_h + tail.yhh);
     ports.v_h[s_idx] = alpha * ((vh_v + tail.vhv_raw) + (vh_h + tail.vhh_raw));
-    (ports.y_dv[s_idx], ports.v_dv[s_idx]) = if has_damper {
-        (ydv + tail.ydv, alpha * (vdv + tail.vdv_raw))
+    if SYNC_DAMPER {
+        (ports.y_dv[s_idx], ports.v_dv[s_idx]) = (ydv + tail.ydv, alpha * (vdv + tail.vdv_raw));
+        (ports.y_dh[s_idx], ports.v_dh[s_idx]) = (ydh + tail.ydh, alpha * (vdh + tail.vdh_raw));
+        ports.damp_ports_synced[s_idx] = true;
+    } else if has_damper {
+        ports.damp_ports_synced[s_idx] = false;
     } else {
-        (0.0, 0.0)
-    };
-    (ports.y_dh[s_idx], ports.v_dh[s_idx]) = if has_damper {
-        (ydh + tail.ydh, alpha * (vdh + tail.vdh_raw))
-    } else {
-        (0.0, 0.0)
-    };
+        (ports.y_dv[s_idx], ports.v_dv[s_idx]) = (0.0, 0.0);
+        (ports.y_dh[s_idx], ports.v_dh[s_idx]) = (0.0, 0.0);
+        ports.damp_ports_synced[s_idx] = true;
+    }
     ports.ports_synced[s_idx] = true;
 }
 
@@ -311,6 +323,7 @@ pub(crate) fn refresh_prefix_damp_ports_bp(
     (ports.y_dv[s_idx], ports.v_dv[s_idx]) = (ydv, alpha * vdv);
     (ports.y_dh[s_idx], ports.v_dh[s_idx]) = (ydh, alpha * vdh);
     ports.ports_synced[s_idx] = true;
+    ports.damp_ports_synced[s_idx] = true;
 }
 
 #[inline]

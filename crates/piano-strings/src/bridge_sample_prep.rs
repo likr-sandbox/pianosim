@@ -282,13 +282,25 @@ pub(crate) fn prepare_sample_tails_and_hammers(
         let key = &r.keys[k];
         let sr = key.string_range.clone();
         let step_long_here = plan.key_has_hammer[k] || plan.key_has_mid_ev[k];
+        if plan.key_has_mid_ev[k] {
+            plan.key_has_hammer[k] = driver.is_hammer_active(k);
+            r.ports.y_clear_scratch[k][t] = if key.has_damper {
+                driver.step_key_clearance(k)
+            } else {
+                f32::MAX
+            };
+        }
+        let yc = r.ports.y_clear_scratch[k][t];
+        let damp_on = key.has_damper && yc < DAMPER_CLEAR_THRESHOLD_M;
         let alpha_sync = if plan.key_has_hammer[k] {
             (driver.hammer_compression_norm(k) / 0.65).clamp(0.0, 1.0)
         } else {
             0.0
         };
         for s_idx in sr.clone() {
-            if r.ports.may_be_nonzero[s_idx] && !r.ports.ports_synced[s_idx] {
+            if r.ports.may_be_nonzero[s_idx]
+                && (!r.ports.ports_synced[s_idx] || (damp_on && !r.ports.damp_ports_synced[s_idx]))
+            {
                 refresh_string_ports_bp(
                     r.bridge_ports,
                     r.ports,
@@ -297,14 +309,6 @@ pub(crate) fn prepare_sample_tails_and_hammers(
                     alpha_sync,
                 );
             }
-        }
-        if plan.key_has_mid_ev[k] {
-            plan.key_has_hammer[k] = driver.is_hammer_active(k);
-            r.ports.y_clear_scratch[k][t] = if key.has_damper {
-                driver.step_key_clearance(k)
-            } else {
-                f32::MAX
-            };
         }
         let has_hammer = plan.key_has_hammer[k];
         let alpha_inj = if has_hammer {
@@ -330,8 +334,6 @@ pub(crate) fn prepare_sample_tails_and_hammers(
             0.0
         };
         plan.key_alpha_post[k] = alpha_post;
-        let yc = r.ports.y_clear_scratch[k][t];
-        let damp_on = key.has_damper && yc < DAMPER_CLEAR_THRESHOLD_M;
         for (c, s_idx) in sr.enumerate() {
             let fh = fh_arr[c];
             let (fd_v, fd_h) = if damp_on && r.ports.may_be_nonzero[s_idx] {
@@ -383,7 +385,7 @@ pub(crate) fn prepare_sample_tails_and_hammers(
             };
             let (tv, th) = if has_hammer {
                 let tl = &mut r.bridge_ports.tl_soa;
-                let hd = key.has_damper;
+                let hd = key.has_damper && (fd_v != 0.0 || fd_h != 0.0);
                 let (tv, yhv, vhv_raw, ydv, vdv_raw) = step_tail_pol_tl_with_ports(
                     tl, r.ports, tl_v, v_tail, fh, alpha_inj, alpha_post, fd_v, hd,
                 );

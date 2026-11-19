@@ -91,12 +91,14 @@ pub(crate) struct ChunkPlan {
     pub symp_mask: [f32; TOTAL_STRINGS],
     pub symp_y_lim: [f32; TOTAL_STRINGS],
     pub symp_has_gains: [bool; TOTAL_STRINGS],
+    pub symp_dirty_strs: [u8; TOTAL_STRINGS],
     pub zone_tail_n: [[f32; 8]; SUB],
     pub n_a: usize,
     pub n_sl: usize,
     pub n_sav: usize,
     pub n_sav_cd: usize,
     pub n_coupled_strs: usize,
+    pub n_symp_dirty: usize,
 }
 
 impl ChunkPlan {
@@ -152,19 +154,17 @@ pub(crate) fn sav_long_vecs(r: &BridgeRun<'_>, s_idx: usize) -> usize {
 pub(crate) fn step_uncoupled_tails(
     r: &mut BridgeRun<'_>,
     plan: &mut ChunkPlan,
+    acc_th: &mut [F32x4; SUB],
+    acc_l: &mut [F32x4; SUB],
     sub_l: &mut [f32],
     sub_r: &mut [f32],
 ) {
     let sub = sub_l.len();
-    let mut acc_th = [F32x4::zero(); SUB];
-    let mut acc_l = [F32x4::zero(); SUB];
 
     for k in 0..NUM_KEYS {
-        let (step_transverse, is_passive) = match plan.key_cat[k] {
-            KeyCat::Uncoupled | KeyCat::DampedSymp => (true, true),
-            KeyCat::ActiveContact if !plan.key_has_hammer[k] && !plan.key_has_mid_ev[k] => {
-                (false, false)
-            }
+        let step_transverse = match plan.key_cat[k] {
+            KeyCat::Uncoupled | KeyCat::DampedSymp => true,
+            KeyCat::ActiveContact if !plan.key_has_hammer[k] && !plan.key_has_mid_ev[k] => false,
             KeyCat::ActiveContact => continue,
         };
         let kt = r.bridge_ports.key_tails[k];
@@ -174,13 +174,15 @@ pub(crate) fn step_uncoupled_tails(
             continue;
         }
         let (th_e, l_e) = (usize::from(kt.th_end), usize::from(kt.l_end));
-        acc_th[..sub].fill(F32x4::zero());
         let has_l = th_e < l_e;
-        if has_l {
-            acc_l[..sub].fill(F32x4::zero());
-        }
         if !step_transverse && !has_l {
             continue;
+        }
+        if step_transverse {
+            acc_th[..sub].fill(F32x4::zero());
+        }
+        if has_l {
+            acc_l[..sub].fill(F32x4::zero());
         }
         for s_idx in sr {
             if !plan.was_tail_nz[s_idx] {
@@ -193,7 +195,7 @@ pub(crate) fn step_uncoupled_tails(
             if step_transverse {
                 let mut nv = usize::from(r.ports.tl_v_active[s_idx]).min(tl_v.len());
                 let mut nh = usize::from(r.ports.tl_h_active[s_idx]).min(tl_h.len());
-                if is_passive {
+                if !r.ports.struck_active[s_idx] {
                     nv = nv.min(usize::from(r.passive_v_vecs[s_idx]));
                     nh = nh.min(usize::from(r.passive_h_vecs[s_idx]));
                 }
@@ -221,7 +223,11 @@ pub(crate) fn step_uncoupled_tails(
         let zw = r.zone_weights[r.keys[k].string_range.start];
         let (nt, nl, use_l) = (kt.tail_n_trans, kt.tail_n_long, has_l && r.long_on);
         for t in 0..sub {
-            let th_v = acc_th[t].reduce_sum();
+            let th_v = if step_transverse {
+                acc_th[t].reduce_sum()
+            } else {
+                0.0
+            };
             let fl = if use_l { acc_l[t].reduce_sum() } else { 0.0 };
             let audio = th_v + fl;
             sub_l[t] += audio * kt.pan_l;

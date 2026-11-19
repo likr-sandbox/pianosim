@@ -364,3 +364,27 @@ fn p0_2_sav_coupled_damp_updates_and_presets_render_finite_audio() {
         assert!(energy > 1.0e-12, "silent output under {perf:?}");
     }
 }
+
+#[test]
+fn open_damper_strike_skips_damper_tail_loads_then_syncs_cleanly_on_damper_close() {
+    let sr = 48_000.0;
+    let voicing = VoicingSpec::default();
+    let mut bank = StringBank::new_bridge_coupled_with_profile(sr, &voicing, &PerfProfile::full());
+    let mut drv = TestAction::new(0.004, false);
+    drv.strike(39, 22.0, 40);
+    let mut br = SimpleBridge::new(*bank.bridge_port_resistances());
+    let (mut l, mut r) = ([0.0_f32; 128], [0.0_f32; 128]);
+    // Open-damper strike: fd_v == 0, fd_h == 0 -> damp_ports_synced becomes false.
+    bank.render_subblock_bridge_coupled(&mut drv, &mut br, &mut l, &mut r);
+    let sr_c4 = bank.choir_map().key(39).unwrap().string_range.clone();
+    assert!(sr_c4.clone().all(|s| bank.ports.ports_synced[s]));
+    assert!(sr_c4.clone().all(|s| !bank.ports.damp_ports_synced[s]));
+
+    // Close damper on subsequent chunk: damp_ports_synced resyncs cleanly with finite damped output.
+    drv.clear_m[39] = -2.0e-5;
+    for _ in 0..8 {
+        bank.render_subblock_bridge_coupled(&mut drv, &mut br, &mut l, &mut r);
+        assert!(l.iter().chain(r.iter()).all(|x| x.is_finite()));
+    }
+    assert!(sr_c4.clone().all(|s| bank.ports.damp_ports_synced[s]));
+}

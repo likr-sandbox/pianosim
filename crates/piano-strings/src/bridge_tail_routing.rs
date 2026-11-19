@@ -277,7 +277,11 @@ pub(crate) fn route_damped_symp_key(
                     plan.symp_gh[s_idx] = gh;
                     plan.symp_mask[s_idx] = 1.0;
                     plan.symp_y_lim[s_idx] = y_exit;
-                    plan.symp_has_gains[s_idx] = true;
+                    if !plan.symp_has_gains[s_idx] {
+                        plan.symp_has_gains[s_idx] = true;
+                        plan.symp_dirty_strs[plan.n_symp_dirty] = s_idx as u8;
+                        plan.n_symp_dirty += 1;
+                    }
                     routed_fast = true;
                 }
             }

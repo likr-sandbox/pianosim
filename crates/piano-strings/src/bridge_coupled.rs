@@ -18,7 +18,7 @@ use crate::bridge_tails::{
 };
 use crate::choir_map::ChoirMap;
 use crate::contact::KeyActionDriver;
-use crate::contact_ports::{ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
+use crate::contact_ports::{refresh_string_ports_bp, ContactPorts, DAMPER_CLEAR_THRESHOLD_M};
 use crate::longitudinal::LongitudinalBank;
 use crate::sav_drift::SavBank;
 
@@ -79,6 +79,8 @@ pub(crate) fn render_subblock_bridge_coupled_core(
     let b_waves = &mut scratch.b_waves;
     let zone_out = &mut scratch.zone_out;
     let dup_zone = &mut scratch.dup_zone;
+    let acc_th = &mut scratch.acc_th;
+    let acc_l = &mut scratch.acc_l;
     let mut chunk_base = 0usize;
 
     while chunk_base < total {
@@ -92,21 +94,27 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         plan.key_cat.fill(KeyCat::Uncoupled);
         plan.key_has_hammer.fill(false);
         plan.key_has_mid_ev.fill(false);
-        plan.str_coupled.fill(false);
-        plan.symp_has_gains.fill(false);
-        plan.symp_gv.fill(0.0);
-        plan.symp_gh.fill(0.0);
-        plan.symp_mask.fill(0.0);
-        plan.symp_y_lim.fill(0.0);
+        for &s_u8 in &plan.coupled_strs[..plan.n_coupled_strs] {
+            plan.str_coupled[usize::from(s_u8)] = false;
+        }
+        for &s_u8 in &plan.symp_dirty_strs[..plan.n_symp_dirty] {
+            let s = usize::from(s_u8);
+            plan.symp_has_gains[s] = false;
+            plan.symp_gv[s] = 0.0;
+            plan.symp_gh[s] = 0.0;
+            plan.symp_mask[s] = 0.0;
+            plan.symp_y_lim[s] = 0.0;
+        }
         peel_slot.fill(u8::MAX);
         let mut n_peel_slots = 0usize;
         (
             plan.n_a,
             plan.n_coupled_strs,
+            plan.n_symp_dirty,
             plan.n_sl,
             plan.n_sav,
             plan.n_sav_cd,
-        ) = (0, 0, 0, 0, 0);
+        ) = (0, 0, 0, 0, 0, 0);
         plan.zone_tail_n[..sub].fill([0.0; 8]);
 
         for (k, key) in r.keys.iter().enumerate() {
@@ -189,6 +197,17 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                     }
                 }
             }
+            if !hammer
+                && any_nz
+                && key.has_damper
+                && (mid_ev || has_peel || min_c < DAMPER_CLEAR_THRESHOLD_M)
+            {
+                for s_idx in sr.clone() {
+                    if r.ports.may_be_nonzero[s_idx] && !r.ports.damp_ports_synced[s_idx] {
+                        refresh_string_ports_bp(r.bridge_ports, r.ports, s_idx, true, 0.0);
+                    }
+                }
+            }
             if mid_ev || hammer {
                 plan.key_cat[k] = KeyCat::ActiveContact;
                 plan.key_has_hammer[k] = hammer;
@@ -257,7 +276,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
             }
         }
 
-        step_uncoupled_tails(&mut r, plan, sub_l, sub_r);
+        step_uncoupled_tails(&mut r, plan, acc_th, acc_l, sub_l, sub_r);
         for ts in 0..sub {
             prepare_sample_tails_and_hammers(&mut r, driver, plan, chunk_base, ts, sub_l, sub_r);
             let (dup_l, dup_r) = bridge.step_bridge_sample_with_duplex_zones(

@@ -51,6 +51,7 @@ pub(crate) struct ContactPorts {
     pub tail_nonzero: [bool; TOTAL_STRINGS],
     pub struck_active: [bool; TOTAL_STRINGS],
     pub ports_synced: [bool; TOTAL_STRINGS],
+    pub damp_ports_synced: [bool; TOTAL_STRINGS],
     pub tl_v_active: [u16; TOTAL_STRINGS],
     pub tl_h_active: [u16; TOTAL_STRINGS],
     pub tl_damp_active: [bool; TOTAL_STRINGS],
@@ -108,6 +109,7 @@ impl ContactPorts {
             tail_nonzero: [false; TOTAL_STRINGS],
             struck_active: [false; TOTAL_STRINGS],
             ports_synced: [true; TOTAL_STRINGS],
+            damp_ports_synced: [true; TOTAL_STRINGS],
             tl_v_active: [u16::MAX; TOTAL_STRINGS],
             tl_h_active: [u16::MAX; TOTAL_STRINGS],
             tl_damp_active: [false; TOTAL_STRINGS],
@@ -140,6 +142,7 @@ impl ContactPorts {
         self.tail_nonzero.fill(false);
         self.struck_active.fill(false);
         self.ports_synced.fill(true);
+        self.damp_ports_synced.fill(true);
         self.tl_v_active.fill(u16::MAX);
         self.tl_h_active.fill(u16::MAX);
         self.tl_damp_active.fill(false);
@@ -164,6 +167,7 @@ impl ContactPorts {
         self.y_dh[s_idx] = 0.0;
         self.v_dh[s_idx] = 0.0;
         self.ports_synced[s_idx] = true;
+        self.damp_ports_synced[s_idx] = true;
     }
 
     /// Computes physical linear Hamiltonian `0.5 * beta_s * sum(u^2 + v^2)` in Joules over `vec_range`.
