@@ -5,8 +5,9 @@ import {
   unlockAudioEngine,
   waitForAudioRms,
 } from './helpers/audio-diag';
+import { waitForOfflineRenderDone } from './helpers/offline-helpers';
 
-test.describe('E2E Enriched Demo Scores Suite', () => {
+test.describe('E2E Enriched Demo Scores Suite (Offline Worker)', () => {
   let assertNoErrors: () => void;
 
   test.beforeEach(async ({ page }) => {
@@ -47,68 +48,69 @@ test.describe('E2E Enriched Demo Scores Suite', () => {
   ];
 
   for (const demo of DEMO_CASES) {
-    test(`Demo score ${demo.name} (${demo.id}) plays audio and stops cleanly`, async ({ page }) => {
+    test(`Demo score ${demo.name} (${demo.id}) renders offline, plays, and stops cleanly`, async ({
+      page,
+    }) => {
+      test.setTimeout(90_000);
       await page.getByTestId('demo-select').selectOption(demo.id);
       await page.getByTestId('transport-play').click();
 
+      await waitForOfflineRenderDone(page);
       const playing = await waitForAudioRms(page, 0.003);
+      await expect(page.getByTestId('hud-voices')).toHaveText('0');
 
-      await expect
-        .poll(async () => Number(await page.getByTestId('hud-voices').textContent()), {
-          timeout: 2000,
-        })
-        .toBeGreaterThan(0);
-
-      // Verify stop clears voices and audio decays to silence
       await page.getByTestId('transport-stop').click();
-      await expect(page.getByTestId('hud-voices')).toHaveText('0', { timeout: 3500 });
+      await expect(page.getByTestId('offline-render-status')).toHaveText('Ready', {
+        timeout: 3_000,
+      });
+      await expect(page.getByTestId('hud-voices')).toHaveText('0');
       await expect
-        .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3500 })
+        .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3_500 })
         .toBeLessThan(Math.max(5e-4, playing.rms * 0.1));
     });
   }
 
-  test('Mid-playback score switching executes without errors or hung voices', async ({ page }) => {
-    // Start Beethoven Moonlight
+  test('Mid-playback score switching and mid-render cancel execute cleanly', async ({ page }) => {
+    test.setTimeout(90_000);
+    // Start Beethoven Moonlight and cancel mid-render
     await page.getByTestId('demo-select').selectOption('beethoven-moonlight');
     await page.getByTestId('transport-play').click();
-    await waitForAudioRms(page, 0.003);
+    await expect(page.getByTestId('offline-cancel')).toBeEnabled({ timeout: 5_000 });
+    await page.getByTestId('offline-cancel').click();
+    await expect(page.getByTestId('offline-render-status')).toHaveText('Idle', { timeout: 5_000 });
 
-    // Switch mid-playback to Rachmaninoff Prelude
+    // Switch to Rachmaninoff Prelude, render, play, and verify clean stop
     await page.getByTestId('demo-select').selectOption('rachmaninoff-prelude');
-    // Selecting loads the new score into MidiPlayer and stops previous playback
-    await expect(page.getByTestId('hud-voices')).toHaveText('0', { timeout: 3500 });
-
-    // Play the new score
+    await expect(page.getByTestId('hud-voices')).toHaveText('0');
     await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
     await waitForAudioRms(page, 0.003);
 
-    // Clean stop
-    await page.getByTestId('transport-stop').click();
-    await expect(page.getByTestId('hud-voices')).toHaveText('0', { timeout: 3500 });
+    // Mid-playback switch back to Bach Prelude resets to Idle cleanly
+    await page.getByTestId('demo-select').selectOption('bach-prelude');
+    await expect(page.getByTestId('offline-render-status')).toHaveText('Idle', { timeout: 3_000 });
+    await expect(page.getByTestId('hud-voices')).toHaveText('0');
   });
 
-  test('Interactive feedback: keys animate on keyboard during demo playback', async ({ page }) => {
+  test('Interactive feedback: keys animate visually during offline playback without waking AudioWorklet', async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
     await page.getByTestId('demo-select').selectOption('rachmaninoff-prelude');
     await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
 
-    // In Rachmaninoff Prelude, notes are struck immediately on beat 0
     await expect
       .poll(
-        async () => {
-          const activeKeys = await page.locator('.piano-key.active, .piano-key.is-active').count();
-          return activeKeys;
-        },
-        { timeout: 2000 },
+        async () => page.locator('.piano-key.active, .piano-key.is-active').count(),
+        { timeout: 3_000 },
       )
       .toBeGreaterThan(0);
+    await expect(page.getByTestId('hud-voices')).toHaveText('0');
 
-    // When stopped, all keys must deactivate
     await page.getByTestId('transport-stop').click();
     await expect
-      .poll(async () => {
-        return await page.locator('.piano-key.active, .piano-key.is-active').count();
-      })
+      .poll(async () => page.locator('.piano-key.active, .piano-key.is-active').count())
       .toBe(0);
   });
 });

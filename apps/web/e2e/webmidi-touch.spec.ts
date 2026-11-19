@@ -15,9 +15,10 @@ import {
   injectMockMidi,
   tapWorkletMessages,
 } from './helpers/midi-helpers';
+import { downloadAndVerifyOfflineWav, waitForOfflineRenderDone } from './helpers/offline-helpers';
 
-test.describe('Wave 1B: Lookahead, Seek Pedals, WebMIDI & Touch Curve', () => {
-  test('I-3: MidiPlayer 60ms lookahead sampleOffset and seek() restores CC64/66/67', async ({
+test.describe('Wave 1B: Offline Seek Pedals, WebMIDI & Touch Curve', () => {
+  test('F12/I-3: OfflineRenderer isolates AudioWorklet, restores visual CC64/66/67 on seek(), and exports Full WAV', async ({
     page,
   }) => {
     const assertNoErrors = setupErrorMonitoring(page);
@@ -40,28 +41,20 @@ test.describe('Wave 1B: Lookahead, Seek Pedals, WebMIDI & Touch Curve', () => {
       buffer: Buffer.from(smf),
     });
     await page.getByTestId('transport-play').click();
-    await expect
-      .poll(
-        async () =>
-          page.evaluate(() =>
-            (window as unknown as { __MSG_LOG__: Array<{ type: string }> }).__MSG_LOG__.some(
-              (m) => m.type === 'noteOn',
-            ),
-          ),
-        { timeout: 3000 },
-      )
-      .toBe(true);
+    await waitForOfflineRenderDone(page);
+    await waitForAudioRms(page, 0.002);
 
-    const offsets = await page.evaluate(() =>
-      (
-        window as unknown as {
-          __MSG_LOG__: Array<{ type: string; sampleOffset?: number }>;
-        }
-      ).__MSG_LOG__
-        .filter((m) => m.type === 'noteOn')
-        .map((m) => m.sampleOffset ?? 0),
+    const workletMidiCount = await page.evaluate(() =>
+      (window as unknown as { __MSG_LOG__: Array<{ type: string }> }).__MSG_LOG__.filter(
+        (m) => m.type === 'noteOn' || m.type === 'noteOff' || m.type === 'pedal',
+      ).length,
     );
-    expect(offsets.some((off) => off > 0 && off <= 2880)).toBe(true);
+    expect(workletMidiCount).toBe(0);
+
+    const wav = await downloadAndVerifyOfflineWav(page, 'f32');
+    expect(wav.nonFiniteCount).toBe(0);
+    expect(wav.peak).toBeGreaterThan(0.005);
+    expect(wav.peak).toBeLessThanOrEqual(1.0);
 
     await page.getByTestId('transport-pause').click();
     await setSlider(page, 'transport-seek', 0.8);

@@ -128,10 +128,10 @@ async function main() {
     }
 
     console.log('='.repeat(118));
-    console.log('Phase 2: Live Chromium AudioWorklet & Prep Web Worker Stress');
+    console.log('Phase 2: Live Chromium AudioWorklet RT Auditioning & Offline MIDI Worker (F12)');
     console.log('-'.repeat(118));
     console.log(
-      `${'Live Phase'.padEnd(32)} | ${'p50'.padStart(8)} | ${'p95'.padStart(8)} | ${'p99'.padStart(8)} | ${'Max'.padStart(8)} | ${'Strd'.padStart(4)} | ${'Sngl'.padStart(4)} | ${'Stll'.padStart(4)} | ${'RMS'.padStart(7)} | ${'Src'.padStart(4)} | Status`,
+      `${'Live RT Phase'.padEnd(32)} | ${'p50'.padStart(8)} | ${'p95'.padStart(8)} | ${'p99'.padStart(8)} | ${'Max'.padStart(8)} | ${'Strd'.padStart(4)} | ${'Sngl'.padStart(4)} | ${'Stll'.padStart(4)} | ${'RMS'.padStart(7)} | ${'Src'.padStart(4)} | Status`,
     );
     console.log('-'.repeat(118));
 
@@ -141,8 +141,7 @@ async function main() {
 
     const p2Phases = [
       { name: 'Live: 20-voice sustain', r: liveRes.sustain20 },
-      { name: 'Live: 06-rachmaninoff .mid', r: liveRes.rachMid },
-      { name: 'Live: Half-pedal + Prep sweep', r: liveRes.prepSweep },
+      { name: 'Live: Chord & gliss audition', r: liveRes.auditionGliss },
     ];
 
     for (const ph of p2Phases) {
@@ -165,6 +164,19 @@ async function main() {
         `${ph.name.padEnd(32)} | ${fmtUs(r.p50Us)} | ${fmtUs(r.p95Us)} | ${fmtUs(r.p99Us)} | ${fmtUs(r.maxUs)} | ${String(r.strideOverruns).padStart(4)} | ${String(r.singleBlockOverruns).padStart(4)} | ${String(r.stallCount).padStart(4)} | ${r.rms.toFixed(4).padStart(7)} | ${r.timingSource.padStart(4)} | ${status}`,
       );
     }
+
+    console.log('-'.repeat(118));
+    const off = liveRes.offlineRach;
+    const offOk =
+      off.nonFinite === 0 &&
+      !off.clipped &&
+      off.rms > 0.002 &&
+      off.workletActiveVoices === 0;
+    if (!offOk) hasFailure = true;
+    const offStatus = offOk ? 'PASS (Full offline + 0 RT voices)' : 'FAIL (offline render/audio)';
+    console.log(
+      `${'Offline Worker: 06-rachmaninoff'.padEnd(32)} | Wall: ${String(off.renderWallMs).padStart(6)} ms | Audio: ${off.audioSec.toFixed(1)}s (${off.realtimeRatio.toFixed(2)}x RT) | RMS: ${off.rms.toFixed(4)} | Peak: ${off.peak.toFixed(4)} | NaN: ${off.nonFinite} | Voices: ${off.workletActiveVoices} | ${offStatus}`,
+    );
     console.log('='.repeat(118));
   } finally {
     await browser.close();

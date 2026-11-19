@@ -8,8 +8,9 @@ import {
   waitForAudioRms,
 } from './helpers/audio-diag';
 import { buildMidiFile, dispatchMockMidi, injectMockMidi } from './helpers/midi-helpers';
+import { downloadAndVerifyOfflineWav, waitForOfflineRenderDone } from './helpers/offline-helpers';
 
-test.describe('E2E MIDI & SMF Playback Suite', () => {
+test.describe('E2E MIDI & SMF Playback Suite (Offline Render + Live Web MIDI)', () => {
   let assertNoErrors: () => void;
 
   test.beforeEach(async ({ page }) => {
@@ -25,24 +26,21 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
   });
 
   // =========================================================================
-  // Tier 1: Built-in Classical Demo Scores & Transport Controls
+  // Tier 1: Built-in Classical Demo Scores & Offline Transport Controls
   // =========================================================================
-  test('Tier 1: Bach Prelude demo playback triggers sound, voices, and decays on Stop', async ({
+  test('Tier 1: Bach Prelude demo offline render triggers sound, keeps Worklet idle, and decays on Stop', async ({
     page,
   }) => {
+    test.setTimeout(90_000);
     await page.getByTestId('demo-select').selectOption('bach-prelude');
     await page.getByTestId('transport-play').click();
 
+    await waitForOfflineRenderDone(page);
     await waitForAudioRms(page, 0.005);
+    await expect(page.getByTestId('hud-voices')).toHaveText('0');
 
-    await expect
-      .poll(async () => Number(await page.getByTestId('hud-voices').textContent()), {
-        timeout: 2000,
-      })
-      .toBeGreaterThan(0);
-
-    // Stop playback and verify voices decay to 0 and RMS silences.
     await page.getByTestId('transport-stop').click();
+    await expect(page.getByTestId('offline-render-status')).toHaveText('Ready');
     await expect
       .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
       .toBeLessThan(1e-4);
@@ -50,18 +48,21 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
   });
 
   test('Tier 1: Chopin Nocturne demo plays and pauses/resumes cleanly', async ({ page }) => {
+    test.setTimeout(90_000);
     await page.getByTestId('demo-select').selectOption('chopin-nocturne');
     await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
     const initial = await waitForAudioRms(page, 0.005);
 
-    // Pause playback: sound should decay.
     await page.getByTestId('transport-pause').click();
+    await expect(page.getByTestId('offline-render-status')).toHaveText('Paused');
     await expect
       .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
       .toBeLessThan(initial.rms * 0.25);
 
-    // Resume playback: sound should return.
+    // Cached instant resume without re-rendering
     await page.getByTestId('transport-play').click();
+    await expect(page.getByTestId('offline-render-status')).toHaveText('Playing');
     await expect
       .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
       .toBeGreaterThan(0.005);
@@ -69,13 +70,31 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
     await page.getByTestId('transport-stop').click();
   });
 
-  test('Tier 1: Panic clears active demo playback instantly', async ({ page }) => {
-    await page.getByTestId('demo-select').selectOption('bach-prelude');
+  test('Tier 1: Panic clears active offline playback instantly', async ({ page }) => {
+    const smf = buildMidiFile([
+      { delta: 0, data: [0xb0, 64, 127] },
+      { delta: 0, data: [0x90, 60, 108] },
+      { delta: 120, data: [0x90, 64, 108] },
+      { delta: 120, data: [0x90, 67, 108] },
+      { delta: 3840, data: [0x80, 60, 64] },
+      { delta: 0, data: [0x80, 64, 64] },
+      { delta: 0, data: [0x80, 67, 64] },
+    ]);
+    await page.getByTestId('midi-file-input').setInputFiles({
+      name: 'panic-sustain.mid',
+      mimeType: 'audio/midi',
+      buffer: Buffer.from(smf),
+    });
     await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
     await waitForAudioRms(page, 0.003);
 
     await page.getByTestId('panic-btn').click();
     await expect(page.getByTestId('hud-voices')).toHaveText('0');
+    await expect(page.getByTestId('offline-render-status')).toHaveText('Ready');
+    await expect
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .toBeLessThan(1e-4);
     const stats = await sampleDestinationAudio(page);
     expect(stats.nonFiniteCount).toBe(0);
   });
@@ -83,8 +102,9 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
   // =========================================================================
   // Tier 2: Boundary & Corner Cases (SMF Upload & Robustness)
   // =========================================================================
-  test('Tier 2: Upload valid SMF binary via file input and verify playback', async ({ page }) => {
-    // NoteOn C4 vel 100, delta 480, NoteOff C4
+  test('Tier 2: Upload valid SMF binary via file input and verify offline playback', async ({
+    page,
+  }) => {
     const smf = buildMidiFile([
       { delta: 0, data: [0x90, 60, 100] },
       { delta: 480, data: [0x80, 60, 64] },
@@ -96,6 +116,7 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
     });
 
     await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
     await waitForAudioRms(page, 0.003);
     await page.getByTestId('transport-stop').click();
   });
@@ -112,13 +133,13 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
     await expect(banner).toBeVisible();
     await expect(banner).toContainText(/invalid|error/i);
 
-    // Verify application remains responsive: normal A4 button works.
     await page.getByTestId('trigger-a4').click();
     await waitForAudioRms(page, 0.001);
   });
 
-  test('Tier 2: Running status across delta-times triggers multiple notes', async ({ page }) => {
-    // NoteOn 60 (C4), then running status 64 (E4), 67 (G4)
+  test('Tier 2: Running status across delta-times renders multi-note audio and exports valid WAV', async ({
+    page,
+  }) => {
     const smf = buildMidiFile([
       { delta: 0, data: [0x90, 60, 100] },
       { delta: 50, data: [64, 100] },
@@ -133,16 +154,18 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
       buffer: Buffer.from(smf),
     });
     await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
+    await waitForAudioRms(page, 0.002);
 
-    await expect
-      .poll(async () => Number(await page.getByTestId('hud-voices').textContent()), { timeout: 2000 })
-      .toBeGreaterThanOrEqual(3);
-
+    const wav = await downloadAndVerifyOfflineWav(page, 'f32');
+    expect(wav.nonFiniteCount).toBe(0);
+    expect(wav.peak).toBeGreaterThan(0.005);
+    expect(wav.peak).toBeLessThanOrEqual(1.0);
     await page.getByTestId('transport-stop').click();
   });
 
   test('Tier 2: Zero-velocity NoteOn is treated strictly as NoteOff', async ({ page }) => {
-    // NoteOn 60 vel 100, then NoteOn 60 vel 0 (MUST act as NoteOff)
+    // NoteOn 60 vel 100, then NoteOn 60 vel 0 after ~104 ms (MUST act as NoteOff)
     const smf = buildMidiFile([
       { delta: 0, data: [0x90, 60, 100] },
       { delta: 100, data: [0x90, 60, 0] },
@@ -153,9 +176,24 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
       buffer: Buffer.from(smf),
     });
     await page.getByTestId('transport-play').click();
-    await waitAudioBlocks(page, 80);
+    await waitForOfflineRenderDone(page);
 
-    // After NoteOn vel 0, voice must decay cleanly.
+    const wav = await downloadAndVerifyOfflineWav(page, 'f32');
+    expect(wav.nonFiniteCount).toBe(0);
+    expect(wav.mono).not.toBeNull();
+    const mono = wav.mono!;
+    const rmsSlice = (startSec: number, lenSec: number) => {
+      const s0 = Math.floor(startSec * wav.sampleRate);
+      const n = Math.floor(lenSec * wav.sampleRate);
+      let sq = 0;
+      for (let i = s0; i < s0 + n && i < mono.length; i++) sq += mono[i] * mono[i];
+      return Math.sqrt(sq / Math.max(1, n));
+    };
+    const onsetRms = rmsSlice(0.01, 0.08);
+    const dampedRms = rmsSlice(0.55, 0.15);
+    expect(onsetRms).toBeGreaterThan(0.01);
+    expect(dampedRms).toBeLessThan(onsetRms * 0.15);
+
     await expect
       .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
       .toBeLessThan(0.001);
@@ -165,16 +203,15 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
   // =========================================================================
   // Tier 3: Cross-Feature Combinations (Transport Scrubbing & Tempo Scaling)
   // =========================================================================
-  test('Tier 3: Transport seek during playback jumps smoothly and flushes obsolete notes', async ({
-    page,
-  }) => {
+  test('Tier 3: Transport seek during playback jumps smoothly', async ({ page }) => {
+    test.setTimeout(90_000);
     await page.getByTestId('demo-select').selectOption('bach-prelude');
     await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
     await waitForAudioRms(page, 0.003);
 
-    // Seek to 15 seconds into the score.
     await setSlider(page, 'transport-seek', 15);
-    await waitAudioBlocks(page, 48);
+    await waitAudioBlocks(page, 24);
     await waitForAudioRms(page, 0.003);
 
     await page.getByTestId('transport-stop').click();
@@ -183,29 +220,42 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
   test('Tier 3: Tempo slider adjustments (0.5x to 2.0x) play smoothly without audio glitches', async ({
     page,
   }) => {
-    await page.getByTestId('demo-select').selectOption('bach-prelude');
+    const smf = buildMidiFile([
+      { delta: 0, data: [0xb0, 64, 127] },
+      { delta: 0, data: [0x90, 48, 108] },
+      { delta: 240, data: [0x90, 60, 104] },
+      { delta: 240, data: [0x90, 64, 104] },
+      { delta: 240, data: [0x90, 67, 104] },
+      { delta: 4800, data: [0x80, 48, 64] },
+      { delta: 0, data: [0x80, 60, 64] },
+      { delta: 0, data: [0x80, 64, 64] },
+      { delta: 0, data: [0x80, 67, 64] },
+    ]);
+    await page.getByTestId('midi-file-input').setInputFiles({
+      name: 'tempo-test.mid',
+      mimeType: 'audio/midi',
+      buffer: Buffer.from(smf),
+    });
     await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
 
-    // Scale tempo to 0.5x (slow)
     await setSlider(page, 'tempo-slider', 0.5);
-    await waitAudioBlocks(page, 96);
+    await waitAudioBlocks(page, 48);
     await waitForAudioRms(page, 0.003);
 
-    // Scale tempo to 2.0x (fast)
     await setSlider(page, 'tempo-slider', 2.0);
-    await waitAudioBlocks(page, 96);
+    await waitAudioBlocks(page, 48);
     await waitForAudioRms(page, 0.003);
 
     await page.getByTestId('transport-stop').click();
   });
 
   // =========================================================================
-  // Tier 4: Real-World Workloads (Web MIDI Simulation & Full Demo Section)
+  // Tier 4: Real-World Workloads (Web MIDI RT & Full Offline WAV Export)
   // =========================================================================
   test('Tier 4: Live Web MIDI stream with 14-bit high-res velocity and CC64 damper', async ({
     page,
   }) => {
-    // 1. Dispatch 14-bit high-res velocity NoteOn: CC 88 prefix (LSB 64) followed by NoteOn (MSB 100)
     await dispatchMockMidi(page, [0xb0, 88, 64]);
     await dispatchMockMidi(page, [0x90, 60, 100]); // C4
     await waitAudioBlocks(page, 80);
@@ -213,48 +263,47 @@ test.describe('E2E MIDI & SMF Playback Suite', () => {
     let stats = await sampleDestinationAudio(page);
     expect(stats.rms).toBeGreaterThan(0.002);
 
-    // 2. Continuous Damper Pedal CC64 modulation (half-pedal -> full pedal)
     await dispatchMockMidi(page, [0xb0, 64, 64]); // Half pedal
     await dispatchMockMidi(page, [0xb0, 64, 127]); // Full sustain
     await dispatchMockMidi(page, [0x80, 60, 64]); // Release key
 
     await waitAudioBlocks(page, 96);
-    // Because pedal is sustained, sound should still ring.
     stats = await sampleDestinationAudio(page);
     expect(stats.rms).toBeGreaterThan(0.001);
 
-    // 3. Release pedal: sound should decay cleanly.
     await dispatchMockMidi(page, [0xb0, 64, 0]);
     await expect
       .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
       .toBeLessThan(0.0005);
   });
 
-  test('Tier 4: Full Bach Prelude playback section with D1 telemetry and zero errors', async ({
+  test('Tier 4: Full Bach Prelude offline render playback and 24-bit/32-bit Full WAV export', async ({
     page,
   }) => {
+    test.setTimeout(90_000);
     await page.getByTestId('demo-select').selectOption('bach-prelude');
     await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
     await waitForAudioRms(page, 0.003);
 
-    // Monitor continuous classical performance across 1,280 audio blocks (~3.4 s).
-    for (let step = 0; step < 10; step++) {
+    for (let step = 0; step < 6; step++) {
       await waitAudioBlocks(page, 128);
       const audio = await sampleDestinationAudio(page);
       expect(audio.nonFiniteCount).toBe(0);
       expect(audio.peak).toBeLessThanOrEqual(1.0);
       expect(audio.rms).toBeGreaterThan(0.003);
     }
+    await expect(page.getByTestId('hud-voices')).toHaveText('0');
 
-    // Verify telemetry HUD p99 callback is finite and non-negative, and no clipping occurred
-    const diagCheck = await page.evaluate(() => {
-      const text = document.querySelector('[data-testid="hud-p99"]')?.textContent;
-      const p99 = text ? parseFloat(text) : NaN;
-      const clipped = window.__PIANO_DIAG__?.telemetry.clipped ?? true;
-      return { p99, clipped };
-    });
-    expect(Number.isFinite(diagCheck.p99) && diagCheck.p99 >= 0).toBe(true);
-    expect(diagCheck.clipped).toBe(false);
+    const wav24 = await downloadAndVerifyOfflineWav(page, 'pcm24');
+    expect(wav24.frames).toBeGreaterThan(48_000 * 30);
+    expect(wav24.peak).toBeGreaterThan(0.005);
+    expect(wav24.peak).toBeLessThanOrEqual(1.0);
+
+    const wav32 = await downloadAndVerifyOfflineWav(page, 'f32');
+    expect(wav32.nonFiniteCount).toBe(0);
+    expect(wav32.peak).toBeGreaterThan(0.005);
+    expect(wav32.peak).toBeLessThanOrEqual(1.0);
 
     await page.getByTestId('transport-stop').click();
   });

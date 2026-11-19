@@ -14,6 +14,7 @@ import {
   waitForPrepIdle,
   waitForSilence,
 } from './helpers/audio-diag';
+import { waitForOfflineRenderDone } from './helpers/offline-helpers';
 
 test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
   let assertNoErrors: () => void;
@@ -205,6 +206,7 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
   test('IV-2: All 6 humanized demo scores contain micro-rolled chords, velocity voicing, and half-pedaling', async ({
     page,
   }) => {
+    test.setTimeout(90_000);
     expect(DEMO_SCORES.length).toBe(6);
     for (const desc of DEMO_SCORES) {
       const bytes = fs.readFileSync(
@@ -239,9 +241,10 @@ test.describe('E2E Wave 4 IV-1 & IV-2 Features Suite', () => {
       expect(hasHalfPedal, `${desc.id} half-pedal cc64`).toBe(true);
     }
 
-    // Play humanized Debussy Clair de Lune in real AudioWorklet
+    // Render and play humanized Debussy Clair de Lune via Offline MIDI Worker
     await page.getByTestId('demo-select').selectOption('debussy-claire');
     await page.getByTestId('transport-play').click();
+    await waitForOfflineRenderDone(page);
     await waitForAudioRms(page, 0.002);
     await page.getByTestId('transport-stop').click();
   });
