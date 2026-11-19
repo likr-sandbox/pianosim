@@ -1,4 +1,4 @@
-//! Unit tests for `CliProfileArgs` parsing across `--perf-profile` and all 18 override flags.
+//! Unit tests for `CliProfileArgs` parsing across `--perf-profile` and all 19 override flags.
 
 use piano_engine::{PerfPreset, PerfProfile};
 
@@ -17,7 +17,7 @@ fn parse_all(args: &[&str]) -> Result<PerfProfile, String> {
 }
 
 #[test]
-fn cli_profile_parses_all_presets_and_all_18_override_flags() {
+fn cli_profile_parses_all_presets_and_all_19_override_flags() {
     assert_eq!(parse_all(&[]).unwrap(), PerfProfile::full());
     assert_eq!(
         parse_all(&["--perf-profile", "balanced"]).unwrap(),
@@ -34,6 +34,7 @@ fn cli_profile_parses_all_presets_and_all_18_override_flags() {
         "--horiz-max-hz",
         "4200",
         "--dead-mode-prune-db=-72.5",
+        "--low-order-energy-horizon-db=-104.5",
         "--energy-horizon-db",
         "-85",
         "--sav-dormancy-db",
@@ -65,10 +66,11 @@ fn cli_profile_parses_all_presets_and_all_18_override_flags() {
         "--active-bridge-poles",
         "8",
     ])
-    .expect("all 18 overrides");
+    .expect("all 19 overrides");
 
     assert_eq!(full_overrides.horiz_max_hz, 4200.0);
     assert_eq!(full_overrides.dead_mode_prune_db, -72.5);
+    assert_eq!(full_overrides.low_order_energy_horizon_db, -104.5);
     assert_eq!(full_overrides.energy_horizon_db, -85.0);
     assert_eq!(full_overrides.sav_dormancy_db, -36.0);
     assert_eq!(full_overrides.sav_max_key_idx, 28);
@@ -104,12 +106,17 @@ fn cli_profile_rejects_invalid_values_and_reports_label() {
     assert!(parse_all(&["--sav-max-key", "80"]).is_err());
     assert!(parse_all(&["--polynomial-adaa", "maybe"]).is_err());
     assert!(parse_all(&["--ir-duration-secs"]).is_err());
+    assert!(parse_all(&["--low-order-energy-horizon-db", "-35"]).is_err());
+    assert!(parse_all(&["--low-order-energy-horizon-db", "-125"]).is_err());
 
     let mut cli = CliProfileArgs {
         preset: Some(PerfPreset::Balanced),
         ..CliProfileArgs::default()
     };
     assert_eq!(cli.label(), "balanced");
+    cli.low_order_energy_horizon_db = Some(-106.0);
+    assert_eq!(cli.label(), "balanced+overrides");
+    cli.low_order_energy_horizon_db = None;
     cli.fir_head_taps = Some(16);
     assert_eq!(cli.label(), "balanced+overrides");
 }

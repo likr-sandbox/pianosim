@@ -1,4 +1,4 @@
-//! Shared CLI parser for `--perf-profile` and all 18 `PerfProfile` override flags.
+//! Shared CLI parser for `--perf-profile` and all 19 `PerfProfile` override flags.
 
 use piano_engine::{PerfPreset, PerfProfile};
 
@@ -8,6 +8,7 @@ pub struct CliProfileArgs {
     pub preset: Option<PerfPreset>,
     pub horiz_max_hz: Option<f32>,
     pub dead_mode_prune_db: Option<f32>,
+    pub low_order_energy_horizon_db: Option<f32>,
     pub energy_horizon_db: Option<f32>,
     pub sav_dormancy_db: Option<f32>,
     pub sav_max_key_idx: Option<u8>,
@@ -30,7 +31,7 @@ impl CliProfileArgs {
     /// Returns usage summary for performance profile CLI options.
     #[must_use]
     pub const fn usage() -> &'static str {
-        "[--perf-profile <full|balanced|realtime>] [--horiz-max-hz <f32>] [--dead-mode-prune-db <f32>] [--energy-horizon-db <f32>] [--sav-dormancy-db <f32>] [--sav-max-key <0..=52>] [--bass-phantom-sparse <bool>] [--passive-res-max-hz <f32>] [--ir-duration-secs <f32>] [--spatial-tail-split-tap <u16>] [--fir-head-taps <16|32|64>] [--fir-block-fft <bool>] [--hall-fdn-lines <4|8|16>] [--action-oversample <2|4|8>] [--polynomial-adaa <bool>] [--shank-flex <bool>] [--damper-decim <1|2|4|8|16>] [--hertz-nonlinear <bool>] [--active-bridge-poles <4..=10>]"
+        "[--perf-profile <full|balanced|realtime>] [--horiz-max-hz <f32>] [--dead-mode-prune-db <f32>] [--low-order-energy-horizon-db <f32>] [--energy-horizon-db <f32>] [--sav-dormancy-db <f32>] [--sav-max-key <0..=52>] [--bass-phantom-sparse <bool>] [--passive-res-max-hz <f32>] [--ir-duration-secs <f32>] [--spatial-tail-split-tap <u16>] [--fir-head-taps <16|32|64>] [--fir-block-fft <bool>] [--hall-fdn-lines <4|8|16>] [--action-oversample <2|4|8>] [--polynomial-adaa <bool>] [--shank-flex <bool>] [--damper-decim <1|2|4|8|16>] [--hertz-nonlinear <bool>] [--active-bridge-poles <4..=10>]"
     }
 
     /// Resolves base preset + individual overrides into a sanitized [`PerfProfile`].
@@ -42,6 +43,9 @@ impl CliProfileArgs {
         }
         if let Some(v) = self.dead_mode_prune_db {
             p.dead_mode_prune_db = v;
+        }
+        if let Some(v) = self.low_order_energy_horizon_db {
+            p.low_order_energy_horizon_db = v;
         }
         if let Some(v) = self.energy_horizon_db {
             p.energy_horizon_db = v;
@@ -104,6 +108,7 @@ impl CliProfileArgs {
         };
         let has_override = self.horiz_max_hz.is_some()
             || self.dead_mode_prune_db.is_some()
+            || self.low_order_energy_horizon_db.is_some()
             || self.energy_horizon_db.is_some()
             || self.sav_dormancy_db.is_some()
             || self.sav_max_key_idx.is_some()
@@ -139,6 +144,9 @@ impl CliProfileArgs {
             }
             "--dead-mode-prune-db" => {
                 self.dead_mode_prune_db = Some(parse_f32_range(val, flag, -120.0, -20.0)?)
+            }
+            "--low-order-energy-horizon-db" => {
+                self.low_order_energy_horizon_db = Some(parse_f32_range(val, flag, -120.0, -40.0)?)
             }
             "--energy-horizon-db" => {
                 self.energy_horizon_db = Some(parse_f32_range(val, flag, -120.0, -40.0)?)
@@ -182,6 +190,7 @@ const KNOWN_PROFILE_FLAGS: &[&str] = &[
     "--perf-profile",
     "--horiz-max-hz",
     "--dead-mode-prune-db",
+    "--low-order-energy-horizon-db",
     "--energy-horizon-db",
     "--sav-dormancy-db",
     "--sav-max-key",
