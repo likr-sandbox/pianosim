@@ -2,20 +2,13 @@
 //! linear-memory installer for non-blocking `AudioWorklet` voicing updates.
 
 use alloc::vec::Vec;
-use piano_simd::F32x4;
-use piano_spec::{
-    build_scale_design, PerfProfile, VoicingSpec, LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS,
-};
+use piano_spec::{PerfProfile, VoicingSpec, LONGITUDINAL_MAX_KEY_IDX, TOTAL_STRINGS};
 
-use crate::voicing_blob_sav::{
-    push_copy, push_f64_bits, push_sav_entry, read_copy, read_f64_bits, read_sav_entry,
-    SAV_ENTRY_FLOATS,
-};
-use crate::voicing_update::rescale_active_string_uv;
+use crate::voicing_blob_sav::{push_copy, push_f64_bits, push_sav_entry, SAV_ENTRY_FLOATS};
 use crate::StringBank;
 
-const VOICING_BLOB_MAGIC: u32 = 0x564F_4943; // "VOIC"
-const VOICING_HEADER_LEN: usize = 11;
+pub(crate) const VOICING_BLOB_MAGIC: u32 = 0x564F_4943; // "VOIC"
+pub(crate) const VOICING_HEADER_LEN: usize = 11;
 
 /// Computes the exact serialized `f32` length of a `VoicingBlob` for a bridge-coupled bank.
 #[must_use]
@@ -85,7 +78,7 @@ impl VoicingPrepContext {
         Self::compute_blob_len(&self.bank)
     }
 
-    fn compute_blob_len(bank: &StringBank) -> usize {
+    pub(crate) fn compute_blob_len(bank: &StringBank) -> usize {
         let soa_floats = bank.soa.d_coeff.len();
         let tl_floats = bank.bridge_ports.tl_soa.d_coeff.len();
         let coef_floats = bank.bridge_ports.coef.len() * 12;
@@ -205,136 +198,6 @@ impl VoicingPrepContext {
     }
 }
 
-impl StringBank {
-    /// Installs a precomputed Stage 2/3 tuning table blob with zero allocations and
-    /// continuous active string state rescaling (`gamma_new / gamma_old`).
-    pub fn install_precomputed_voicing(&mut self, voicing: &VoicingSpec, blob: &[f32]) -> bool {
-        let expected_len = VoicingPrepContext::compute_blob_len(self);
-        let total_vecs = self.choir_map.total_vecs();
-        let tl_vecs = self.bridge_ports.tl_soa.d_coeff.len() / 4;
-        let v = voicing.sanitized();
-        if blob.len() != expected_len
-            || blob[0].to_bits() != VOICING_BLOB_MAGIC
-            || (blob[1] - self.sample_rate).abs() > 0.5
-            || (blob[3] - v.unison_detune_scale).abs() > 1.0e-4
-            || (blob[4] - v.stretch_amount).abs() > 1.0e-4
-            || (blob[5] - v.string_length_scale).abs() > 1.0e-4
-            || (blob[6] - v.a4_freq_hz).abs() > 1.0e-3
-            || blob[7].to_bits() != total_vecs as u32
-            || blob[8].to_bits() != tl_vecs as u32
-            || blob[9].to_bits() != self.bridge_ports.coef.len() as u32
-            || blob[10].to_bits() != self.long_bank.b_long_prec.len() as u32
-        {
-            return false;
-        }
-        let mut cur = VOICING_HEADER_LEN;
-        for d in [
-            self.soa.d_coeff.as_mut_slice(),
-            self.soa.s_coeff.as_mut_slice(),
-            self.soa.c_bridge.as_mut_slice(),
-            self.soa.b_exc.as_mut_slice(),
-            self.ports.b_strike.as_mut_slice(),
-            self.ports.a_strike.as_mut_slice(),
-            self.ports.b_strike_diff.as_mut_slice(),
-            self.ports.a_strike_diff.as_mut_slice(),
-            self.ports.b_damp.as_mut_slice(),
-            self.ports.a_damp.as_mut_slice(),
-        ] {
-            read_copy(blob, &mut cur, d);
-        }
-        for d in [
-            &mut self.ports.alpha_vel[..],
-            &mut self.ports.r_port_strike[..],
-            &mut self.ports.r_strike_00[..],
-            &mut self.ports.r_strike_01[..],
-            &mut self.ports.r_strike_11[..],
-            &mut self.ports.r_port_damp_v[..],
-            &mut self.ports.r_port_damp_h[..],
-        ] {
-            read_copy(blob, &mut cur, d);
-        }
-        let gamma_old = self.ports.gamma_s;
-        for d in &mut self.ports.gamma_s {
-            *d = read_f64_bits(blob, &mut cur);
-        }
-        for d in &mut self.ports.beta_s {
-            *d = read_f64_bits(blob, &mut cur);
-        }
-        for (s_idx, entry) in self.choir_map.strings().iter().enumerate() {
-            if self.ports.may_be_nonzero[s_idx] {
-                self.ports.ports_synced[s_idx] = false;
-                rescale_active_string_uv(
-                    &mut self.soa,
-                    &mut self.bridge_ports,
-                    self.soa_dirty,
-                    &mut self.bp_dirty,
-                    s_idx,
-                    entry,
-                    gamma_old[s_idx],
-                    self.ports.gamma_s[s_idx],
-                );
-            }
-        }
-        read_copy(blob, &mut cur, self.long_bank.b_long_prec.as_mut_slice());
-        for d in &mut self.long_bank.prec_force_scale {
-            *d = read_f64_bits(blob, &mut cur);
-        }
-        for d in &mut self.long_bank.prec_force_cap_n {
-            *d = read_f64_bits(blob, &mut cur);
-        }
-        for c in &mut self.bridge_ports.coef {
-            c.d = F32x4::from_slice(&blob[cur..cur + 4]);
-            c.s = F32x4::from_slice(&blob[cur + 4..cur + 8]);
-            c.beta = F32x4::from_slice(&blob[cur + 8..cur + 12]);
-            cur += 12;
-        }
-        for d in [
-            self.bridge_ports.tl_soa.d_coeff.as_mut_slice(),
-            self.bridge_ports.tl_soa.s_coeff.as_mut_slice(),
-            self.bridge_ports.tl_soa.c_bridge.as_mut_slice(),
-        ] {
-            read_copy(blob, &mut cur, d);
-        }
-        for d in [
-            &mut self.bridge_ports.r0[..],
-            &mut self.bridge_ports.a_wave_gains[..],
-            &mut self.bridge_ports.r_damp_prefix_v[..],
-            &mut self.bridge_ports.r_damp_prefix_h[..],
-            &mut self.bridge_ports.tail_n_trans[..],
-            &mut self.bridge_ports.tail_n_long[..],
-        ] {
-            read_copy(blob, &mut cur, d);
-        }
-        for s_idx in 0..TOTAL_STRINGS {
-            let g = self.bridge_ports.a_wave_gains[s_idx];
-            self.bridge_ports.meta[s_idx].a_wave_gain = g;
-            self.bridge_ports.fast_meta[s_idx].a_wave_gain = g;
-        }
-        for k in 0..NUM_KEYS {
-            let s0 = self.choir_map.keys()[k].string_range.start;
-            self.bridge_ports.key_tails[k].tail_n_trans = self.bridge_ports.tail_n_trans[s0];
-            self.bridge_ports.key_tails[k].tail_n_long = self.bridge_ports.tail_n_long[s0];
-        }
-        for (s_idx, entry) in self.choir_map.strings().iter().enumerate() {
-            if usize::from(entry.key_idx) < LONGITUDINAL_MAX_KEY_IDX {
-                read_sav_entry(
-                    blob,
-                    &mut cur,
-                    &mut self.sav.specs[s_idx],
-                    &mut self.sav.slopes[s_idx],
-                );
-            }
-        }
-        debug_assert_eq!(cur, expected_len);
-        self.bridge_ports.sync_damp_ports(&self.ports);
-        self.bridge_ports.a_waves_dirty = true;
-        let specs = build_scale_design(&v);
-        self.recompute_passive_res_caps(&v, &specs);
-        self.last_voicing = v;
-        true
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +252,97 @@ mod tests {
             assert!(!fast_bank.install_precomputed_voicing(&mismatched, blob));
             assert!(!fast_bank.install_precomputed_voicing(&v, &[0.0; 12]));
         }
+    }
+
+    #[test]
+    fn time_sliced_per_key_install_defers_ports_until_finish_and_matches_batch() {
+        let sr = 48_000.0;
+        let perf = PerfProfile::balanced();
+        let mut batch_bank =
+            StringBank::new_bridge_coupled_with_profile(sr, &VoicingSpec::default(), &perf);
+        let mut sliced_bank =
+            StringBank::new_bridge_coupled_with_profile(sr, &VoicingSpec::default(), &perf);
+        let mut direct_bank =
+            StringBank::new_bridge_coupled_with_profile(sr, &VoicingSpec::default(), &perf);
+        let mut prep = VoicingPrepContext::new_with_profile(sr, &perf);
+
+        batch_bank.apply_excitation_sample(0, [1.0, 0.0, 0.0], 6.0);
+        sliced_bank.apply_excitation_sample(0, [1.0, 0.0, 0.0], 6.0);
+        batch_bank.apply_excitation_sample(48, [1.0, 1.0, 1.0], 6.0);
+        sliced_bank.apply_excitation_sample(48, [1.0, 1.0, 1.0], 6.0);
+
+        let v = VoicingSpec::from_globals_with_a4(0.80, 1.75, 1.25, 0.94, 415.0);
+        let blob = prep.prepare_voicing(&v);
+        let orig_r0 = *sliced_bank.bridge_port_resistances();
+        let orig_aw = sliced_bank.bridge_ports.a_wave_gains;
+
+        assert!(batch_bank.install_precomputed_voicing(&v, blob));
+
+        let scale_specs = piano_spec::build_scale_design(&v);
+        assert!(sliced_bank.begin_voicing_install(&v, &scale_specs, blob));
+        assert!(!sliced_bank.install_voicing_key(88, blob));
+        assert!(!sliced_bank.install_voicing_key(0, &[0.0; 12]));
+        assert!(!sliced_bank.finish_voicing_ports(&[0.0; 12]));
+
+        for chunk_start in (0..piano_spec::NUM_KEYS).step_by(8) {
+            for k in chunk_start..(chunk_start + 8).min(piano_spec::NUM_KEYS) {
+                assert!(sliced_bank.install_voicing_key(k, blob));
+            }
+            // r0 and a_wave_gains must remain atomic (unchanged) until finish_voicing_ports.
+            assert_eq!(sliced_bank.bridge_port_resistances(), &orig_r0);
+            assert_eq!(sliced_bank.bridge_ports.a_wave_gains, orig_aw);
+        }
+        sliced_bank.bridge_ports.a_waves_dirty = false;
+        assert!(sliced_bank.finish_voicing_ports(blob));
+        assert!(sliced_bank.bridge_ports.a_waves_dirty);
+
+        // Verify bit-exact parity between batch install and 8-keys/block sliced install.
+        assert_eq!(
+            batch_bank.bridge_port_resistances(),
+            sliced_bank.bridge_port_resistances()
+        );
+        assert_eq!(
+            batch_bank.bridge_ports.a_wave_gains,
+            sliced_bank.bridge_ports.a_wave_gains
+        );
+        assert_eq!(
+            batch_bank.soa.d_coeff.as_slice(),
+            sliced_bank.soa.d_coeff.as_slice()
+        );
+        assert_eq!(
+            batch_bank.soa.s_coeff.as_slice(),
+            sliced_bank.soa.s_coeff.as_slice()
+        );
+        assert_eq!(
+            batch_bank.bridge_ports.tl_soa.d_coeff.as_slice(),
+            sliced_bank.bridge_ports.tl_soa.d_coeff.as_slice()
+        );
+        assert_eq!(
+            batch_bank.long_bank.b_long_prec.as_slice(),
+            sliced_bank.long_bank.b_long_prec.as_slice()
+        );
+        assert_eq!(batch_bank.ports.gamma_s, sliced_bank.ports.gamma_s);
+        assert_eq!(batch_bank.passive_v_vecs, sliced_bank.passive_v_vecs);
+        assert_eq!(batch_bank.passive_h_vecs, sliced_bank.passive_h_vecs);
+        assert_eq!(
+            batch_bank.string_linear_energy_joules(0),
+            sliced_bank.string_linear_energy_joules(0)
+        );
+        assert_eq!(
+            batch_bank.string_linear_energy_joules(144),
+            sliced_bank.string_linear_energy_joules(144)
+        );
+
+        // Verify direct install_voicing_key + finish_voicing_ports without begin_voicing_install.
+        for k in 0..piano_spec::NUM_KEYS {
+            assert!(direct_bank.install_voicing_key(k, blob));
+        }
+        assert!(direct_bank.finish_voicing_ports(blob));
+        assert_eq!(
+            batch_bank.bridge_port_resistances(),
+            direct_bank.bridge_port_resistances()
+        );
+        assert_eq!(batch_bank.last_voicing.a4_freq_hz, 415.0);
+        assert_eq!(direct_bank.last_voicing.a4_freq_hz, 415.0);
     }
 }

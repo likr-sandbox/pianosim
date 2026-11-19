@@ -294,3 +294,64 @@ pub(crate) fn route_damped_symp_key(
         }
     }
 }
+
+/// Demotes a decaying released key under half-pedal (`!hammer && !mid_ev && !has_peel && yc < 4.5 mm`)
+/// to passive linear bridge resonance once self-string high-band tail energy (`> passive_res_max_hz`)
+/// drops below `tail_damp_high_sq`. Strictly FTO #4 & #7 compliant (self-string energy & clearance only).
+#[inline]
+pub(crate) fn try_demote_half_pedal_key(
+    r: &mut BridgeRun<'_>,
+    sr: Range<usize>,
+    yc0: f32,
+    yc_end: f32,
+    tail_damp_high_sq: f32,
+) {
+    if !r.passive_res_enabled || yc_end > yc0 + 1.0e-7 {
+        return;
+    }
+    let tu = r.bridge_ports.tl_soa.u.as_f32x4_slice();
+    let tv = r.bridge_ports.tl_soa.v.as_f32x4_slice();
+    for s_idx in sr {
+        if !r.ports.struck_active[s_idx] {
+            continue;
+        }
+        let mut high_active = false;
+        if r.ports.tail_nonzero[s_idx] {
+            let m = &r.bridge_ports.meta[s_idx];
+            let pv = usize::from(r.passive_v_vecs[s_idx]).min(m.tl_v.len());
+            let nv = usize::from(r.ports.tl_v_active[s_idx]).min(m.tl_v.len());
+            for idx in (m.tl_v.start + pv)..(m.tl_v.start + nv) {
+                let e4 = (tu[idx] * tu[idx] + tv[idx] * tv[idx]).to_array();
+                if e4[0] >= tail_damp_high_sq
+                    || e4[1] >= tail_damp_high_sq
+                    || e4[2] >= tail_damp_high_sq
+                    || e4[3] >= tail_damp_high_sq
+                {
+                    high_active = true;
+                    break;
+                }
+            }
+            if !high_active {
+                let ph = usize::from(r.passive_h_vecs[s_idx]).min(m.tl_h.len());
+                let nh = usize::from(r.ports.tl_h_active[s_idx]).min(m.tl_h.len());
+                for idx in (m.tl_h.start + ph)..(m.tl_h.start + nh) {
+                    let e4 = (tu[idx] * tu[idx] + tv[idx] * tv[idx]).to_array();
+                    if e4[0] >= tail_damp_high_sq
+                        || e4[1] >= tail_damp_high_sq
+                        || e4[2] >= tail_damp_high_sq
+                        || e4[3] >= tail_damp_high_sq
+                    {
+                        high_active = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !high_active {
+            r.ports.struck_active[s_idx] = false;
+            r.ports.sav_dormant[s_idx] = false;
+            r.ports.sav_low_nl_chunks[s_idx] = 0;
+            r.sav.reset_string(s_idx);
+        }
+    }
+}

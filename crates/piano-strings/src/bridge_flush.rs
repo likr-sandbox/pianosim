@@ -3,7 +3,7 @@
 use core::ops::Range;
 
 use piano_simd::F32x4;
-use piano_spec::{LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS};
+use piano_spec::{LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_port::{BridgePorts, PrefixState};
 use crate::choir_map::StringMapEntry;
@@ -14,14 +14,36 @@ use crate::zoh_kernel::{flush_subnormals_range, flush_subnormals_slices};
 use crate::{BridgePortDriver, KeyActionDriver, StringBank};
 
 const TAIL_DAMP_HORIZON_SQ: f32 = 4.0e-12; // (half-pedal tail-grazing horizon; closed damper damps to -120 dBFS)
+pub(crate) const TAIL_DAMP_HIGH_BAND_SQ: f32 = 1.0e-9;
 const SAV_DORMANCY_CHUNKS: u8 = 12;
 
 #[inline]
+pub(crate) fn tail_damp_thresholds(
+    passive_res_max_hz: f32,
+    high_order_horizon_sq: f32,
+) -> (f32, f32) {
+    if passive_res_max_hz >= 20_000.0 && high_order_horizon_sq <= 1.0e-18 {
+        (TAIL_DAMP_HORIZON_SQ, TAIL_DAMP_HORIZON_SQ)
+    } else {
+        (
+            TAIL_DAMP_HORIZON_SQ,
+            TAIL_DAMP_HIGH_BAND_SQ.max(high_order_horizon_sq),
+        )
+    }
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
 fn shrink_tail_horizon(
     tl_soa: &mut ModalSoa,
     range: Range<usize>,
     active: &mut u16,
-    energy_horizon_sq: f32,
+    low_tl_vecs: usize,
+    low_order_horizon_sq: f32,
+    high_order_horizon_sq: f32,
+    passive_vecs: usize,
+    tail_damp_low_sq: f32,
+    tail_damp_high_sq: f32,
     check_damp: bool,
 ) -> bool {
     let mut n = usize::from(*active).min(range.len());
@@ -29,12 +51,13 @@ fn shrink_tail_horizon(
     let v = &mut tl_soa.v.as_f32x4_slice_mut()[range];
     while n > 0 {
         let idx = n - 1;
+        let thresh = if idx < low_tl_vecs {
+            low_order_horizon_sq
+        } else {
+            high_order_horizon_sq
+        };
         let e4 = (u[idx] * u[idx] + v[idx] * v[idx]).to_array();
-        if e4[0] < energy_horizon_sq
-            && e4[1] < energy_horizon_sq
-            && e4[2] < energy_horizon_sq
-            && e4[3] < energy_horizon_sq
-        {
+        if e4[0] < thresh && e4[1] < thresh && e4[2] < thresh && e4[3] < thresh {
             u[idx] = F32x4::zero();
             v[idx] = F32x4::zero();
             n -= 1;
@@ -43,13 +66,20 @@ fn shrink_tail_horizon(
         }
     }
     *active = n as u16;
-    check_damp
-        && (0..n).any(|idx| {
-            (u[idx] * u[idx] + v[idx] * v[idx])
-                .to_array()
-                .iter()
-                .any(|&e| e >= TAIL_DAMP_HORIZON_SQ)
-        })
+    if !check_damp {
+        return false;
+    }
+    (0..n).any(|idx| {
+        let damp_thresh = if idx < passive_vecs {
+            tail_damp_low_sq
+        } else {
+            tail_damp_high_sq
+        };
+        (u[idx] * u[idx] + v[idx] * v[idx])
+            .to_array()
+            .iter()
+            .any(|&e| e >= damp_thresh)
+    })
 }
 
 pub(crate) fn update_sav_dormancy(
@@ -120,25 +150,32 @@ pub(crate) fn flush_bridge_subnormals_core(
     strings: &[StringMapEntry],
     key_has_hammer: &[bool; NUM_KEYS],
     key_closed_damp: &[bool; NUM_KEYS],
-    energy_horizon_sq: f32,
+    passive_v_vecs: &[u16; TOTAL_STRINGS],
+    passive_h_vecs: &[u16; TOTAL_STRINGS],
+    low_order_horizon_sq: f32,
+    high_order_horizon_sq: f32,
+    tail_damp_low_sq: f32,
+    tail_damp_high_sq: f32,
     lossless: bool,
 ) {
     for (s_idx, entry) in strings.iter().enumerate() {
         if ports.may_be_nonzero[s_idx] {
             let k = usize::from(entry.key_idx);
-            let (p_range, tl_v, tl_h, tl_l) = {
+            let (p_range, tl_v, tl_h, tl_l, v_br_len, h_br_len) = {
                 let m = &bridge_ports.meta[s_idx];
                 (
                     m.beta_v_off..(m.beta_v_off + m.n_vh),
                     m.tl_v.clone(),
                     m.tl_h.clone(),
                     m.tl_l.clone(),
+                    m.v_br.len(),
+                    m.h_br.len(),
                 )
             };
             let nz_br = flush_prefix_slice(
                 &mut bridge_ports.state[p_range],
                 !lossless && key_closed_damp[k] && !ports.tail_nonzero[s_idx],
-                energy_horizon_sq,
+                low_order_horizon_sq,
             );
             let nz = if !ports.tail_nonzero[s_idx] {
                 ports.tl_damp_active[s_idx] = false;
@@ -146,18 +183,30 @@ pub(crate) fn flush_bridge_subnormals_core(
             } else {
                 if !lossless && !key_has_hammer[k] {
                     let check_d = ports.tl_damp_active[s_idx];
+                    let low_tl_v = 2usize.saturating_sub(v_br_len);
+                    let low_tl_h = 2usize.saturating_sub(h_br_len);
                     let dv = shrink_tail_horizon(
                         &mut bridge_ports.tl_soa,
                         tl_v.clone(),
                         &mut ports.tl_v_active[s_idx],
-                        energy_horizon_sq,
+                        low_tl_v,
+                        low_order_horizon_sq,
+                        high_order_horizon_sq,
+                        usize::from(passive_v_vecs[s_idx]),
+                        tail_damp_low_sq,
+                        tail_damp_high_sq,
                         check_d,
                     );
                     let dh = shrink_tail_horizon(
                         &mut bridge_ports.tl_soa,
                         tl_h.clone(),
                         &mut ports.tl_h_active[s_idx],
-                        energy_horizon_sq,
+                        low_tl_h,
+                        low_order_horizon_sq,
+                        high_order_horizon_sq,
+                        usize::from(passive_h_vecs[s_idx]),
+                        tail_damp_low_sq,
+                        tail_damp_high_sq,
                         check_d,
                     );
                     if check_d && !dv && !dh {
@@ -221,7 +270,9 @@ impl StringBank {
             &self.passive_h_vecs,
             sav_max_key_idx,
             self.perf.sav_dormancy_ratio(),
+            self.perf.low_order_energy_horizon_sq(),
             self.perf.energy_horizon_sq(),
+            self.perf.passive_res_max_hz,
             self.longitudinal_enabled,
             self.sav_phantom_enabled,
             self.lossless,
@@ -244,6 +295,8 @@ impl StringBank {
         key_closed_damp: &[bool; NUM_KEYS],
     ) {
         if self.soa_dirty {
+            let high_sq = self.perf.energy_horizon_sq();
+            let (td_low, td_high) = tail_damp_thresholds(self.perf.passive_res_max_hz, high_sq);
             flush_bridge_subnormals_core(
                 &mut self.ports,
                 &mut self.bridge_ports,
@@ -251,7 +304,12 @@ impl StringBank {
                 self.choir_map.strings(),
                 key_has_hammer,
                 key_closed_damp,
-                self.perf.energy_horizon_sq(),
+                &self.passive_v_vecs,
+                &self.passive_h_vecs,
+                self.perf.low_order_energy_horizon_sq(),
+                high_sq,
+                td_low,
+                td_high,
                 self.lossless,
             );
         }

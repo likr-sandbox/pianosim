@@ -87,6 +87,9 @@ impl StringBank {
             sample_rate: safe_rate,
             perf: p,
             last_voicing: v.clone(),
+            pending_voicing: v.clone(),
+            pending_scale_specs: alloc::boxed::Box::new(specs),
+            pending_voicing_active: false,
             choir_map,
             soa,
             ports,
@@ -107,6 +110,46 @@ impl StringBank {
         bank
     }
 
+    pub(crate) fn recompute_passive_res_caps_key(
+        &mut self,
+        k: usize,
+        voicing: &VoicingSpec,
+        specs: &[StringPhysicalParams; NUM_KEYS],
+    ) {
+        let Some(key_entry) = self.choir_map.key(k) else {
+            return;
+        };
+        let sr = key_entry.string_range.clone();
+        if self.perf.passive_res_max_hz >= 20_000.0 {
+            self.passive_v_vecs[sr.clone()].fill(u16::MAX);
+            self.passive_h_vecs[sr].fill(u16::MAX);
+            return;
+        }
+        let lim_hz = f64::from(self.perf.passive_res_max_hz).clamp(1_000.0, 20_000.0);
+        let spec = &specs[k];
+        for s_idx in sr {
+            let entry = &self.choir_map.strings()[s_idx];
+            let s_choir = usize::from(entry.string_in_choir);
+            let m = &self.bridge_ports.meta[s_idx];
+            let f0_v = effective_string_f0_hz(k, s_choir, Polarization::Vertical, specs, voicing);
+            let f0_h = effective_string_f0_hz(k, s_choir, Polarization::Horizontal, specs, voicing);
+            self.passive_v_vecs[s_idx] = count_passive_tail_vecs(
+                m.v_br.len(),
+                m.tl_v.len(),
+                f0_v,
+                spec.inharmonicity_b,
+                lim_hz,
+            );
+            self.passive_h_vecs[s_idx] = count_passive_tail_vecs(
+                m.h_br.len(),
+                m.tl_h.len(),
+                f0_h,
+                spec.inharmonicity_b,
+                lim_hz,
+            );
+        }
+    }
+
     pub(crate) fn recompute_passive_res_caps(
         &mut self,
         voicing: &VoicingSpec,
@@ -117,14 +160,92 @@ impl StringBank {
             self.passive_h_vecs.fill(u16::MAX);
             return;
         }
+        for k in 0..NUM_KEYS {
+            self.recompute_passive_res_caps_key(k, voicing, specs);
+        }
+    }
+
+    pub(crate) fn recompute_passive_res_caps_pending(&mut self, k: usize) {
+        let Some(key_entry) = self.choir_map.key(k) else {
+            return;
+        };
+        let sr = key_entry.string_range.clone();
+        if self.perf.passive_res_max_hz >= 20_000.0 {
+            self.passive_v_vecs[sr.clone()].fill(u16::MAX);
+            self.passive_h_vecs[sr].fill(u16::MAX);
+            return;
+        }
         let lim_hz = f64::from(self.perf.passive_res_max_hz).clamp(1_000.0, 20_000.0);
-        for (s_idx, entry) in self.choir_map.strings().iter().enumerate() {
-            let k = usize::from(entry.key_idx);
+        let spec = &self.pending_scale_specs[k];
+        for s_idx in sr {
+            let entry = &self.choir_map.strings()[s_idx];
             let s_choir = usize::from(entry.string_in_choir);
-            let spec = &specs[k];
             let m = &self.bridge_ports.meta[s_idx];
-            let f0_v = effective_string_f0_hz(k, s_choir, Polarization::Vertical, specs, voicing);
-            let f0_h = effective_string_f0_hz(k, s_choir, Polarization::Horizontal, specs, voicing);
+            let f0_v = effective_string_f0_hz(
+                k,
+                s_choir,
+                Polarization::Vertical,
+                &self.pending_scale_specs,
+                &self.pending_voicing,
+            );
+            let f0_h = effective_string_f0_hz(
+                k,
+                s_choir,
+                Polarization::Horizontal,
+                &self.pending_scale_specs,
+                &self.pending_voicing,
+            );
+            self.passive_v_vecs[s_idx] = count_passive_tail_vecs(
+                m.v_br.len(),
+                m.tl_v.len(),
+                f0_v,
+                spec.inharmonicity_b,
+                lim_hz,
+            );
+            self.passive_h_vecs[s_idx] = count_passive_tail_vecs(
+                m.h_br.len(),
+                m.tl_h.len(),
+                f0_h,
+                spec.inharmonicity_b,
+                lim_hz,
+            );
+        }
+    }
+
+    pub(crate) fn recompute_passive_res_caps_key_from_pending(
+        &mut self,
+        k: usize,
+        voicing: &VoicingSpec,
+    ) {
+        let Some(key_entry) = self.choir_map.key(k) else {
+            return;
+        };
+        let sr = key_entry.string_range.clone();
+        if self.perf.passive_res_max_hz >= 20_000.0 {
+            self.passive_v_vecs[sr.clone()].fill(u16::MAX);
+            self.passive_h_vecs[sr].fill(u16::MAX);
+            return;
+        }
+        let lim_hz = f64::from(self.perf.passive_res_max_hz).clamp(1_000.0, 20_000.0);
+        let spec = &self.pending_scale_specs[k];
+        for s_idx in sr {
+            let entry = &self.choir_map.strings()[s_idx];
+            let s_choir = usize::from(entry.string_in_choir);
+            let m = &self.bridge_ports.meta[s_idx];
+            let f0_v = effective_string_f0_hz(
+                k,
+                s_choir,
+                Polarization::Vertical,
+                &self.pending_scale_specs,
+                voicing,
+            );
+            let f0_h = effective_string_f0_hz(
+                k,
+                s_choir,
+                Polarization::Horizontal,
+                &self.pending_scale_specs,
+                voicing,
+            );
             self.passive_v_vecs[s_idx] = count_passive_tail_vecs(
                 m.v_br.len(),
                 m.tl_v.len(),
@@ -199,6 +320,7 @@ impl StringBank {
         let new_sav_max = usize::from(p.sav_max_key_idx).min(LONGITUDINAL_MAX_KEY_IDX);
         let pasv_changed =
             (p.passive_res_max_hz - self.perf.passive_res_max_hz).abs() > f32::EPSILON;
+        self.perf.low_order_energy_horizon_db = p.low_order_energy_horizon_db;
         self.perf.energy_horizon_db = p.energy_horizon_db;
         self.perf.sav_dormancy_db = p.sav_dormancy_db;
         self.perf.sav_max_key_idx = p.sav_max_key_idx;

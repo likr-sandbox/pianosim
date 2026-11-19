@@ -5,7 +5,9 @@
 use piano_spec::{NUM_KEYS, TOTAL_STRINGS};
 
 use crate::bridge_damp_kernels::refresh_chunk_damp_y;
-use crate::bridge_flush::{flush_bridge_subnormals_core, update_sav_dormancy};
+use crate::bridge_flush::{
+    flush_bridge_subnormals_core, tail_damp_thresholds, update_sav_dormancy,
+};
 use crate::bridge_port::{BridgePortDriver, BridgePorts};
 use crate::bridge_prefix_step::{
     step_clearance_subblock_with_peel, step_idle_clearance_check_peel,
@@ -13,8 +15,8 @@ use crate::bridge_prefix_step::{
 use crate::bridge_scratch::{step_all_strings_prefix_wdf, BridgeScratch, MAX_PEEL_SLOTS};
 use crate::bridge_tails::{
     key_clear_of_open_damper, key_needs_active_tail, prepare_sample_tails_and_hammers,
-    route_damped_symp_key, sav_long_vecs, step_uncoupled_tails, BridgeRun, KeyCat, SavLongSlice,
-    SUB,
+    route_damped_symp_key, sav_long_vecs, step_uncoupled_tails, try_demote_half_pedal_key,
+    BridgeRun, KeyCat, SavLongSlice, SUB,
 };
 use crate::choir_map::ChoirMap;
 use crate::contact::KeyActionDriver;
@@ -36,7 +38,9 @@ pub(crate) fn render_subblock_bridge_coupled_core(
     passive_h_vecs: &[u16; TOTAL_STRINGS],
     sav_max_key_idx: usize,
     sav_dormancy_ratio: f64,
-    energy_horizon_sq: f32,
+    low_order_horizon_sq: f32,
+    high_order_horizon_sq: f32,
+    passive_res_max_hz: f32,
     long_on: bool,
     sav_on: bool,
     lossless: bool,
@@ -54,6 +58,8 @@ pub(crate) fn render_subblock_bridge_coupled_core(
     if total == 0 {
         return;
     }
+    let (tail_damp_low_sq, tail_damp_high_sq) =
+        tail_damp_thresholds(passive_res_max_hz, high_order_horizon_sq);
     let zone_weights = *bridge.zone_weights();
     bridge_ports.sync_a_waves(&ports.may_be_nonzero);
     let mut a_waves = bridge_ports.a_waves;
@@ -69,6 +75,7 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         passive_h_vecs,
         sav_max_key_idx,
         sav_dormancy_ratio,
+        passive_res_enabled: passive_res_max_hz < 20_000.0,
         long_on,
         sav_on,
         lossless,
@@ -222,6 +229,11 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                     && key.has_damper
                     && key_clear_of_open_damper(&r, &plan.was_nz, sr.clone(), min_c);
                 if open_clear {
+                    let (yc0, yc_end) = (
+                        r.ports.y_clear_scratch[k][0],
+                        r.ports.y_clear_scratch[k][sub - 1],
+                    );
+                    try_demote_half_pedal_key(&mut r, sr.clone(), yc0, yc_end, tail_damp_high_sq);
                     for s_idx in sr.clone() {
                         if plan.was_nz[s_idx] {
                             driver.relax_open_gap_chunk(s_idx, sub);
@@ -235,6 +247,19 @@ pub(crate) fn render_subblock_bridge_coupled_core(
                         plan.push_coupled(s_idx);
                     }
                 } else {
+                    if !has_peel && key.has_damper {
+                        let (yc0, yc_end) = (
+                            r.ports.y_clear_scratch[k][0],
+                            r.ports.y_clear_scratch[k][sub - 1],
+                        );
+                        try_demote_half_pedal_key(
+                            &mut r,
+                            sr.clone(),
+                            yc0,
+                            yc_end,
+                            tail_damp_high_sq,
+                        );
+                    }
                     plan.key_cat[k] = KeyCat::DampedSymp;
                     if key.has_damper {
                         route_damped_symp_key(&mut r, driver, plan, k, sr.clone(), sub, has_peel);
@@ -354,7 +379,12 @@ pub(crate) fn render_subblock_bridge_coupled_core(
         r.strings,
         &plan.key_has_hammer,
         &flush_closed_damp,
-        energy_horizon_sq,
+        r.passive_v_vecs,
+        r.passive_h_vecs,
+        low_order_horizon_sq,
+        high_order_horizon_sq,
+        tail_damp_low_sq,
+        tail_damp_high_sq,
         r.lossless,
     );
 }

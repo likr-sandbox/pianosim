@@ -13,9 +13,18 @@ use crate::contact_ports::ContactPorts;
 impl BridgePorts {
     /// Copies `ports.b_damp` / `ports.a_damp` prefix vectors into L1d-packed prefix buffers.
     pub(crate) fn sync_damp_ports(&mut self, ports: &ContactPorts) {
+        self.sync_damp_ports_range(ports, 0..TOTAL_STRINGS);
+    }
+
+    /// Copies `ports.b_damp` / `ports.a_damp` prefix vectors for `sr` into L1d-packed prefix buffers.
+    pub(crate) fn sync_damp_ports_range(
+        &mut self,
+        ports: &ContactPorts,
+        sr: core::ops::Range<usize>,
+    ) {
         let bd_all = ports.b_damp.as_f32x4_slice();
         let ad_all = ports.a_damp.as_f32x4_slice();
-        for s_idx in 0..TOTAL_STRINGS {
+        for s_idx in sr {
             let m = &self.meta[s_idx];
             let (nv, nh) = (m.v_br.len(), m.h_br.len());
             self.damp_bd[m.beta_v_off..m.beta_v_off + nv].copy_from_slice(&bd_all[m.v_br.clone()]);

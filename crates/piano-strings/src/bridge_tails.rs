@@ -8,6 +8,7 @@ pub(crate) use crate::bridge_sample_prep::prepare_sample_tails_and_hammers;
 #[allow(unused_imports)]
 pub(crate) use crate::bridge_tail_routing::{
     key_clear_of_open_damper, key_needs_active_tail, route_damped_symp_key,
+    try_demote_half_pedal_key,
 };
 use crate::choir_map::{KeyMapEntry, StringMapEntry};
 use crate::contact_ports::ContactPorts;
@@ -122,6 +123,7 @@ pub(crate) struct BridgeRun<'a> {
     pub passive_h_vecs: &'a [u16; TOTAL_STRINGS],
     pub sav_max_key_idx: usize,
     pub sav_dormancy_ratio: f64,
+    pub passive_res_enabled: bool,
     pub long_on: bool,
     pub sav_on: bool,
     pub lossless: bool,

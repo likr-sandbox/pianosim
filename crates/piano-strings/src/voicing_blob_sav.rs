@@ -49,12 +49,6 @@ pub(crate) fn push_copy(out: &mut Vec<f32>, src: &[f32]) {
     out.extend_from_slice(src);
 }
 
-#[inline]
-pub(crate) fn read_copy(src: &[f32], cur: &mut usize, dst: &mut [f32]) {
-    dst.copy_from_slice(&src[*cur..*cur + dst.len()]);
-    *cur += dst.len();
-}
-
 pub(crate) fn push_sav_entry(out: &mut Vec<f32>, sp: &SavStringSpec, sl: &SavEnergySlopes) {
     for &u in &[
         sp.n_vh, sp.m_ph, sp.nv_vecs, sp.nh_vecs, sp.nl_vecs, sl.nv_c, sl.nh_c,

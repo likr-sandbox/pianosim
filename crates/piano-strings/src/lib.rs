@@ -48,6 +48,7 @@ pub(crate) mod sav_spec;
 pub(crate) mod sav_tile;
 mod sav_tile_3x6;
 mod voicing_blob;
+mod voicing_blob_install;
 mod voicing_blob_sav;
 mod voicing_update;
 pub mod zoh_kernel;
@@ -58,7 +59,10 @@ pub use contact::KeyActionDriver;
 pub use voicing_blob::{voicing_blob_len, voicing_blob_len_with_profile, VoicingPrepContext};
 
 use alloc::boxed::Box;
-use piano_spec::{PerfProfile, VoicingSpec, LONGITUDINAL_MAX_KEY_IDX, TOTAL_STRINGS};
+use piano_spec::{
+    PerfProfile, StringPhysicalParams, VoicingSpec, LONGITUDINAL_MAX_KEY_IDX, NUM_KEYS,
+    TOTAL_STRINGS,
+};
 
 use crate::bridge_port::BridgePorts;
 use crate::bridge_scratch::BridgeScratch;
@@ -80,6 +84,9 @@ pub struct StringBank {
     sample_rate: f32,
     perf: PerfProfile,
     last_voicing: VoicingSpec,
+    pending_voicing: VoicingSpec,
+    pending_scale_specs: Box<[StringPhysicalParams; NUM_KEYS]>,
+    pending_voicing_active: bool,
     choir_map: ChoirMap,
     soa: ModalSoa,
     ports: ContactPorts,
@@ -301,7 +308,9 @@ impl StringBank {
             &self.passive_h_vecs,
             sav_max_key_idx,
             self.perf.sav_dormancy_ratio(),
+            self.perf.low_order_energy_horizon_sq(),
             self.perf.energy_horizon_sq(),
+            self.perf.passive_res_max_hz,
             self.longitudinal_enabled,
             self.sav_phantom_enabled,
             self.lossless,
@@ -322,6 +331,9 @@ mod m5_tests;
 
 #[cfg(test)]
 mod m3_profile_tests;
+
+#[cfg(test)]
+mod m4_strings_tests;
 
 #[cfg(test)]
 mod phantom_sparse_tests;
