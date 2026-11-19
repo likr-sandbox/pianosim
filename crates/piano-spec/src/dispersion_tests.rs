@@ -1,4 +1,6 @@
 use super::*;
+use crate::math::exp2_f64;
+use crate::scale_design::{A4_KEY_IDX, NUM_KEYS};
 
 #[test]
 fn analytical_dispersion_law_matches_direct_formula() {

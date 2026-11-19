@@ -6,6 +6,7 @@ extern crate alloc;
 
 pub mod condition;
 pub mod dispersion;
+pub mod dispersion_tuning;
 pub mod events;
 pub mod preset_codec;
 pub mod scale_design;
