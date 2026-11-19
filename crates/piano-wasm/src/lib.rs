@@ -1,6 +1,7 @@
 //! AudioWorklet WebAssembly bindings and linear-memory SPSC IPC queues.
 
 pub mod exports;
+pub mod perf_exports;
 pub mod prep_ipc;
 pub mod ring_ipc;
 pub mod wave3_exports;
@@ -14,6 +15,10 @@ pub use exports::{
     piano_set_hammer_hardness, piano_set_space, piano_set_voicing, piano_stage_space_chunk,
     piano_staging_offset_ptr, piano_staging_ptr, piano_telemetry_ptr,
 };
+pub use perf_exports::{
+    piano_init_with_profile, piano_prep_set_perf_preset, piano_prep_set_stage4_profile,
+    piano_set_perf_knob, piano_set_perf_preset,
+};
 pub use prep_ipc::PrepContext;
 pub use ring_ipc::{WasmContext, MAX_BLOCK, TELEMETRY_LEN};
 pub use wave3_exports::{
@@ -24,6 +29,9 @@ pub use wave4_exports::{
     piano_apply_voicing_blob_ex, piano_prep_voicing_ex, piano_set_concert_pitch,
     piano_set_condition, piano_set_temperament, piano_set_voicing_full,
 };
+
+#[cfg(test)]
+mod perf_tests;
 
 #[cfg(test)]
 mod wave3_tests;

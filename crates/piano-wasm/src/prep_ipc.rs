@@ -1,7 +1,9 @@
 //! Off-thread Prep Web Worker context (`SpacePrepContext` + `VoicingPrepContext`)
 //! avoiding real-time audio buffer allocations.
 
-use piano_engine::{embedded_body_bytes, BodyArchetype, SpacePrepContext, VoicingPrepContext};
+use piano_engine::{
+    embedded_body_bytes, BodyArchetype, PerfProfile, SpacePrepContext, VoicingPrepContext,
+};
 use piano_spec::{LidState, ListenerPerspective, Temperament, VoicingSpec};
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -41,6 +43,29 @@ impl PrepContext {
     #[inline]
     pub const fn body_archetype(&self) -> BodyArchetype {
         self.body_archetype
+    }
+
+    /// Updates both Stage 4 (`SpacePrepContext`) and Stage 2/3 (`VoicingPrepContext`)
+    /// to use `profile` for subsequent blob generation.
+    pub fn set_perf_profile(&mut self, profile: &PerfProfile) {
+        self.space.set_perf_profile(profile);
+        self.voicing.set_perf_profile(profile);
+    }
+
+    /// Updates Stage 4 parameters directly on `SpacePrepContext` for subsequent `prepare_space*` calls.
+    pub fn set_stage4_profile(
+        &mut self,
+        ir_duration_secs: f32,
+        spatial_tail_split_tap: u16,
+        fir_head_taps: u8,
+        fir_block_fft: bool,
+    ) {
+        self.space.set_stage4_profile(
+            ir_duration_secs,
+            spatial_tail_split_tap,
+            fir_head_taps,
+            fir_block_fft,
+        );
     }
 
     /// Precomputes Stage 4 spatial FIR + NUPOLS spectra for the active body and returns `f32` element count.
