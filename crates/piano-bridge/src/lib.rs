@@ -22,13 +22,16 @@ mod duplex_tests;
 #[path = "bridge_tests.rs"]
 mod tests;
 #[cfg(test)]
+#[path = "bridge_tests_m3.rs"]
+mod tests_m3;
+#[cfg(test)]
 #[path = "bridge_tests_pbdy.rs"]
 mod tests_pbdy;
 #[cfg(test)]
 #[path = "bridge_tests_pbdy_edge.rs"]
 mod tests_pbdy_edge;
 
-use piano_spec::{BodyPreset, PresetReducedPole, VoicingSpec, TOTAL_STRINGS};
+use piano_spec::{BodyPreset, PerfProfile, PresetReducedPole, VoicingSpec, TOTAL_STRINGS};
 
 pub use admittance_ssm::{
     default_string_port_resistances, AdmittanceSsm, ReducedBridgePole, DEFAULT_Y_INF,
@@ -90,15 +93,24 @@ impl BridgeBank {
         Self::new_with_voicing(sample_rate, &VoicingSpec::default())
     }
 
-    /// Initializes the Stage 3 bridge bank for `voicing` at `sample_rate`.
+    /// Initializes the Stage 3 bridge bank for `voicing` at `sample_rate` with `PerfProfile::full()`.
     #[must_use]
     pub fn new_with_voicing(sample_rate: f32, voicing: &VoicingSpec) -> Self {
+        Self::new_with_profile(sample_rate, voicing, &PerfProfile::full())
+    }
+
+    /// Initializes the Stage 3 bridge bank for `voicing` and `perf` at `sample_rate`.
+    #[must_use]
+    pub fn new_with_profile(sample_rate: f32, voicing: &VoicingSpec, perf: &PerfProfile) -> Self {
+        let perf = perf.sanitized();
         let safe_sr = sanitize_sample_rate(sample_rate);
-        Self::build(
+        let mut bank = Self::build(
             safe_sr,
-            AdmittanceSsm::new(safe_sr),
+            AdmittanceSsm::new_with_active_poles(safe_sr, perf.active_bridge_poles),
             DuplexBank::new_with_voicing(safe_sr, voicing),
-        )
+        );
+        bank.hertz.set_enabled(perf.hertz_nonlinear);
+        bank
     }
 
     /// Initializes the Stage 3 bridge bank in exact lossless mode (`zeta = 0`, `y_inf = 0`,
@@ -201,6 +213,44 @@ impl BridgeBank {
     /// resynchronizes `8x8` WDF junction matrices, and resets Stage 3 dynamic state cleanly.
     pub fn set_body_preset(&mut self, preset: &BodyPreset) {
         self.set_reduced_model(&preset.y_inf, &preset.reduced_poles);
+    }
+
+    /// Enables or disables nonlinear Hertz bridge-pin contact SAV stiffness at runtime.
+    pub fn set_hertz_nonlinear(&mut self, enabled: bool) {
+        self.hertz.set_enabled(enabled);
+    }
+
+    /// Returns `true` when nonlinear Hertz bridge-pin contact stiffness is enabled.
+    #[must_use]
+    #[inline]
+    pub const fn is_hertz_nonlinear(&self) -> bool {
+        self.hertz.is_enabled()
+    }
+
+    /// Updates the active reduced bridge pole count (`4..=10`) at runtime (zero-alloc),
+    /// folding inactive high-frequency poles into effective `y_inf` and projecting state smoothly.
+    pub fn set_active_poles(&mut self, active_poles: u8) {
+        let clamped = active_poles.clamp(4, NUM_REDUCED_MODES as u8);
+        if self.ssm.active_poles() == clamped {
+            return;
+        }
+        self.ssm.set_active_poles(clamped);
+        self.flush_subnormals();
+    }
+
+    /// Returns the active reduced bridge pole count (`4..=10`).
+    #[must_use]
+    #[inline]
+    pub const fn active_poles(&self) -> u8 {
+        self.ssm.active_poles()
+    }
+
+    /// Applies Stage 3 M3 runtime performance profile settings (`hertz_nonlinear` and
+    /// `active_bridge_poles`) with zero heap allocations.
+    pub fn set_perf_profile_runtime(&mut self, perf: &PerfProfile) {
+        let perf = perf.sanitized();
+        self.set_hertz_nonlinear(perf.hertz_nonlinear);
+        self.set_active_poles(perf.active_bridge_poles);
     }
 
     /// Toggles rigid fixed-end diagnostic mode (`v_br = 0`, `b_waves_out = -a_waves`, zero

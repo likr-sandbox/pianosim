@@ -12,7 +12,7 @@ use crate::zone_proj::NUM_BRIDGE_ZONES;
 pub const NUM_REDUCED_MODES: usize = 10;
 
 const MIN_Y_INF: f32 = 1.0e-9;
-const MAX_Y_INF: f32 = 0.05;
+pub(crate) const MAX_Y_INF: f32 = 0.05;
 const MIN_POLE_FREQ_HZ: f32 = 1.0;
 const MAX_POLE_FREQ_HZ: f32 = 24_000.0;
 const MIN_POLE_ZETA: f32 = 1.0e-6;

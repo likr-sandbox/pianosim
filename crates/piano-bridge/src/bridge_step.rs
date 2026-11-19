@@ -130,50 +130,60 @@ impl BridgeBank {
 
         let f_dup_free = self.duplex.free_forces();
         let (qd_free, v0_free) = self.ssm.free_v0();
-        let g = self.hertz.eval_sav_gradient();
-        let g_nz = g.iter().any(|&gz| gz != 0.0);
 
         let mut f_inc_wdf = [0.0_f64; NUM_BRIDGE_ZONES];
         for z in 0..NUM_BRIDGE_ZONES {
             f_inc_wdf[z] = f_inc_str[z] + f_dup_free[z];
         }
 
-        let v_zone_f64 = if g_nz {
-            let r_h = self.hertz.r_sav();
-            let (s_wdf, s_g) = mat8_vec2(self.ssm.solve_abr(), &f_inc_wdf, &g);
-            let mut v0 = [0.0_f64; NUM_BRIDGE_ZONES];
-            for i in 0..NUM_BRIDGE_ZONES {
-                v0[i] = v0_free[i] + s_wdf[i] - r_h * s_g[i];
-            }
-            let half_ts = 0.5 * self.ts;
-            let mut u_sm = [0.0_f64; NUM_BRIDGE_ZONES];
-            let (mut denom, mut g_dot_v0) = (1.0_f64, 0.0_f64);
-            for i in 0..NUM_BRIDGE_ZONES {
-                let ui = half_ts * s_g[i];
-                u_sm[i] = ui;
-                denom += g[i] * ui;
-                g_dot_v0 += g[i] * v0[i];
-            }
-            let alpha_sm = if denom > 1.0e-12 {
-                g_dot_v0 / denom
+        let (v_zone_f64, f_hertz_on_br) = if self.hertz.is_enabled() {
+            let g = self.hertz.eval_sav_gradient();
+            let g_nz = g.iter().any(|&gz| gz != 0.0);
+            let v_zone = if g_nz {
+                let r_h = self.hertz.r_sav();
+                let (s_wdf, s_g) = mat8_vec2(self.ssm.solve_abr(), &f_inc_wdf, &g);
+                let mut v0 = [0.0_f64; NUM_BRIDGE_ZONES];
+                for i in 0..NUM_BRIDGE_ZONES {
+                    v0[i] = v0_free[i] + s_wdf[i] - r_h * s_g[i];
+                }
+                let half_ts = 0.5 * self.ts;
+                let mut u_sm = [0.0_f64; NUM_BRIDGE_ZONES];
+                let (mut denom, mut g_dot_v0) = (1.0_f64, 0.0_f64);
+                for i in 0..NUM_BRIDGE_ZONES {
+                    let ui = half_ts * s_g[i];
+                    u_sm[i] = ui;
+                    denom += g[i] * ui;
+                    g_dot_v0 += g[i] * v0[i];
+                }
+                let alpha_sm = if denom > 1.0e-12 {
+                    g_dot_v0 / denom
+                } else {
+                    0.0
+                };
+                let mut out = [0.0_f64; NUM_BRIDGE_ZONES];
+                for i in 0..NUM_BRIDGE_ZONES {
+                    out[i] = v0[i] - alpha_sm * u_sm[i];
+                }
+                out
             } else {
-                0.0
+                let s_wdf = mat8_vec(self.ssm.solve_abr(), &f_inc_wdf);
+                let mut out = [0.0_f64; NUM_BRIDGE_ZONES];
+                for i in 0..NUM_BRIDGE_ZONES {
+                    out[i] = v0_free[i] + s_wdf[i];
+                }
+                out
             };
-            let mut out = [0.0_f64; NUM_BRIDGE_ZONES];
-            for i in 0..NUM_BRIDGE_ZONES {
-                out[i] = v0[i] - alpha_sm * u_sm[i];
-            }
-            out
+            let f_h = self.hertz.commit_step(&g, &v_zone);
+            (v_zone, f_h)
         } else {
             let s_wdf = mat8_vec(self.ssm.solve_abr(), &f_inc_wdf);
             let mut out = [0.0_f64; NUM_BRIDGE_ZONES];
             for i in 0..NUM_BRIDGE_ZONES {
                 out[i] = v0_free[i] + s_wdf[i];
             }
-            out
+            (out, [0.0_f64; NUM_BRIDGE_ZONES])
         };
 
-        let f_hertz_on_br = self.hertz.commit_step(&g, &v_zone_f64);
         let g_v = mat8_vec(self.ssm.g_total(), &v_zone_f64);
         let mut f_zone_ssm = [0.0_f64; NUM_BRIDGE_ZONES];
         for i in 0..NUM_BRIDGE_ZONES {

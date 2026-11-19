@@ -4,11 +4,13 @@
 //! high-frequency resistive mobility `y_inf` across the 8 bridge zones, integrated
 //! with exact discrete trapezoidal energy balance and precomputed `8x8` WDF junction solve.
 
-use core::f64::consts::TAU;
+use core::f64::consts::{FRAC_PI_2, SQRT_2, TAU};
 
 use piano_spec::PresetReducedPole;
 
-use crate::bridge_presets::{build_default_poles, sanitize_reduced_poles, sanitize_y_inf};
+use crate::bridge_presets::{
+    build_default_poles, sanitize_reduced_poles, sanitize_y_inf, MAX_Y_INF,
+};
 pub use crate::bridge_presets::{
     default_string_port_resistances, ReducedBridgePole, DEFAULT_Y_INF, MODE_ZONE_GAINS,
     NUM_REDUCED_MODES,
@@ -17,13 +19,16 @@ pub use crate::math::invert_8x8;
 use crate::math::{identity_8x8, sanitize_sample_rate};
 use crate::zone_proj::NUM_BRIDGE_ZONES;
 
-/// Passive 10-mode reduced soundboard/bridge state-space admittance with exact
+pub(crate) const MIN_ACTIVE_POLES: usize = 4;
+
+/// Passive reduced soundboard/bridge state-space admittance (up to 10 modes) with exact
 /// trapezoidal integration and precomputed `8x8` WDF junction solve matrices.
 #[derive(Clone, Debug)]
 pub struct AdmittanceSsm {
     pub(crate) poles: [ReducedBridgePole; NUM_REDUCED_MODES],
-    pub(crate) y_inf: [f32; NUM_BRIDGE_ZONES],
-    pub(crate) y_inf_f64: [f64; NUM_BRIDGE_ZONES],
+    pub(crate) y_inf_base: [f32; NUM_BRIDGE_ZONES],
+    pub(crate) y_inf_eff_f64: [f64; NUM_BRIDGE_ZONES],
+    pub(crate) active_poles: usize,
     pub(crate) ts: f64,
     pub(crate) half_ts: f64,
     pub(crate) m_m: [f64; NUM_REDUCED_MODES],
@@ -42,16 +47,23 @@ pub struct AdmittanceSsm {
 }
 
 impl AdmittanceSsm {
-    /// Constructs the passive reduced soundboard admittance at `sample_rate`.
+    /// Constructs the passive reduced soundboard admittance at `sample_rate` with all 10 poles active.
     #[must_use]
     pub fn new(sample_rate: f32) -> Self {
-        Self::build(sample_rate, false)
+        Self::build(sample_rate, false, NUM_REDUCED_MODES)
+    }
+
+    /// Constructs the passive reduced soundboard admittance at `sample_rate` with `active_poles` (`4..=10`).
+    #[must_use]
+    pub fn new_with_active_poles(sample_rate: f32, active_poles: u8) -> Self {
+        let clamped = usize::from(active_poles).clamp(MIN_ACTIVE_POLES, NUM_REDUCED_MODES);
+        Self::build(sample_rate, false, clamped)
     }
 
     /// Constructs the lossless test admittance (`zeta = 0`, `y_inf = 0`).
     #[must_use]
     pub fn new_lossless(sample_rate: f32) -> Self {
-        Self::build(sample_rate, true)
+        Self::build(sample_rate, true, NUM_REDUCED_MODES)
     }
 
     /// Constructs a passive reduced soundboard admittance from external `.pbdy`
@@ -66,31 +78,35 @@ impl AdmittanceSsm {
             sample_rate,
             sanitize_y_inf(y_inf),
             sanitize_reduced_poles(reduced_poles),
+            NUM_REDUCED_MODES,
         )
     }
 
-    fn build(sample_rate: f32, lossless: bool) -> Self {
+    fn build(sample_rate: f32, lossless: bool, active_poles: usize) -> Self {
         let y_inf = if lossless {
             [0.0_f32; NUM_BRIDGE_ZONES]
         } else {
             DEFAULT_Y_INF
         };
         let poles = build_default_poles(lossless);
-        Self::build_with_model(sample_rate, y_inf, poles)
+        Self::build_with_model(sample_rate, y_inf, poles, active_poles)
     }
 
     fn build_with_model(
         sample_rate: f32,
         y_inf: [f32; NUM_BRIDGE_ZONES],
         poles: [ReducedBridgePole; NUM_REDUCED_MODES],
+        active_poles: usize,
     ) -> Self {
         let safe_sr = f64::from(sanitize_sample_rate(sample_rate));
         let ts = 1.0 / safe_sr;
         let h = 0.5 * ts;
+        let clamped_poles = active_poles.clamp(MIN_ACTIVE_POLES, NUM_REDUCED_MODES);
         let mut ssm = Self {
             poles,
-            y_inf,
-            y_inf_f64: [0.0_f64; NUM_BRIDGE_ZONES],
+            y_inf_base: y_inf,
+            y_inf_eff_f64: [0.0_f64; NUM_BRIDGE_ZONES],
+            active_poles: clamped_poles,
             ts,
             half_ts: h,
             m_m: [0.0_f64; NUM_REDUCED_MODES],
@@ -119,13 +135,15 @@ impl AdmittanceSsm {
         poles: [ReducedBridgePole; NUM_REDUCED_MODES],
     ) {
         self.poles = poles;
-        self.y_inf = y_inf;
-        for (dst, &src) in self.y_inf_f64.iter_mut().zip(y_inf.iter()) {
+        self.y_inf_base = y_inf;
+        for (dst, &src) in self.y_inf_eff_f64.iter_mut().zip(y_inf.iter()) {
             *dst = f64::from(src);
         }
 
+        let active = self.active_poles.clamp(MIN_ACTIVE_POLES, NUM_REDUCED_MODES);
+        self.active_poles = active;
         let h = self.half_ts;
-        for (m, pole) in poles.iter().enumerate() {
+        for (m, pole) in poles[..active].iter().enumerate() {
             let mass = f64::from(pole.modal_mass_kg);
             let omega = TAU * f64::from(pole.freq_hz);
             let stiff = mass * omega * omega;
@@ -140,12 +158,35 @@ impl AdmittanceSsm {
             }
         }
 
+        let band_avg_coeff = FRAC_PI_2 * SQRT_2;
+        let max_y = f64::from(MAX_Y_INF);
+        for (m, pole) in poles.iter().enumerate().skip(active) {
+            let mass = f64::from(pole.modal_mass_kg);
+            let omega = TAU * f64::from(pole.freq_hz);
+            let denom = mass * omega;
+            if denom > 0.0 && denom.is_finite() {
+                let scale = band_avg_coeff / denom;
+                for (z, &gain) in pole.zone_gains.iter().enumerate() {
+                    let g = f64::from(gain);
+                    let delta_y = scale * g * g;
+                    if delta_y.is_finite() && delta_y > 0.0 {
+                        self.y_inf_eff_f64[z] = (self.y_inf_eff_f64[z] + delta_y).min(max_y);
+                    }
+                }
+            }
+            self.m_m[m] = 0.0;
+            self.c_m[m] = 0.0;
+            self.k_m[m] = 0.0;
+            self.y_m[m] = 0.0;
+            self.phi[m] = [0.0; NUM_BRIDGE_ZONES];
+        }
+
         let mut a_br = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
         for (z, a_row) in a_br.iter_mut().enumerate() {
-            a_row[z] = self.y_inf_f64[z];
+            a_row[z] = self.y_inf_eff_f64[z];
             for (zp, cell) in a_row.iter_mut().enumerate() {
                 let mut sum = 0.0_f64;
-                for m in 0..NUM_REDUCED_MODES {
+                for m in 0..active {
                     sum += self.y_m[m] * self.phi[m][z] * self.phi[m][zp];
                 }
                 *cell += sum;
@@ -185,7 +226,22 @@ impl AdmittanceSsm {
     #[must_use]
     #[inline]
     pub const fn y_inf(&self) -> &[f32; NUM_BRIDGE_ZONES] {
-        &self.y_inf
+        &self.y_inf_base
+    }
+
+    /// Returns the effective high-frequency resistive bridge mobility `[m/(N*s)]`
+    /// including band-averaged conductance folded from inactive poles.
+    #[must_use]
+    #[inline]
+    pub const fn y_inf_eff_f64(&self) -> &[f64; NUM_BRIDGE_ZONES] {
+        &self.y_inf_eff_f64
+    }
+
+    /// Returns the active reduced bridge pole count (`4..=10`).
+    #[must_use]
+    #[inline]
+    pub const fn active_poles(&self) -> u8 {
+        self.active_poles as u8
     }
 
     /// Returns precomputed `A_br` `[m/(N*s)]`.
@@ -230,7 +286,7 @@ impl AdmittanceSsm {
         let mut qd_free = [0.0_f64; NUM_REDUCED_MODES];
         let mut v_free = [0.0_f64; NUM_BRIDGE_ZONES];
         let inv_h = 1.0 / self.half_ts;
-        for (m, qdf_slot) in qd_free.iter_mut().enumerate() {
+        for (m, qdf_slot) in qd_free[..self.active_poles].iter_mut().enumerate() {
             let rhs = (self.m_m[m] * inv_h) * self.q_dot[m] - self.k_m[m] * self.q[m];
             let qdf = self.y_m[m] * rhs;
             *qdf_slot = qdf;
@@ -249,7 +305,7 @@ impl AdmittanceSsm {
         let mut qd_free = [0.0_f64; NUM_REDUCED_MODES];
         let mut v0_free = [0.0_f64; NUM_BRIDGE_ZONES];
         let inv_h = 1.0 / self.half_ts;
-        for (m, qdf_slot) in qd_free.iter_mut().enumerate() {
+        for (m, qdf_slot) in qd_free[..self.active_poles].iter_mut().enumerate() {
             let rhs = (self.m_m[m] * inv_h) * self.q_dot[m] - self.k_m[m] * self.q[m];
             let qdf = self.y_m[m] * rhs;
             *qdf_slot = qdf;
@@ -260,16 +316,17 @@ impl AdmittanceSsm {
         (qd_free, v0_free)
     }
 
-    /// Returns `true` when all modal displacements and velocities are zero.
+    /// Returns `true` when all active modal displacements and velocities are zero.
     #[must_use]
     #[inline]
     pub fn is_quiescent(&self) -> bool {
-        self.q.iter().all(|&v| v == 0.0) && self.q_dot.iter().all(|&v| v == 0.0)
+        self.q[..self.active_poles].iter().all(|&v| v == 0.0)
+            && self.q_dot[..self.active_poles].iter().all(|&v| v == 0.0)
     }
 
     /// Flushes `< 1e-20` denormals/subnormals and non-finite modal states `(q, q_dot)` to `0.0`.
     pub fn flush_subnormals(&mut self) {
-        for m in 0..NUM_REDUCED_MODES {
+        for m in 0..self.active_poles {
             if !self.q[m].is_finite() || self.q[m].abs() < 1.0e-20 {
                 self.q[m] = 0.0;
             }
@@ -277,6 +334,8 @@ impl AdmittanceSsm {
                 self.q_dot[m] = 0.0;
             }
         }
+        self.q[self.active_poles..].fill(0.0);
+        self.q_dot[self.active_poles..].fill(0.0);
     }
 
     /// Commits one exact trapezoidal discrete integration step using `f_zone_ssm` (`[N]`).
@@ -287,7 +346,7 @@ impl AdmittanceSsm {
         f_zone_ssm: &[f64; NUM_BRIDGE_ZONES],
     ) {
         let mut diss = 0.0_f64;
-        for (m, &qdf) in q_dot_free.iter().enumerate() {
+        for (m, &qdf) in q_dot_free[..self.active_poles].iter().enumerate() {
             let pm = &self.phi[m];
             let p01 = pm[0] * f_zone_ssm[0] + pm[1] * f_zone_ssm[1];
             let p23 = pm[2] * f_zone_ssm[2] + pm[3] * f_zone_ssm[3];
@@ -301,17 +360,17 @@ impl AdmittanceSsm {
             self.q_dot[m] = qd_next;
             self.q[m] = q_next;
         }
-        for (&y_z, &fz) in self.y_inf_f64.iter().zip(f_zone_ssm.iter()) {
+        for (&y_z, &fz) in self.y_inf_eff_f64.iter().zip(f_zone_ssm.iter()) {
             diss += self.ts * y_z * fz * fz;
         }
         self.diss_energy_j += diss;
     }
 
-    /// Returns stored kinetic + potential energy across all 10 reduced bridge modes in Joules.
+    /// Returns stored kinetic + potential energy across all active reduced bridge modes in Joules.
     #[must_use]
     pub fn energy_joules(&self) -> f64 {
         let mut e = 0.0_f64;
-        for m in 0..NUM_REDUCED_MODES {
+        for m in 0..self.active_poles {
             let qd = self.q_dot[m];
             let q = self.q[m];
             e += 0.5 * (self.m_m[m] * qd * qd + self.k_m[m] * q * q);

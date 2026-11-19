@@ -3,13 +3,23 @@
 
 use piano_spec::{PresetReducedPole, TOTAL_STRINGS};
 
-use crate::admittance_ssm::AdmittanceSsm;
-use crate::bridge_presets::{sanitize_reduced_poles, sanitize_y_inf};
+use crate::admittance_ssm::{AdmittanceSsm, MIN_ACTIVE_POLES};
+use crate::bridge_presets::{sanitize_reduced_poles, sanitize_y_inf, ReducedBridgePole};
 use crate::math::{identity_8x8, invert_8x8, mat8_vec, matmul_8x8};
 use crate::zone_proj::{ZoneWeight, NUM_BRIDGE_ZONES};
 use crate::NUM_REDUCED_MODES;
 
 impl AdmittanceSsm {
+    /// Changes the active reduced bridge pole count (`4..=10`), folding inactive high-frequency
+    /// poles into effective `y_inf` and smoothly projecting active state if non-quiescent.
+    pub fn set_active_poles(&mut self, active_poles: u8) {
+        let clamped = usize::from(active_poles).clamp(MIN_ACTIVE_POLES, NUM_REDUCED_MODES);
+        if clamped == self.active_poles {
+            return;
+        }
+        self.apply_model_smooth_internal(self.y_inf_base, self.poles, clamped, true);
+    }
+
     /// Replaces reduced soundboard poles while projecting active 8-zone restoring force and
     /// velocity smoothly onto the new modal coordinates so live body switching does not pop.
     pub fn set_reduced_model_smooth(
@@ -17,13 +27,34 @@ impl AdmittanceSsm {
         y_inf: &[f32; NUM_BRIDGE_ZONES],
         reduced_poles: &[PresetReducedPole; NUM_REDUCED_MODES],
     ) {
+        self.apply_model_smooth_internal(
+            sanitize_y_inf(y_inf),
+            sanitize_reduced_poles(reduced_poles),
+            self.active_poles,
+            false,
+        );
+    }
+
+    fn apply_model_smooth_internal(
+        &mut self,
+        y_inf: [f32; NUM_BRIDGE_ZONES],
+        poles: [ReducedBridgePole; NUM_REDUCED_MODES],
+        new_active_poles: usize,
+        preserve_diss: bool,
+    ) {
         if self.is_quiescent() {
-            self.set_reduced_model(y_inf, reduced_poles);
+            let prev_diss = self.diss_energy_j;
+            self.active_poles = new_active_poles;
+            self.apply_model(y_inf, poles);
+            self.recompute_junction_matrices();
+            if preserve_diss {
+                self.diss_energy_j = prev_diss;
+            }
             return;
         }
         let mut v_cur = [0.0_f64; NUM_BRIDGE_ZONES];
         let mut f_rest = [0.0_f64; NUM_BRIDGE_ZONES];
-        for m in 0..NUM_REDUCED_MODES {
+        for m in 0..self.active_poles {
             let qd = if self.q_dot[m].is_finite() {
                 self.q_dot[m]
             } else {
@@ -40,12 +71,17 @@ impl AdmittanceSsm {
                 f_rest[z] += p * kq;
             }
         }
-        self.apply_model(sanitize_y_inf(y_inf), sanitize_reduced_poles(reduced_poles));
+        let prev_diss = self.diss_energy_j;
+        self.active_poles = new_active_poles;
+        self.apply_model(y_inf, poles);
         self.recompute_junction_matrices();
+        if preserve_diss {
+            self.diss_energy_j = prev_diss;
+        }
 
         let mut g_k = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
         let mut g_m = [[0.0_f64; NUM_BRIDGE_ZONES]; NUM_BRIDGE_ZONES];
-        for m in 0..NUM_REDUCED_MODES {
+        for m in 0..self.active_poles {
             let km = self.k_m[m];
             let inv_mm = 1.0 / self.m_m[m].max(1.0e-9);
             let pm = &self.phi[m];
@@ -70,7 +106,7 @@ impl AdmittanceSsm {
         }
         let alpha = mat8_vec(&invert_8x8(&g_k), &f_rest);
         let beta = mat8_vec(&invert_8x8(&g_m), &v_cur);
-        for m in 0..NUM_REDUCED_MODES {
+        for m in 0..self.active_poles {
             let inv_mm = 1.0 / self.m_m[m].max(1.0e-9);
             let (mut qm, mut qdm) = (0.0_f64, 0.0_f64);
             for z in 0..NUM_BRIDGE_ZONES {
@@ -82,6 +118,8 @@ impl AdmittanceSsm {
             self.q[m] = if qm.is_finite() { qm } else { 0.0 };
             self.q_dot[m] = if qd_val.is_finite() { qd_val } else { 0.0 };
         }
+        self.q[self.active_poles..].fill(0.0);
+        self.q_dot[self.active_poles..].fill(0.0);
     }
 
     pub(crate) fn recompute_junction_matrices(&mut self) {
@@ -98,7 +136,10 @@ impl AdmittanceSsm {
 
         let inv = invert_8x8(&sys);
         let solve_abr = matmul_8x8(&inv, &self.a_br);
-        for (dst_row, phi_row) in self.solve_phi.iter_mut().zip(self.phi.iter()) {
+        for (dst_row, phi_row) in self.solve_phi[..self.active_poles]
+            .iter_mut()
+            .zip(self.phi[..self.active_poles].iter())
+        {
             for (dst, inv_row) in dst_row.iter_mut().zip(inv.iter()) {
                 let mut sum = 0.0_f64;
                 for (&inv_ij, &phi_j) in inv_row.iter().zip(phi_row.iter()) {
@@ -106,6 +147,9 @@ impl AdmittanceSsm {
                 }
                 *dst = sum;
             }
+        }
+        for dst_row in &mut self.solve_phi[self.active_poles..] {
+            dst_row.fill(0.0);
         }
         self.solve_8x8 = inv;
         self.solve_abr = solve_abr;

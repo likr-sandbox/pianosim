@@ -51,6 +51,7 @@ pub struct HertzBridgeContact {
     ts: f64,
     k3: f32,
     k4: f32,
+    enabled: bool,
 }
 
 impl HertzBridgeContact {
@@ -75,7 +76,26 @@ impl HertzBridgeContact {
             ts: 1.0 / safe_sr,
             k3: if k3.is_finite() { k3.max(0.0) } else { 0.0 },
             k4: if k4.is_finite() { k4.max(0.0) } else { 0.0 },
+            enabled: true,
         }
+    }
+
+    /// Enables or disables nonlinear Hertz contact compliance (resetting `(x, v_prev, r_sav)` when disabled).
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if !enabled {
+            self.reset();
+        }
+    }
+
+    /// Returns `true` when nonlinear Hertz contact compliance is enabled.
+    #[must_use]
+    #[inline]
+    pub const fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Resets zone displacements and SAV auxiliary state back to static equilibrium.
@@ -85,18 +105,23 @@ impl HertzBridgeContact {
         self.r_sav = sqrt_f64(C_HERTZ_SAV);
     }
 
-    /// Returns `true` when zone compressions and prior velocities are identically zero.
+    /// Returns `true` when disabled or when zone compressions and prior velocities are identically zero.
     #[must_use]
     #[inline]
     pub fn is_quiescent(&self) -> bool {
-        self.x[0].to_array() == [0.0; 4]
-            && self.x[1].to_array() == [0.0; 4]
-            && self.v_prev[0].to_array() == [0.0; 4]
-            && self.v_prev[1].to_array() == [0.0; 4]
+        !self.enabled
+            || (self.x[0].to_array() == [0.0; 4]
+                && self.x[1].to_array() == [0.0; 4]
+                && self.v_prev[0].to_array() == [0.0; 4]
+                && self.v_prev[1].to_array() == [0.0; 4])
     }
 
     /// Flushes `< 1e-20` denormals/subnormals and non-finite contact states to `0.0`.
     pub fn flush_subnormals(&mut self) {
+        if !self.enabled {
+            self.reset();
+            return;
+        }
         let mut all_zero = true;
         for half in 0..2 {
             let mut xa = self.x[half].to_array();
@@ -126,7 +151,7 @@ impl HertzBridgeContact {
     #[must_use]
     #[inline]
     pub fn eval_sav_gradient(&self) -> [f64; NUM_BRIDGE_ZONES] {
-        if self.k3 == 0.0 && self.k4 == 0.0 {
+        if !self.enabled || (self.k3 == 0.0 && self.k4 == 0.0) {
             return [0.0; NUM_BRIDGE_ZONES];
         }
         let half_ts = F32x4::splat((0.5 * self.ts) as f32);
@@ -207,6 +232,9 @@ impl HertzBridgeContact {
     /// Evaluates the exact instantaneous physical Hertz potential `sum_z V_hertz(x_z) >= 0.0` [J].
     #[must_use]
     pub fn potential_energy_joules(&self) -> f64 {
+        if !self.enabled {
+            return 0.0;
+        }
         let zero = F32x4::zero();
         let c3 = F32x4::splat((1.0_f32 / 3.0_f32) * self.k3);
         let c4 = F32x4::splat(0.25_f32 * self.k4);
@@ -224,10 +252,14 @@ impl HertzBridgeContact {
         total
     }
 
-    /// Returns the exact discrete-conserved SAV energy `0.5 * (r_sav^2 - C_HERTZ_SAV)` [J].
+    /// Returns the exact discrete-conserved SAV energy `0.5 * (r_sav^2 - C_HERTZ_SAV)` [J],
+    /// or `0.0` when nonlinear Hertz contact is disabled.
     #[must_use]
     #[inline]
     pub fn energy_joules(&self) -> f64 {
+        if !self.enabled {
+            return 0.0;
+        }
         0.5 * (self.r_sav * self.r_sav - C_HERTZ_SAV)
     }
 
