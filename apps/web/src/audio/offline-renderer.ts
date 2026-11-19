@@ -1,31 +1,28 @@
-/** Offline MIDI Render Worker controller and AudioBufferSourceNode playback engine. */
+/** Offline MIDI Render Worker controller and progressive AudioBuffer streaming coordinator. */
 
 import {
-  A4_FREQ_DEFAULT,
-  BODY_CONCERT_GRAND,
-  CONDITION_DEFAULT,
-  HAMMER_HARDNESS_DEFAULT,
-  LID_OPEN,
   PEDAL_SOSTENUTO,
   PEDAL_SUSTAIN,
   PEDAL_UNA_CORDA,
   PERF_PRESET_CONFIGS,
   PERF_PRESET_FULL,
-  PERSPECTIVE_PLAYER,
-  REVERB_DECAY_DEFAULT,
-  REVERB_MIX_DEFAULT,
-  STRING_SCALE_DEFAULT,
-  STRETCH_TUNING_DEFAULT,
-  TEMPERAMENT_EQUAL,
-  UNISON_DETUNE_DEFAULT,
   type PerfProfileConfig,
   type WavFormat,
 } from './abi';
-import type { OfflineRenderStatus, OfflineSpaceParams, OfflineVoicingParams } from './offline-abi';
+import {
+  DEFAULT_OFFLINE_SPACE,
+  DEFAULT_OFFLINE_VOICING,
+  type OfflineRenderStatus,
+  type OfflineSpaceParams,
+  type OfflineVoicingParams,
+} from './offline-abi';
+import { OfflineStreamPlayer } from './offline-stream-player';
 import { OfflineWorkerClient } from './offline-worker-client';
 import type { WasmAudioHost } from './wasm-host';
-import { createPlanarWavBlob } from './wav-recorder';
 import type { ParsedSmf } from '../midi/smf-parser';
+
+const FIRST_CHUNK_SEC = 1.5;
+const STREAM_CHUNK_SEC = 0.75;
 
 export interface OfflineRendererCallbacks {
   onNotePress?(midiKey: number, velocity: number): void;
@@ -39,33 +36,6 @@ export interface OfflineRendererCallbacks {
   getPerfConfig?(): PerfProfileConfig;
 }
 
-interface CachedOfflineRender {
-  readonly cacheKey: string;
-  readonly sampleRate: number;
-  readonly totalFrames: number;
-  readonly left: Float32Array;
-  readonly right: Float32Array;
-  audioBuffer: AudioBuffer | null;
-}
-
-const DEFAULT_VOICING: OfflineVoicingParams = {
-  hammerHardness: HAMMER_HARDNESS_DEFAULT,
-  unisonDetune: UNISON_DETUNE_DEFAULT,
-  stretchTuning: STRETCH_TUNING_DEFAULT,
-  stringLengthScale: STRING_SCALE_DEFAULT,
-  a4FreqHz: A4_FREQ_DEFAULT,
-  temperamentId: TEMPERAMENT_EQUAL,
-  condition: CONDITION_DEFAULT,
-};
-
-const DEFAULT_SPACE: OfflineSpaceParams = {
-  bodyId: BODY_CONCERT_GRAND,
-  perspective: PERSPECTIVE_PLAYER,
-  lidState: LID_OPEN,
-  reverbDecayS: REVERB_DECAY_DEFAULT,
-  reverbMix: REVERB_MIX_DEFAULT,
-};
-
 function defaultScoreKey(score: ParsedSmf): string {
   const first = score.events[0];
   const last = score.events[score.events.length - 1];
@@ -75,8 +45,8 @@ function defaultScoreKey(score: ParsedSmf): string {
 export class OfflineRenderer {
   private readonly host: WasmAudioHost;
   private readonly workerClient = new OfflineWorkerClient();
+  private readonly streamPlayer: OfflineStreamPlayer;
   private callbacks: OfflineRendererCallbacks;
-  private cached: CachedOfflineRender | null = null;
 
   private score: ParsedSmf | null = null;
   private scoreKey = '';
@@ -85,20 +55,40 @@ export class OfflineRenderer {
 
   private isPlayingState = false;
   private isRenderingState = false;
-  private operationEpoch = 0;
+  private renderEpoch = 0;
+  private playEpoch = 0;
 
-  private activeSource: AudioBufferSourceNode | null = null;
   private visualTimerId: number | null = null;
-  private startAudioTime = 0;
-  private startScoreTime = 0;
   private playheadSeconds = 0;
-  private tempoFactor = 1.0;
   private nextEventIndex = 0;
   private readonly activeVisualNotes = new Set<number>();
 
   constructor(host: WasmAudioHost, callbacks: OfflineRendererCallbacks = {}) {
     this.host = host;
     this.callbacks = callbacks;
+    this.streamPlayer = new OfflineStreamPlayer(host, {
+      onBufferingChange: (buffering) => {
+        if (!this.isPlayingState) return;
+        if (buffering) {
+          this.clearVisualTimer();
+          this.setStatus('buffering', this.renderProgress);
+        } else {
+          this.syncVisualStateAt(this.streamPlayer.getCurrentScoreTime());
+          this.startVisualTimer();
+          this.setStatus('playing', this.renderProgress);
+        }
+      },
+      onEnded: () => {
+        this.isPlayingState = false;
+        this.clearVisualTimer();
+        this.playheadSeconds = 0;
+        this.nextEventIndex = 0;
+        this.clearVisualKeysAndPedals();
+        this.callbacks.onProgress?.(0, this.score?.durationSeconds ?? 0);
+        this.callbacks.onStateChange?.(false);
+        this.setStatus(this.hasValidCache() ? 'ready' : 'idle', this.hasValidCache() ? 1 : this.renderProgress);
+      },
+    });
   }
 
   setCallbacks(callbacks: OfflineRendererCallbacks): void {
@@ -106,26 +96,38 @@ export class OfflineRenderer {
   }
 
   load(score: ParsedSmf, scoreKey?: string): void {
-    this.operationEpoch++;
+    this.renderEpoch++;
+    this.playEpoch++;
     this.cancelActiveRender();
     this.stopPlaybackInternal(true);
     this.score = score;
     this.scoreKey = scoreKey ?? defaultScoreKey(score);
     this.playheadSeconds = 0;
     this.nextEventIndex = 0;
-    if (this.cached && this.cached.cacheKey !== this.computeCacheKey()) {
-      this.cached = null;
+    const targetKey = this.computeCacheKey();
+    if (!this.streamPlayer.isComplete() || this.streamPlayer.getCacheKey() !== targetKey) {
+      this.streamPlayer.clear();
     }
-    this.setStatus(this.hasValidCache() ? 'ready' : 'idle', this.hasValidCache() ? 1 : 0);
+    const ready = this.hasValidCache();
+    this.setStatus(ready ? 'ready' : 'idle', ready ? 1 : 0);
     this.callbacks.onProgress?.(0, score.durationSeconds);
   }
 
   invalidateIfStale(): void {
-    if (!this.cached || this.cached.cacheKey === this.computeCacheKey()) return;
-    if (this.isRenderingState) this.cancelRender();
+    const targetKey = this.computeCacheKey();
+    const keyMatches = this.streamPlayer.getCacheKey() === targetKey;
+    if (keyMatches && (this.streamPlayer.hasAudio() || this.isRenderingState)) return;
+    if (!this.isRenderingState && !this.streamPlayer.hasAudio()) return;
+
+    this.renderEpoch++;
+    if (this.isRenderingState) {
+      this.cancelActiveRender();
+    }
     if (!this.isPlayingState) {
-      this.cached = null;
+      this.streamPlayer.clear();
       this.setStatus('idle', 0);
+    } else {
+      this.callbacks.onRenderStatus?.(this.status, this.renderProgress, null);
     }
   }
 
@@ -150,11 +152,11 @@ export class OfflineRenderer {
   }
 
   hasValidCache(): boolean {
-    return this.cached !== null && this.cached.cacheKey === this.computeCacheKey();
+    return this.streamPlayer.isComplete() && this.streamPlayer.getCacheKey() === this.computeCacheKey();
   }
 
   getCurrentTime(): number {
-    return this.isPlayingState ? this.calculateCurrentScoreTime() : this.playheadSeconds;
+    return this.isPlayingState ? this.streamPlayer.getCurrentScoreTime() : this.playheadSeconds;
   }
 
   getDuration(): number {
@@ -162,112 +164,125 @@ export class OfflineRenderer {
   }
 
   getTempo(): number {
-    return this.tempoFactor;
+    return this.streamPlayer.getTempo();
   }
 
   async play(): Promise<void> {
-    if (!this.score || this.isPlayingState || this.isRenderingState) return;
-    const epoch = ++this.operationEpoch;
+    if (!this.score || this.isPlayingState || this.status === 'rendering') return;
+    const playEp = ++this.playEpoch;
     await this.host.unlock();
-    if (epoch !== this.operationEpoch || !this.score || this.isPlayingState) return;
+    if (playEp !== this.playEpoch || !this.score || this.isPlayingState) return;
 
     const targetKey = this.computeCacheKey();
-    if (!this.cached || this.cached.cacheKey !== targetKey) {
-      this.isRenderingState = true;
-      this.setStatus('rendering', 0);
-      try {
-        const out = await this.workerClient.render(
-          (jobId) => ({
-            jobId,
-            scoreKey: this.scoreKey,
-            events: this.score!.events,
-            durationSeconds: this.score!.durationSeconds,
-            voicing: this.getVoicingParams(),
-            space: this.getSpaceParams(),
-            perfConfig: this.getOfflinePerfConfig(),
-          }),
-          {
-            onProgress: (p) => {
-              if (epoch === this.operationEpoch) this.setStatus('rendering', p);
-            },
-            onError: (msg) => {
-              if (epoch === this.operationEpoch) this.setStatus('error', 0, msg);
-            },
+    if (this.streamPlayer.hasAudio() && this.streamPlayer.getCacheKey() === targetKey) {
+      this.startStreamPlayback();
+      return;
+    }
+
+    const renderEp = ++this.renderEpoch;
+    this.streamPlayer.clear();
+    this.isRenderingState = true;
+    this.setStatus('rendering', 0);
+
+    try {
+      await this.workerClient.render(
+        (jobId) => ({
+          jobId,
+          scoreKey: this.scoreKey,
+          events: this.score!.events,
+          durationSeconds: this.score!.durationSeconds,
+          voicing: this.getVoicingParams(),
+          space: this.getSpaceParams(),
+          perfConfig: this.getOfflinePerfConfig(),
+          firstChunkSec: FIRST_CHUNK_SEC,
+          chunkSec: STREAM_CHUNK_SEC,
+        }),
+        {
+          onProgress: (p) => {
+            if (renderEp !== this.renderEpoch) return;
+            this.renderProgress = p;
+            this.callbacks.onRenderStatus?.(this.status, p, null);
           },
-        );
+          onChunk: (chunk) => {
+            if (renderEp !== this.renderEpoch || !this.score) return;
+            this.streamPlayer.appendChunk(targetKey, chunk);
+            if (chunk.chunkIndex === 0 && playEp === this.playEpoch && !this.isPlayingState) {
+              this.startStreamPlayback();
+            }
+            if (chunk.isFinal) {
+              this.isRenderingState = false;
+              this.renderProgress = 1;
+              this.callbacks.onRenderStatus?.(this.status, 1, null);
+            }
+          },
+          onError: (msg) => {
+            if (renderEp !== this.renderEpoch) return;
+            this.isRenderingState = false;
+            this.stopPlaybackInternal(true);
+            this.setStatus('error', 0, msg);
+          },
+        },
+      );
+    } catch (err) {
+      if (renderEp === this.renderEpoch) {
         this.isRenderingState = false;
-        if (!out || epoch !== this.operationEpoch || !this.score) return;
-        this.cached = {
-          cacheKey: targetKey,
-          sampleRate: out.sampleRate,
-          totalFrames: out.totalFrames,
-          left: out.left,
-          right: out.right,
-          audioBuffer: null,
-        };
-        this.setStatus('ready', 1);
-      } catch (err) {
-        this.isRenderingState = false;
-        throw err;
       }
+      throw err;
     }
-
-    const ctx = this.host.getAudioContext();
-    const analyser = this.host.getAnalyser();
-    if (!ctx || !analyser || !this.cached) {
-      throw new Error('AudioContext or AnalyserNode is unavailable.');
-    }
-    if (!this.cached.audioBuffer) {
-      const buf = ctx.createBuffer(2, this.cached.totalFrames, this.cached.sampleRate);
-      buf.copyToChannel(new Float32Array(this.cached.left), 0);
-      buf.copyToChannel(new Float32Array(this.cached.right), 1);
-      this.cached.audioBuffer = buf;
-    }
-
-    if (
-      this.playheadSeconds >= this.score.durationSeconds ||
-      this.playheadSeconds >= this.cached.audioBuffer.duration
-    ) {
-      this.playheadSeconds = 0;
-      this.nextEventIndex = 0;
-    }
-
-    this.syncVisualStateAt(this.playheadSeconds);
-    this.isPlayingState = true;
-    this.setStatus('playing', 1);
-    this.callbacks.onStateChange?.(true);
-    this.startSourceAt(this.playheadSeconds);
-    this.visualTimerId = window.setInterval(() => this.tickVisuals(), 16);
   }
 
   pause(): void {
-    this.operationEpoch++;
-    if (this.isRenderingState) {
+    this.playEpoch++;
+    if (this.status === 'rendering' && !this.streamPlayer.hasAudio()) {
+      this.renderEpoch++;
       this.cancelActiveRender();
-      this.setStatus(this.hasValidCache() ? 'ready' : 'idle', this.hasValidCache() ? 1 : 0);
+      this.setStatus('idle', 0);
       return;
     }
     if (!this.isPlayingState) return;
-    this.playheadSeconds = this.calculateCurrentScoreTime();
-    this.stopPlaybackInternal(false);
-    this.setStatus('paused', 1);
+    this.playheadSeconds = this.streamPlayer.pause();
+    this.isPlayingState = false;
+    this.clearVisualTimer();
+    this.clearVisualKeysOnly();
+    this.callbacks.onStateChange?.(false);
+    this.setStatus('paused', this.renderProgress);
   }
 
   stop(): void {
-    this.operationEpoch++;
-    this.cancelActiveRender();
+    this.playEpoch++;
+    const hasStream =
+      this.streamPlayer.hasAudio() && this.streamPlayer.getCacheKey() === this.computeCacheKey();
+    if (!hasStream && this.isRenderingState) {
+      this.renderEpoch++;
+      this.cancelActiveRender();
+    }
     this.stopPlaybackInternal(true);
     this.playheadSeconds = 0;
     this.nextEventIndex = 0;
     this.callbacks.onProgress?.(0, this.score?.durationSeconds ?? 0);
-    this.setStatus(this.hasValidCache() ? 'ready' : 'idle', this.hasValidCache() ? 1 : 0);
+    if (this.hasValidCache() || hasStream) {
+      this.setStatus('ready', this.hasValidCache() ? 1 : this.renderProgress);
+    } else {
+      this.setStatus('idle', 0);
+    }
   }
 
   cancelRender(): void {
-    this.operationEpoch++;
-    if (this.isRenderingState) {
+    this.renderEpoch++;
+    this.playEpoch++;
+    const wasRendering = this.isRenderingState || this.workerClient.isRendering();
+    if (wasRendering) {
       this.cancelActiveRender();
-      this.setStatus(this.hasValidCache() ? 'ready' : 'idle', this.hasValidCache() ? 1 : 0);
+    }
+    if (!this.hasValidCache()) {
+      this.stopPlaybackInternal(true);
+      this.streamPlayer.clear();
+      this.playheadSeconds = 0;
+      this.nextEventIndex = 0;
+      this.callbacks.onProgress?.(0, this.score?.durationSeconds ?? 0);
+      this.setStatus('idle', 0);
+    } else if (wasRendering) {
+      this.setStatus(this.isPlayingState ? 'playing' : 'ready', 1);
     }
   }
 
@@ -278,28 +293,26 @@ export class OfflineRenderer {
     this.playheadSeconds = clamped;
     this.syncVisualStateAt(clamped);
     this.callbacks.onProgress?.(clamped, dur);
-    if (this.isPlayingState && this.cached?.audioBuffer) {
-      this.stopActiveSource();
-      this.startSourceAt(clamped);
+
+    const seekState = this.streamPlayer.seek(clamped);
+    if (this.isPlayingState) {
+      if (seekState === 'buffering') {
+        this.clearVisualTimer();
+        this.setStatus('buffering', this.renderProgress);
+      } else if (seekState === 'playing') {
+        this.startVisualTimer();
+        this.setStatus('playing', this.renderProgress);
+      }
     }
   }
 
   setTempo(factor: number): void {
-    if (!Number.isFinite(factor) || factor <= 0) return;
-    const clamped = Math.max(0.5, Math.min(2.0, factor));
-    if (Math.abs(this.tempoFactor - clamped) < 1e-4) return;
-    if (this.isPlayingState) {
-      const ctx = this.host.getAudioContext();
-      this.startScoreTime = this.calculateCurrentScoreTime();
-      this.startAudioTime = ctx ? ctx.currentTime : 0;
-      if (this.activeSource) this.activeSource.playbackRate.value = clamped;
-    }
-    this.tempoFactor = clamped;
+    this.streamPlayer.setTempo(factor);
   }
 
   exportWavBlob(format: WavFormat): Blob | null {
-    if (!this.hasValidCache() || !this.cached) return null;
-    return createPlanarWavBlob(this.cached.left, this.cached.right, this.cached.sampleRate, format);
+    if (!this.hasValidCache()) return null;
+    return this.streamPlayer.exportWavBlob(format);
   }
 
   panic(): void {
@@ -307,20 +320,45 @@ export class OfflineRenderer {
   }
 
   destroy(): void {
-    this.operationEpoch++;
+    this.renderEpoch++;
+    this.playEpoch++;
     this.workerClient.dispose();
     this.isRenderingState = false;
     this.stopPlaybackInternal(true);
-    this.cached = null;
+    this.streamPlayer.clear();
     this.score = null;
   }
 
+  private startStreamPlayback(): void {
+    if (!this.score) return;
+    const totalDur = this.streamPlayer.getTotalDurationSec();
+    if (
+      this.playheadSeconds >= this.score.durationSeconds ||
+      (totalDur > 0 && this.playheadSeconds >= totalDur)
+    ) {
+      this.playheadSeconds = 0;
+      this.nextEventIndex = 0;
+    }
+
+    this.syncVisualStateAt(this.playheadSeconds);
+    this.isPlayingState = true;
+    this.callbacks.onStateChange?.(true);
+    const playState = this.streamPlayer.playFrom(this.playheadSeconds);
+    if (playState === 'buffering') {
+      this.clearVisualTimer();
+      this.setStatus('buffering', this.renderProgress);
+    } else {
+      this.startVisualTimer();
+      this.setStatus('playing', this.renderProgress);
+    }
+  }
+
   private getVoicingParams(): OfflineVoicingParams {
-    return this.callbacks.getVoicing?.() ?? DEFAULT_VOICING;
+    return this.callbacks.getVoicing?.() ?? DEFAULT_OFFLINE_VOICING;
   }
 
   private getSpaceParams(): OfflineSpaceParams {
-    return this.callbacks.getSpace?.() ?? DEFAULT_SPACE;
+    return this.callbacks.getSpace?.() ?? DEFAULT_OFFLINE_SPACE;
   }
 
   private getOfflinePerfConfig(): PerfProfileConfig {
@@ -349,45 +387,10 @@ export class OfflineRenderer {
     }
   }
 
-  private startSourceAt(offsetSec: number): void {
-    const ctx = this.host.getAudioContext();
-    const analyser = this.host.getAnalyser();
-    const buf = this.cached?.audioBuffer;
-    if (!ctx || !analyser || !buf) return;
-
-    const source = ctx.createBufferSource();
-    source.buffer = buf;
-    source.playbackRate.value = this.tempoFactor;
-    source.connect(analyser);
-    this.startAudioTime = ctx.currentTime;
-    this.startScoreTime = offsetSec;
-    this.activeSource = source;
-    source.onended = () => {
-      if (this.activeSource !== source) return;
-      this.activeSource = null;
-      this.isPlayingState = false;
-      this.clearVisualTimer();
-      this.playheadSeconds = 0;
-      this.nextEventIndex = 0;
-      this.clearVisualKeysAndPedals();
-      this.callbacks.onProgress?.(0, this.score?.durationSeconds ?? 0);
-      this.callbacks.onStateChange?.(false);
-      this.setStatus(this.hasValidCache() ? 'ready' : 'idle', 1);
-    };
-    source.start(0, Math.max(0, Math.min(buf.duration, offsetSec)));
-  }
-
-  private stopActiveSource(): void {
-    const source = this.activeSource;
-    if (!source) return;
-    this.activeSource = null;
-    source.onended = null;
-    try {
-      source.stop();
-    } catch {
-      // Source may already be stopped.
+  private startVisualTimer(): void {
+    if (this.visualTimerId === null) {
+      this.visualTimerId = window.setInterval(() => this.tickVisuals(), 16);
     }
-    source.disconnect();
   }
 
   private clearVisualTimer(): void {
@@ -397,44 +400,34 @@ export class OfflineRenderer {
     }
   }
 
-  private clearVisualKeysAndPedals(): void {
+  private clearVisualKeysOnly(): void {
     for (const note of this.activeVisualNotes) {
       this.callbacks.onNoteRelease?.(note);
     }
     this.activeVisualNotes.clear();
+  }
+
+  private clearVisualKeysAndPedals(): void {
+    this.clearVisualKeysOnly();
     this.callbacks.onPedalChange?.(PEDAL_SUSTAIN, 0);
     this.callbacks.onPedalChange?.(PEDAL_SOSTENUTO, 0);
     this.callbacks.onPedalChange?.(PEDAL_UNA_CORDA, 0);
   }
 
   private stopPlaybackInternal(resetPedals: boolean): void {
-    this.stopActiveSource();
+    this.streamPlayer.stopPlayback();
     this.isPlayingState = false;
     this.clearVisualTimer();
-    for (const note of this.activeVisualNotes) {
-      this.callbacks.onNoteRelease?.(note);
-    }
-    this.activeVisualNotes.clear();
     if (resetPedals) {
-      this.callbacks.onPedalChange?.(PEDAL_SUSTAIN, 0);
-      this.callbacks.onPedalChange?.(PEDAL_SOSTENUTO, 0);
-      this.callbacks.onPedalChange?.(PEDAL_UNA_CORDA, 0);
+      this.clearVisualKeysAndPedals();
+    } else {
+      this.clearVisualKeysOnly();
     }
     this.callbacks.onStateChange?.(false);
   }
 
-  private calculateCurrentScoreTime(): number {
-    if (!this.isPlayingState) return this.playheadSeconds;
-    const ctx = this.host.getAudioContext();
-    const audioNow = ctx ? ctx.currentTime : 0;
-    return this.startScoreTime + Math.max(0, audioNow - this.startAudioTime) * this.tempoFactor;
-  }
-
   private syncVisualStateAt(targetSec: number): void {
-    for (const note of this.activeVisualNotes) {
-      this.callbacks.onNoteRelease?.(note);
-    }
-    this.activeVisualNotes.clear();
+    this.clearVisualKeysOnly();
     let cc64 = 0;
     let cc66 = 0;
     let cc67 = 0;
@@ -460,8 +453,8 @@ export class OfflineRenderer {
   }
 
   private tickVisuals(): void {
-    if (!this.isPlayingState || !this.score) return;
-    const current = this.calculateCurrentScoreTime();
+    if (!this.isPlayingState || !this.score || this.streamPlayer.isBuffering()) return;
+    const current = this.streamPlayer.getCurrentScoreTime();
     this.playheadSeconds = current;
     const events = this.score.events;
     while (this.nextEventIndex < events.length && events[this.nextEventIndex].timeSeconds <= current) {

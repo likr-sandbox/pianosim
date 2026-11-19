@@ -39,7 +39,7 @@ export async function downloadAndVerifyOfflineWav(
 ): Promise<OfflineWavStats> {
   const formatSel = page.getByTestId('offline-export-format');
   const exportBtn = page.getByTestId('offline-export-wav');
-  await expect(exportBtn).toBeEnabled({ timeout: 5_000 });
+  await expect(exportBtn).toBeEnabled({ timeout: 90_000 });
   await formatSel.selectOption(format);
 
   const [dl] = await Promise.all([page.waitForEvent('download'), exportBtn.click()]);

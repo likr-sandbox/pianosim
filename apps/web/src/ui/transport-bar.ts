@@ -17,6 +17,8 @@ function formatRenderStatusText(status: OfflineRenderStatus, progress: number): 
   switch (status) {
     case 'rendering':
       return `Rendering ${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`;
+    case 'buffering':
+      return 'Buffering';
     case 'ready':
       return 'Ready';
     case 'playing':
@@ -84,14 +86,15 @@ export class TransportBar {
     if (this.offlineProgressEl) {
       this.offlineProgressEl.value = pct;
     }
+    const rendering = this.renderer.isRendering();
     if (this.cancelBtn) {
-      this.cancelBtn.disabled = status !== 'rendering';
+      this.cancelBtn.disabled = !rendering && status !== 'rendering' && status !== 'buffering';
     }
     if (this.playBtn) {
-      this.playBtn.disabled = status === 'rendering';
+      this.playBtn.disabled = status === 'rendering' || status === 'buffering';
     }
     if (this.exportWavBtn) {
-      this.exportWavBtn.disabled = status === 'rendering' || !this.renderer.hasValidCache();
+      this.exportWavBtn.disabled = !this.renderer.hasValidCache();
     }
   }
 

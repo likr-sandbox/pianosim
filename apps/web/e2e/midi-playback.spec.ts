@@ -211,6 +211,7 @@ test.describe('E2E MIDI & SMF Playback Suite (Offline Render + Live Web MIDI)', 
     await waitForAudioRms(page, 0.003);
 
     await setSlider(page, 'transport-seek', 15);
+    await waitForOfflineRenderDone(page, 30_000);
     await waitAudioBlocks(page, 24);
     await waitForAudioRms(page, 0.003);
 
@@ -284,6 +285,7 @@ test.describe('E2E MIDI & SMF Playback Suite (Offline Render + Live Web MIDI)', 
     await page.getByTestId('demo-select').selectOption('bach-prelude');
     await page.getByTestId('transport-play').click();
     await waitForOfflineRenderDone(page);
+    await expect(page.getByTestId('offline-export-wav')).toBeDisabled();
     await waitForAudioRms(page, 0.003);
 
     for (let step = 0; step < 6; step++) {

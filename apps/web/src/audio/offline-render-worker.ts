@@ -18,9 +18,11 @@ import { buildEngineContext, validateWasmExports } from './worklet-wasm-init';
 import type { MidiPlaybackEvent } from '../midi/smf-parser';
 
 const BLOCK_FRAMES = 128;
-const YIELD_EVERY_BLOCKS = 256;
+const YIELD_EVERY_BLOCKS = 128;
 const MAX_EVENTS_PER_BLOCK = 512;
 const SETTLE_BLOCKS = 16;
+const FIRST_CHUNK_SEC_DEFAULT = 1.5;
+const CHUNK_SEC_DEFAULT = 2.0;
 
 let cachedModule: WebAssembly.Module | null = null;
 let latestJobId = 0;
@@ -149,9 +151,10 @@ function renderChunkWithQueueGuard(
   evStart: number,
   evEnd: number,
   blockStart: number,
+  chunkOffset: number,
   frames: number,
-  left: Float32Array,
-  right: Float32Array,
+  chunkLeft: Float32Array,
+  chunkRight: Float32Array,
 ): void {
   let subStart = blockStart;
   const blockEnd = blockStart + frames;
@@ -203,8 +206,9 @@ function renderChunkWithQueueGuard(
     const memF32 = new Float32Array(exports.memory.buffer);
     const lBase = outLPtr >>> 2;
     const rBase = outRPtr >>> 2;
-    left.set(memF32.subarray(lBase, lBase + chunkFrames), subStart);
-    right.set(memF32.subarray(rBase, rBase + chunkFrames), subStart);
+    const dstOff = chunkOffset + (subStart - blockStart);
+    chunkLeft.set(memF32.subarray(lBase, lBase + chunkFrames), dstOff);
+    chunkRight.set(memF32.subarray(rBase, rBase + chunkFrames), dstOff);
     subStart += chunkFrames;
   }
 }
@@ -269,8 +273,20 @@ async function executeRender(msg: Extract<OfflineWorkerInbound, { type: 'render'
     const totalSec = Math.max(0, req.durationSeconds) + tailSeconds;
     const totalFrames = Math.max(BLOCK_FRAMES, Math.ceil(totalSec * WEB_AUDIO_SAMPLE_RATE));
 
-    const left = new Float32Array(totalFrames);
-    const right = new Float32Array(totalFrames);
+    const firstChunkSec =
+      Number.isFinite(req.firstChunkSec) && req.firstChunkSec! > 0
+        ? req.firstChunkSec!
+        : FIRST_CHUNK_SEC_DEFAULT;
+    const chunkSec =
+      Number.isFinite(req.chunkSec) && req.chunkSec! > 0 ? req.chunkSec! : CHUNK_SEC_DEFAULT;
+    const firstChunkFrames = Math.max(
+      BLOCK_FRAMES,
+      Math.round((firstChunkSec * WEB_AUDIO_SAMPLE_RATE) / BLOCK_FRAMES) * BLOCK_FRAMES,
+    );
+    const regularChunkFrames = Math.max(
+      BLOCK_FRAMES,
+      Math.round((chunkSec * WEB_AUDIO_SAMPLE_RATE) / BLOCK_FRAMES) * BLOCK_FRAMES,
+    );
 
     const eventSamples = new Int32Array(events.length);
     for (let i = 0; i < events.length; i++) {
@@ -280,61 +296,98 @@ async function executeRender(msg: Extract<OfflineWorkerInbound, { type: 'render'
       );
     }
 
-    let evCursor = 0;
-    let blockIndex = 0;
-    post({ type: 'progress', jobId, progress: 0, renderedSec: 0, totalSec });
-
-    for (let blockStart = 0; blockStart < totalFrames; blockStart += BLOCK_FRAMES) {
-      const frames = Math.min(BLOCK_FRAMES, totalFrames - blockStart);
-      const blockEnd = blockStart + frames;
-      const evStart = evCursor;
-      while (evCursor < events.length && eventSamples[evCursor] < blockEnd) {
-        evCursor++;
-      }
-
-      renderChunkWithQueueGuard(
-        exports,
-        ctx,
-        events,
-        eventSamples,
-        evStart,
-        evCursor,
-        blockStart,
-        frames,
-        left,
-        right,
-      );
-
-      blockIndex++;
-      if (blockIndex % YIELD_EVERY_BLOCKS === 0) {
-        const renderedFrames = blockStart + frames;
-        post({
-          type: 'progress',
-          jobId,
-          progress: renderedFrames / totalFrames,
-          renderedSec: renderedFrames / WEB_AUDIO_SAMPLE_RATE,
-          totalSec,
-        });
-        await new Promise((r) => setTimeout(r, 0));
-        if (cancelledJobId === jobId || latestJobId !== jobId) {
-          post({ type: 'cancelled', jobId });
-          return;
-        }
-      }
+    if (cancelledJobId === jobId || latestJobId !== jobId) {
+      post({ type: 'cancelled', jobId });
+      return;
     }
 
-    post({ type: 'progress', jobId, progress: 1, renderedSec: totalSec, totalSec });
-    post(
-      {
-        type: 'done',
+    let evCursor = 0;
+    let blockIndex = 0;
+    let chunkStart = 0;
+    let chunkIndex = 0;
+    post({ type: 'progress', jobId, progress: 0, renderedSec: 0, totalSec });
+
+    while (chunkStart < totalFrames) {
+      const targetFrames = chunkIndex === 0 ? firstChunkFrames : regularChunkFrames;
+      const chunkFrames = Math.min(targetFrames, totalFrames - chunkStart);
+      const chunkEnd = chunkStart + chunkFrames;
+      const chunkLeft = new Float32Array(chunkFrames);
+      const chunkRight = new Float32Array(chunkFrames);
+
+      for (let blockStart = chunkStart; blockStart < chunkEnd; blockStart += BLOCK_FRAMES) {
+        const frames = Math.min(BLOCK_FRAMES, chunkEnd - blockStart);
+        const blockEnd = blockStart + frames;
+        const evStart = evCursor;
+        while (evCursor < events.length && eventSamples[evCursor] < blockEnd) {
+          evCursor++;
+        }
+
+        renderChunkWithQueueGuard(
+          exports,
+          ctx,
+          events,
+          eventSamples,
+          evStart,
+          evCursor,
+          blockStart,
+          blockStart - chunkStart,
+          frames,
+          chunkLeft,
+          chunkRight,
+        );
+
+        blockIndex++;
+        if (blockIndex % YIELD_EVERY_BLOCKS === 0) {
+          const renderedFrames = blockStart + frames;
+          post({
+            type: 'progress',
+            jobId,
+            progress: renderedFrames / totalFrames,
+            renderedSec: renderedFrames / WEB_AUDIO_SAMPLE_RATE,
+            totalSec,
+          });
+          await new Promise((r) => setTimeout(r, 0));
+          if (cancelledJobId === jobId || latestJobId !== jobId) {
+            post({ type: 'cancelled', jobId });
+            return;
+          }
+        }
+      }
+
+      const isFinal = chunkEnd >= totalFrames;
+      post({
+        type: 'progress',
         jobId,
-        sampleRate: WEB_AUDIO_SAMPLE_RATE,
-        totalFrames,
-        left: left.buffer,
-        right: right.buffer,
-      },
-      [left.buffer, right.buffer],
-    );
+        progress: chunkEnd / totalFrames,
+        renderedSec: isFinal ? totalSec : chunkEnd / WEB_AUDIO_SAMPLE_RATE,
+        totalSec,
+      });
+      post(
+        {
+          type: 'chunk',
+          jobId,
+          chunkIndex,
+          startFrame: chunkStart,
+          frames: chunkFrames,
+          sampleRate: WEB_AUDIO_SAMPLE_RATE,
+          totalFrames,
+          isFinal,
+          left: chunkLeft.buffer,
+          right: chunkRight.buffer,
+        },
+        [chunkLeft.buffer, chunkRight.buffer],
+      );
+
+      if (isFinal) break;
+      await new Promise((r) => setTimeout(r, 0));
+      if (cancelledJobId === jobId || latestJobId !== jobId) {
+        post({ type: 'cancelled', jobId });
+        return;
+      }
+
+      chunkStart = chunkEnd;
+      chunkIndex++;
+    }
   } finally {
     exports.piano_destroy(ctx);
   }
