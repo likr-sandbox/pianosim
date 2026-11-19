@@ -1,4 +1,4 @@
-/** PerfProfile constants, 18-knob metadata, presets (synced with piano-spec), and reconfiguration tiers. */
+/** PerfProfile constants, 19-knob metadata, presets (synced with piano-spec), and reconfiguration tiers. */
 
 export const PERF_PRESET_FULL = 0 as const;
 export const PERF_PRESET_BALANCED = 1 as const;

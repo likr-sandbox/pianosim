@@ -29,7 +29,8 @@ export class OfflineStreamPlayer {
   private readonly activeSources = new Set<AudioBufferSourceNode>();
   private playingState = false;
   private bufferingState = false;
-  private bufferingTargetFrame = 0;
+  private bufferingResumeFrame = 0;
+  private bufferingWatermarkFrame = 0;
 
   private nextScheduleFrame = 0;
   private nextAudioTime = 0;
@@ -115,8 +116,8 @@ export class OfflineStreamPlayer {
     if (!this.playingState) return;
 
     if (this.bufferingState) {
-      if (this.renderedFrames > this.bufferingTargetFrame || this.complete) {
-        const resumeFrame = Math.min(this.bufferingTargetFrame, Math.max(0, this.totalFrames - 1));
+      if (this.renderedFrames > this.bufferingWatermarkFrame || this.complete) {
+        const resumeFrame = Math.min(this.bufferingResumeFrame, Math.max(0, this.totalFrames - 1));
         this.bufferingState = false;
         this.startPlaybackFromFrame(resumeFrame, INITIAL_LEAD_SEC);
         this.callbacks.onBufferingChange?.(false);
@@ -140,7 +141,9 @@ export class OfflineStreamPlayer {
     if (!this.hasAudio()) {
       this.playingState = true;
       this.bufferingState = true;
-      this.bufferingTargetFrame = Math.max(0, Math.round(scoreSec * this.sampleRate));
+      const targetFrame = Math.max(0, Math.round(scoreSec * this.sampleRate));
+      this.bufferingResumeFrame = targetFrame;
+      this.bufferingWatermarkFrame = targetFrame;
       this.anchorScoreSec = Math.max(0, scoreSec);
       this.pausedScoreSec = this.anchorScoreSec;
       return 'buffering';
@@ -156,7 +159,8 @@ export class OfflineStreamPlayer {
     }
 
     this.bufferingState = true;
-    this.bufferingTargetFrame = targetFrame;
+    this.bufferingResumeFrame = targetFrame;
+    this.bufferingWatermarkFrame = targetFrame;
     this.anchorScoreSec = targetFrame / this.sampleRate;
     this.pausedScoreSec = this.anchorScoreSec;
     return 'buffering';
@@ -176,7 +180,8 @@ export class OfflineStreamPlayer {
     this.stopSources();
     this.playingState = false;
     this.bufferingState = false;
-    this.bufferingTargetFrame = 0;
+    this.bufferingResumeFrame = 0;
+    this.bufferingWatermarkFrame = 0;
     this.nextScheduleFrame = 0;
     this.nextAudioTime = 0;
     this.anchorAudioTime = 0;
@@ -200,7 +205,9 @@ export class OfflineStreamPlayer {
     if (!this.hasAudio()) {
       this.pausedScoreSec = clampedSec;
       if (this.playingState) {
-        this.bufferingTargetFrame = Math.max(0, Math.round(clampedSec * this.sampleRate));
+        const targetFrame = Math.max(0, Math.round(clampedSec * this.sampleRate));
+        this.bufferingResumeFrame = targetFrame;
+        this.bufferingWatermarkFrame = targetFrame;
         this.anchorScoreSec = clampedSec;
         return 'buffering';
       }
@@ -222,7 +229,8 @@ export class OfflineStreamPlayer {
 
     const wasBuffering = this.bufferingState;
     this.bufferingState = true;
-    this.bufferingTargetFrame = targetFrame;
+    this.bufferingResumeFrame = targetFrame;
+    this.bufferingWatermarkFrame = targetFrame;
     this.anchorScoreSec = targetFrame / this.sampleRate;
     if (!wasBuffering) this.callbacks.onBufferingChange?.(true);
     return 'buffering';
@@ -242,7 +250,8 @@ export class OfflineStreamPlayer {
         this.startPlaybackFromFrame(currentFrame, REBASE_LEAD_SEC);
       } else if (!this.complete) {
         this.bufferingState = true;
-        this.bufferingTargetFrame = currentFrame;
+        this.bufferingResumeFrame = currentFrame;
+        this.bufferingWatermarkFrame = currentFrame;
         this.anchorScoreSec = currentFrame / this.sampleRate;
         this.callbacks.onBufferingChange?.(true);
       }
@@ -312,7 +321,8 @@ export class OfflineStreamPlayer {
             this.callbacks.onEnded?.();
           } else if (!this.complete && this.nextScheduleFrame >= this.renderedFrames) {
             this.bufferingState = true;
-            this.bufferingTargetFrame = Math.min(
+            this.bufferingResumeFrame = this.nextScheduleFrame;
+            this.bufferingWatermarkFrame = Math.min(
               Math.max(0, this.totalFrames - 1),
               this.nextScheduleFrame + Math.round(0.5 * this.sampleRate),
             );

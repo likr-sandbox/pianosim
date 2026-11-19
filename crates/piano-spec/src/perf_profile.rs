@@ -31,7 +31,7 @@ impl PerfPreset {
     }
 }
 
-/// Complete 18-parameter POD performance profile spanning Stages 1-4.
+/// Complete 19-parameter POD performance profile spanning Stages 1-4.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct PerfProfile {
     // Stage 2: String bank

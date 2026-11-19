@@ -1,3 +1,8 @@
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expect, test } from '@playwright/test';
 import {
   sampleDestinationAudio,
@@ -309,4 +314,172 @@ test.describe('E2E MIDI & SMF Playback Suite (Offline Render + Live Web MIDI)', 
 
     await page.getByTestId('transport-stop').click();
   });
+
+  test('Tier 3: Mid-render invalidateIfStale resets playback cleanly to Idle without buffering hang', async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    await page.getByTestId('demo-select').selectOption('bach-prelude');
+    await page.getByTestId('transport-play').click();
+
+    await expect
+      .poll(
+        async () => ((await page.getByTestId('offline-render-status').textContent()) ?? '').trim(),
+        { timeout: 30_000, intervals: [50] },
+      )
+      .toBe('Playing');
+    await expect(page.getByTestId('offline-cancel')).toBeEnabled();
+
+    await setSlider(page, 'voicing-hammer', 0.85);
+    await expect(page.getByTestId('offline-render-status')).toHaveText('Idle');
+    await expect(page.getByTestId('transport-play')).toBeEnabled();
+    await expect(page.getByTestId('offline-cancel')).toBeDisabled();
+    await expect
+      .poll(async () => (await sampleDestinationAudio(page)).rms, { timeout: 3000 })
+      .toBeLessThan(1e-4);
+  });
+});
+
+test('OfflineStreamPlayer unit: underrun prebuffer resumes at exact nextScheduleFrame', async () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pianosim-stream-unit-'));
+  const bundlePath = path.join(tmpDir, 'offline-stream-player.mjs');
+  try {
+    execFileSync(
+      path.join(repoRoot, 'node_modules/.bin/esbuild'),
+      [
+        path.join(repoRoot, 'apps/web/src/audio/offline-stream-player.ts'),
+        '--bundle',
+        '--format=esm',
+        '--platform=node',
+        `--outfile=${bundlePath}`,
+      ],
+      { stdio: 'pipe' },
+    );
+    const mod = (await import(pathToFileURL(bundlePath).href)) as {
+      OfflineStreamPlayer: new (
+        host: unknown,
+        callbacks?: { onBufferingChange?(b: boolean): void; onEnded?(): void },
+      ) => {
+        playFrom(scoreSec: number): string;
+        appendChunk(
+          cacheKey: string,
+          chunk: {
+            jobId: number;
+            chunkIndex: number;
+            startFrame: number;
+            frames: number;
+            totalFrames: number;
+            sampleRate: number;
+            left: Float32Array;
+            right: Float32Array;
+            isFinal: boolean;
+          },
+        ): void;
+        isBuffering(): boolean;
+      };
+    };
+
+    const scheduled: Array<{
+      len: number;
+      firstSampleL: number;
+      onended: (() => void) | null;
+    }> = [];
+    const mockHost = {
+      getAudioContext: () => ({
+        currentTime: 10.0,
+        createBuffer: (_ch: number, len: number, _sr: number) => {
+          const ch0 = new Float32Array(len);
+          return { copyToChannel: (src: Float32Array, ch: number) => { if (ch === 0) ch0.set(src); }, ch0 };
+        },
+        createBufferSource: () => {
+          const entry = { len: 0, firstSampleL: 0, onended: null as (() => void) | null };
+          const src = {
+            buffer: null as { ch0: Float32Array } | null,
+            playbackRate: { value: 1 },
+            set onended(fn: (() => void) | null) { entry.onended = fn; },
+            get onended() { return entry.onended; },
+            connect: () => {},
+            disconnect: () => {},
+            start: () => {
+              entry.len = src.buffer?.ch0.length ?? 0;
+              entry.firstSampleL = src.buffer?.ch0[0] ?? 0;
+              scheduled.push(entry);
+            },
+            stop: () => {},
+          };
+          return src;
+        },
+      }),
+      getAnalyser: () => ({}),
+    };
+
+    const bufferingEvents: boolean[] = [];
+    const player = new mod.OfflineStreamPlayer(mockHost, {
+      onBufferingChange: (b) => bufferingEvents.push(b),
+    });
+
+    const sr = 48_000;
+    const totalFrames = 144_000;
+    const mkRamp = (start: number, frames: number) => {
+      const buf = new Float32Array(frames);
+      for (let i = 0; i < frames; i++) buf[i] = start + i;
+      return buf;
+    };
+
+    player.playFrom(0);
+    player.appendChunk('k1', {
+      jobId: 1,
+      chunkIndex: 0,
+      startFrame: 0,
+      frames: 48_000,
+      totalFrames,
+      sampleRate: sr,
+      left: mkRamp(0, 48_000),
+      right: mkRamp(0, 48_000),
+      isFinal: false,
+    });
+    expect(scheduled.length).toBe(1);
+    expect(scheduled[0].len).toBe(48_000);
+
+    // Trigger underrun at nextScheduleFrame === 48_000 (watermark = 72_000).
+    scheduled[0].onended?.();
+    expect(player.isBuffering()).toBe(true);
+    expect(bufferingEvents).toEqual([false, true]);
+
+    // Chunk 1 reaches 60_000 (< 72_000 watermark): remain buffering.
+    player.appendChunk('k1', {
+      jobId: 1,
+      chunkIndex: 1,
+      startFrame: 48_000,
+      frames: 12_000,
+      totalFrames,
+      sampleRate: sr,
+      left: mkRamp(48_000, 12_000),
+      right: mkRamp(48_000, 12_000),
+      isFinal: false,
+    });
+    expect(player.isBuffering()).toBe(true);
+    expect(scheduled.length).toBe(1);
+
+    // Chunk 2 exceeds watermark (80_000 > 72_000): must resume at frame 48_000, not 72_000.
+    player.appendChunk('k1', {
+      jobId: 1,
+      chunkIndex: 2,
+      startFrame: 60_000,
+      frames: 20_000,
+      totalFrames,
+      sampleRate: sr,
+      left: mkRamp(60_000, 20_000),
+      right: mkRamp(60_000, 20_000),
+      isFinal: false,
+    });
+    expect(player.isBuffering()).toBe(false);
+    expect(bufferingEvents).toEqual([false, true, false]);
+    expect(scheduled.length).toBe(2);
+    expect(scheduled[1].firstSampleL).toBe(48_000);
+    expect(scheduled[1].len).toBe(32_000);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

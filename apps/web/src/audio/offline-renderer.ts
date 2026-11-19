@@ -123,8 +123,13 @@ export class OfflineRenderer {
     if (this.isRenderingState) {
       this.cancelActiveRender();
     }
-    if (!this.isPlayingState) {
+    if (!this.isPlayingState || !this.streamPlayer.isComplete()) {
+      this.playEpoch++;
+      this.stopPlaybackInternal(true);
       this.streamPlayer.clear();
+      this.playheadSeconds = 0;
+      this.nextEventIndex = 0;
+      this.callbacks.onProgress?.(0, this.score?.durationSeconds ?? 0);
       this.setStatus('idle', 0);
     } else {
       this.callbacks.onRenderStatus?.(this.status, this.renderProgress, null);

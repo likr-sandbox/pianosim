@@ -86,16 +86,17 @@ test.describe('E2E High-Polyphony Stress & D1 Performance Stability', () => {
       const key = page.locator(`[data-midi="${midi}"]`);
       await key.dispatchEvent('pointerdown', { buttons: 1 });
       await waitAudioBlocks(page, 28);
-      await key.dispatchEvent('pointerup', { buttons: 0 });
-      await waitAudioBlocks(page, 8);
 
-      // Spot-check audio stability mid-stream every 5 notes
+      // Spot-check audio stability mid-stream every 5 notes while actively sounding
       if ((noteCounter + 1) % 5 === 0) {
         const snap = await sampleDestinationAudio(page);
         expect(snap.nonFiniteCount).toBe(0);
         expect(snap.peak).toBeLessThanOrEqual(1.0);
         expect(snap.rms).toBeGreaterThan(0.001); // Continuous sound, no buffer underruns
       }
+
+      await key.dispatchEvent('pointerup', { buttons: 0 });
+      await waitAudioBlocks(page, 8);
     }
 
     // Trigger panic button to silence engine
