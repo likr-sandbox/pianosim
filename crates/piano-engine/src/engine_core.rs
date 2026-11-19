@@ -17,7 +17,7 @@ const DAMPER_ACTIVE_HOLD_CLEARANCE_M: f32 = 0.5e-3;
 const RENDER_CHUNK: usize = 128;
 /// SI radiation sensitivity converting Stage 3 bridge velocity `[m/s]` (`Zones 0..7`)
 /// to Stage 4 calibrated acoustic drive (`~320 Pa/(m/s)` air impedance * effective area).
-const BRIDGE_ZONE_RAD_GAIN: f32 = 350.0;
+const BRIDGE_ZONE_RAD_GAIN: f32 = 64.0;
 /// Structural rim admittance converting Stage 1 keybed rail force `[N]` (`Zone 8`)
 /// to Stage 4 acoustic drive so keybed thump blends realistically below sustained tones.
 const KEYBED_ZONE_ADMITTANCE_GAIN: f32 = 0.025;

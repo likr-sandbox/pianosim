@@ -40,7 +40,7 @@ pub struct ReducedBridgePole {
 /// across bridge zones `0..8`, preventing any `1.13 kHz` brick wall on treble/longitudinal signals
 /// and matching acoustic literature bridge mobility (`~1e-4..1e-3 m/(N*s)`).
 pub const DEFAULT_Y_INF: [f32; NUM_BRIDGE_ZONES] = [
-    0.000_40, 0.000_38, 0.000_45, 0.000_52, 0.000_58, 0.000_62, 0.000_68, 0.000_72,
+    0.000_420, 0.000_360, 0.000_400, 0.000_350, 0.000_305, 0.000_510, 0.000_500, 0.000_520,
 ];
 
 const MODE_FREQS_HZ: [f32; NUM_REDUCED_MODES] = [

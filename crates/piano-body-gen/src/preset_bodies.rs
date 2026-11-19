@@ -59,9 +59,9 @@ pub(crate) fn concert_grand_spec() -> BodySpec {
         t60_corner_hz: 460.0,
         t60_exp: 1.02,
         ritz_gain: 0.0145,
-        ritz_max_hz: 2_800.0,
+        ritz_max_hz: 2_100.0,
         stat_count: 1_060,
-        stat_gain: 0.0098,
+        stat_gain: 0.0175,
         stat_bass_clamp: 0.50,
         stat_treble_focus: 1.08,
 
@@ -81,8 +81,8 @@ pub(crate) fn concert_grand_spec() -> BodySpec {
         cavity_helmholtz_hz: [67.5, 84.0, 104.5],
         cavity_lower_dims_m: [1.38, 1.72, 0.42],
         cavity_upper_dims_m: [1.34, 1.68, 0.58],
-        cavity_lower_couple: 0.0145,
-        cavity_upper_couple: 0.0115,
+        cavity_lower_couple: 0.001595,
+        cavity_upper_couple: 0.001265,
         cavity_t60_base_s: 0.35,
 
         plate_coincidence_hz: 1_550.0,
@@ -107,10 +107,10 @@ pub(crate) fn upright_studio_spec() -> BodySpec {
         [0.00, -0.14, -0.05],
     ];
     const UPRIGHT_DIRECT: [f32; PRESET_RADIATOR_ZONES] = [
-        0.025, 0.028, 0.062, 0.053, 0.065, 0.063, 0.036, 0.032, 0.028,
+        0.0210, 0.0240, 0.0350, 0.0260, 0.0550, 0.0480, 0.0380, 0.0460, 0.0300,
     ];
     const UPRIGHT_Y_INF: [f32; PRESET_BRIDGE_ZONES] = [
-        0.000_30, 0.000_29, 0.000_35, 0.000_40, 0.000_45, 0.000_48, 0.000_52, 0.000_56,
+        0.000_230, 0.000_220, 0.000_270, 0.000_310, 0.000_340, 0.000_370, 0.000_410, 0.000_440,
     ];
     const FREQS: [f32; PRESET_REDUCED_POLES] = [
         74.0, 118.0, 184.0, 268.0, 355.0, 495.0, 650.0, 875.0, 1110.0, 1360.0,
@@ -178,9 +178,9 @@ pub(crate) fn upright_studio_spec() -> BodySpec {
         t60_corner_hz: 520.0,
         t60_exp: 1.05,
         ritz_gain: 0.0138,
-        ritz_max_hz: 3_100.0,
+        ritz_max_hz: 2_650.0,
         stat_count: 1_060,
-        stat_gain: 0.0094,
+        stat_gain: 0.0320,
         stat_bass_clamp: 0.44,
         stat_treble_focus: 1.12,
 
@@ -200,8 +200,8 @@ pub(crate) fn upright_studio_spec() -> BodySpec {
         cavity_helmholtz_hz: [88.0, 118.0, 146.0],
         cavity_lower_dims_m: [1.26, 1.06, 0.30],
         cavity_upper_dims_m: [1.22, 1.02, 0.22],
-        cavity_lower_couple: 0.0145,
-        cavity_upper_couple: 0.0092,
+        cavity_lower_couple: 0.001595,
+        cavity_upper_couple: 0.001012,
         cavity_t60_base_s: 0.29,
 
         plate_coincidence_hz: 1_380.0,
@@ -226,10 +226,10 @@ pub(crate) fn vintage_saloon_spec() -> BodySpec {
         [0.00, -0.15, -0.06],
     ];
     const SALOON_DIRECT: [f32; PRESET_RADIATOR_ZONES] = [
-        0.027, 0.031, 0.064, 0.056, 0.066, 0.062, 0.031, 0.025, 0.027,
+        0.0230, 0.0260, 0.0370, 0.0280, 0.0580, 0.0500, 0.0340, 0.0400, 0.0310,
     ];
     const SALOON_Y_INF: [f32; PRESET_BRIDGE_ZONES] = [
-        0.000_52, 0.000_50, 0.000_58, 0.000_67, 0.000_75, 0.000_80, 0.000_88, 0.000_92,
+        0.000_520, 0.000_500, 0.000_560, 0.000_620, 0.000_680, 0.000_720, 0.000_780, 0.000_820,
     ];
     const FREQS: [f32; PRESET_REDUCED_POLES] = [
         48.0, 78.0, 124.0, 186.0, 254.0, 358.0, 472.0, 648.0, 825.0, 1010.0,
@@ -297,9 +297,9 @@ pub(crate) fn vintage_saloon_spec() -> BodySpec {
         t60_corner_hz: 340.0,
         t60_exp: 1.12,
         ritz_gain: 0.0172,
-        ritz_max_hz: 2_600.0,
+        ritz_max_hz: 1_900.0,
         stat_count: 1_060,
-        stat_gain: 0.0086,
+        stat_gain: 0.0125,
         stat_bass_clamp: 0.48,
         stat_treble_focus: 1.00,
 
@@ -319,8 +319,8 @@ pub(crate) fn vintage_saloon_spec() -> BodySpec {
         cavity_helmholtz_hz: [76.0, 98.0, 128.0],
         cavity_lower_dims_m: [1.18, 1.16, 0.34],
         cavity_upper_dims_m: [1.12, 1.08, 0.42],
-        cavity_lower_couple: 0.0195,
-        cavity_upper_couple: 0.0150,
+        cavity_lower_couple: 0.002145,
+        cavity_upper_couple: 0.001650,
         cavity_t60_base_s: 0.36,
 
         plate_coincidence_hz: 1_820.0,

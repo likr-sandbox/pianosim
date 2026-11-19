@@ -117,6 +117,7 @@ pub fn synthesize_irs(
             &mut scratch.ir_flat[l_start..l_start + ir_len],
             z_direct,
             &paths[z].left,
+            sr,
             &mut scratch.refl_scratch,
             &mut scratch.delay_scratch,
         );
@@ -125,6 +126,7 @@ pub fn synthesize_irs(
             &mut scratch.ir_flat[r_start..r_start + ir_len],
             z_direct,
             &paths[z].right,
+            sr,
             &mut scratch.refl_scratch,
             &mut scratch.delay_scratch,
         );
@@ -145,6 +147,7 @@ fn apply_channel_post(
     ir: &mut [f32],
     zone_direct_gain: f32,
     spec: &ChannelPathSpec,
+    sample_rate: f64,
     refl_scratch: &mut [f32],
     delay_scratch: &mut [f32],
 ) {
@@ -153,7 +156,20 @@ fn apply_channel_post(
         return;
     }
 
-    ir[0] += zone_direct_gain * spec.direct_gain;
+    let direct_val = 20.0 * zone_direct_gain * spec.direct_gain;
+    if direct_val != 0.0 {
+        delay_scratch[0] = direct_val;
+        delay_scratch[1..n_len].fill(0.0);
+        let tilt_lo = Biquad::high_shelf(165.0, -3.0, 0.55, sample_rate);
+        let tilt_hi = Biquad::high_shelf(900.0, -16.8, 0.55, sample_rate);
+        let mid_dip = Biquad::peaking_eq(385.0, 1.22, -7.8, sample_rate);
+        Biquad::process_chain_in_place(&[tilt_lo, tilt_hi, mid_dip], &mut delay_scratch[..n_len]);
+        let mut i = 0;
+        while i < n_len {
+            ir[i] += delay_scratch[i];
+            i += 1;
+        }
+    }
 
     if spec.lid_refl_gain != 0.0 || spec.hall_refl_gain != 0.0 {
         refl_scratch[..n_len].copy_from_slice(ir);

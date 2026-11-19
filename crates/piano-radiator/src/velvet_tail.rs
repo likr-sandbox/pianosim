@@ -13,7 +13,7 @@ const VELVET_PULSE_RATE_HZ: f64 = 2_400.0;
 const VELVET_DECAY_TAU_SECS: f64 = 0.085;
 const VELVET_ATTACK_RAMP_SECS: f64 = 0.004;
 const VELVET_HPF_HZ: f64 = 3_800.0;
-pub(crate) const VELVET_BASE_GAIN: f64 = 0.0008;
+pub(crate) const VELVET_BASE_GAIN: f64 = 0.00015;
 
 #[inline]
 fn splitmix64_next(state: &mut u64) -> u64 {

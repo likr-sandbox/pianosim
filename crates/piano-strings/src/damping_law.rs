@@ -16,7 +16,7 @@ const WOUND_KEY_BREAK: usize = MONOCHORD_KEYS + BICHORD_KEYS;
 
 // Calibrated physical damping coefficients (with agraffe/hitch-pin boundary loss folded into air/wire scale).
 const AIR_VISC_COEFF: f64 = 0.165;
-const THERMOELASTIC_COEFF: f64 = 7.5e-10;
+const THERMOELASTIC_COEFF: f64 = 1.65e-9;
 const WINDING_FRICTION_COEFF: f64 = 0.22;
 const WINDING_REF_OMEGA: f64 = TAU * 27.5;
 

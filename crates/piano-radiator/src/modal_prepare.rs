@@ -13,10 +13,10 @@ use crate::modal_synth::{path_index, NUM_IR_PATHS, TILE};
 use crate::subrate_upsample::{DECIM, PAD_LEFT};
 
 /// Global scalar gain applied after `2 * zeta` Q-factor modal-sum normalization.
-pub(crate) const MODAL_BODY_BLEND: f64 = 2.6;
+pub(crate) const MODAL_BODY_BLEND: f64 = 53.0;
 const RAD_TILT_REF_HZ: f64 = 160.0;
 const RAD_TILT_MIN_HZ: f64 = 48.0;
-const RAD_TILT_EXP: f64 = 0.90;
+const RAD_TILT_EXP: f64 = 1.05;
 
 /// Sample-rate-invariant radiation admittance tilt targeting `-3..-4 dB/oct`
 /// downward modal spectral slope without `< 90 Hz` bass sag.

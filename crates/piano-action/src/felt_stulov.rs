@@ -72,7 +72,7 @@ fn compute_key_felt_spec(
 
     let p_base = 2.70 + 0.50 * x;
     let exponent_p =
-        fixed_exponent_p.unwrap_or_else(|| (p_base + (h - 0.5) * 0.50).clamp(2.2, 3.5));
+        fixed_exponent_p.unwrap_or_else(|| (p_base + (h - 0.5) * 1.35).clamp(2.2, 3.5));
 
     // Smooth monotonic rigid-felt baseline tuned so coupled string contact durations hit
     // A0 ~ 3.2 ms, A4 mf ~ 1.5 ms, and C8 mf ~ 0.14 ms.
@@ -85,7 +85,7 @@ fn compute_key_felt_spec(
     let k0_nominal = (exponent_p + 1.0) * m_h * MF_REF_SPEED_MPS * MF_REF_SPEED_MPS
         / (2.0 * pow_nonneg_f64(delta_mf, exponent_p + 1.0));
     // Calibrate for Stulov hysteresis (~1 - 0.5 * eps) & voicing hardness.
-    let voicing_stiff = exp_f64((h - 0.5) * 1.40);
+    let voicing_stiff = exp_f64((h - 0.5) * 7.50);
     let k0_si = k0_nominal * 1.16 * voicing_stiff;
 
     // Normalize LUT domain so fff strikes sit cleanly inside u in [0, 1].
