@@ -1,17 +1,38 @@
-/** Transport control bar for demo scores, SMF file upload, play/pause/stop, scrub seek, and tempo scaling. */
+/** Transport control bar for offline MIDI rendering, AudioBuffer playback, seek, tempo, and WAV export. */
 
+import type { WavFormat } from '../audio/abi';
+import type { OfflineRenderStatus } from '../audio/offline-abi';
+import type { OfflineRenderer } from '../audio/offline-renderer';
+import { triggerWavDownload } from '../audio/wav-recorder';
 import { DEMO_SCORES } from '../midi/demo-scores';
-import type { MidiPlayer } from '../midi/midi-player';
 import type { WebMidiManager } from '../midi/web-midi';
 
 export interface TransportBarCallbacks {
   onSelectDemo(demoId: string): Promise<void> | void;
   onUploadMidi(bytes: ArrayBuffer, fileName: string): void;
+  onError?(message: string): void;
+}
+
+function formatRenderStatusText(status: OfflineRenderStatus, progress: number): string {
+  switch (status) {
+    case 'rendering':
+      return `Rendering ${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`;
+    case 'ready':
+      return 'Ready';
+    case 'playing':
+      return 'Playing';
+    case 'paused':
+      return 'Paused';
+    case 'error':
+      return 'Error';
+    default:
+      return 'Idle';
+  }
 }
 
 export class TransportBar {
   private readonly container: HTMLElement;
-  private readonly player: MidiPlayer;
+  private readonly renderer: OfflineRenderer;
   private readonly midiManager: WebMidiManager;
   private readonly callbacks: TransportBarCallbacks;
 
@@ -19,6 +40,11 @@ export class TransportBar {
   private playBtn!: HTMLButtonElement;
   private pauseBtn!: HTMLButtonElement;
   private stopBtn!: HTMLButtonElement;
+  private cancelBtn!: HTMLButtonElement;
+  private offlineFormatSelect!: HTMLSelectElement;
+  private exportWavBtn!: HTMLButtonElement;
+  private offlineStatusEl!: HTMLElement;
+  private offlineProgressEl!: HTMLProgressElement;
   private seekBar!: HTMLInputElement;
   private tempoSlider!: HTMLInputElement;
   private tempoValEl!: HTMLElement;
@@ -31,12 +57,12 @@ export class TransportBar {
 
   constructor(
     container: HTMLElement,
-    player: MidiPlayer,
+    renderer: OfflineRenderer,
     midiManager: WebMidiManager,
     callbacks: TransportBarCallbacks,
   ) {
     this.container = container;
-    this.player = player;
+    this.renderer = renderer;
     this.midiManager = midiManager;
     this.callbacks = callbacks;
     this.render();
@@ -47,6 +73,25 @@ export class TransportBar {
     if (this.seekBar) {
       this.seekBar.max = totalSec > 0 ? totalSec.toFixed(1) : '0';
       this.seekBar.value = currentSec.toFixed(1);
+    }
+  }
+
+  updateRenderStatus(status: OfflineRenderStatus, progress: number): void {
+    const pct = Math.round(Math.max(0, Math.min(1, progress)) * 100);
+    if (this.offlineStatusEl) {
+      this.offlineStatusEl.textContent = formatRenderStatusText(status, progress);
+    }
+    if (this.offlineProgressEl) {
+      this.offlineProgressEl.value = pct;
+    }
+    if (this.cancelBtn) {
+      this.cancelBtn.disabled = status !== 'rendering';
+    }
+    if (this.playBtn) {
+      this.playBtn.disabled = status === 'rendering';
+    }
+    if (this.exportWavBtn) {
+      this.exportWavBtn.disabled = status === 'rendering' || !this.renderer.hasValidCache();
     }
   }
 
@@ -86,7 +131,7 @@ export class TransportBar {
 
   private render(): void {
     this.container.innerHTML = `
-      <section class="transport-bar" aria-label="MIDI Playback & Transport Controls">
+      <section class="transport-bar" aria-label="MIDI Offline Render & Transport Controls">
         <div class="transport-row main-transport">
           <div class="transport-group demo-picker">
             <label for="select-demo" class="transport-label">Demo Score</label>
@@ -147,6 +192,41 @@ export class TransportBar {
           <div id="recorder-mount" class="transport-group recorder-group"></div>
         </div>
 
+        <div class="transport-row offline-row" role="group" aria-label="Offline Full-Physics Render">
+          <span class="transport-label">Offline Render (Full)</span>
+          <span id="val-offline-status" data-testid="offline-render-status" class="offline-status val-mono">Idle</span>
+          <progress
+            id="offline-progress"
+            data-testid="offline-render-progress"
+            class="offline-progress"
+            max="100"
+            value="0"
+          ></progress>
+          <button
+            id="btn-offline-cancel"
+            data-testid="offline-cancel"
+            type="button"
+            class="btn btn-secondary"
+            disabled
+          >Cancel</button>
+          <select
+            id="select-offline-format"
+            data-testid="offline-export-format"
+            class="select-record-format"
+            aria-label="Offline WAV Format"
+          >
+            <option value="pcm24">24-bit WAV (TPDF)</option>
+            <option value="f32">32-bit Float WAV</option>
+          </select>
+          <button
+            id="btn-offline-export"
+            data-testid="offline-export-wav"
+            type="button"
+            class="btn btn-accent"
+            disabled
+          >Download Rendered WAV</button>
+        </div>
+
         <div class="transport-row seek-row">
           <label for="progress-bar" class="seek-label">
             <span>Playback Position</span>
@@ -169,6 +249,11 @@ export class TransportBar {
     this.playBtn = this.container.querySelector('#btn-play')!;
     this.pauseBtn = this.container.querySelector('#btn-pause')!;
     this.stopBtn = this.container.querySelector('#btn-stop')!;
+    this.cancelBtn = this.container.querySelector('#btn-offline-cancel')!;
+    this.offlineFormatSelect = this.container.querySelector('#select-offline-format')!;
+    this.exportWavBtn = this.container.querySelector('#btn-offline-export')!;
+    this.offlineStatusEl = this.container.querySelector('#val-offline-status')!;
+    this.offlineProgressEl = this.container.querySelector('#offline-progress')!;
     this.seekBar = this.container.querySelector('#progress-bar')!;
     this.tempoSlider = this.container.querySelector('#slider-tempo')!;
     this.tempoValEl = this.container.querySelector('#val-tempo')!;
@@ -193,27 +278,43 @@ export class TransportBar {
 
     const onPlayClick = async () => {
       await this.awaitPendingLoad();
-      await this.player.play();
+      try {
+        await this.renderer.play();
+      } catch (err) {
+        this.callbacks.onError?.(err instanceof Error ? err.message : String(err));
+      }
     };
 
     const onPauseClick = () => {
-      this.player.pause();
+      this.renderer.pause();
     };
 
     const onStopClick = () => {
-      this.player.stop();
+      this.renderer.stop();
+    };
+
+    const onCancelClick = () => {
+      this.renderer.cancelRender();
+    };
+
+    const onExportWavClick = () => {
+      const format: WavFormat = this.offlineFormatSelect.value === 'f32' ? 'f32' : 'pcm24';
+      const blob = this.renderer.exportWavBlob(format);
+      if (blob) {
+        triggerWavDownload(blob, format, 'pianosim-offline');
+      }
     };
 
     const onSeekInput = async () => {
       const targetSec = parseFloat(this.seekBar.value);
       await this.awaitPendingLoad();
-      this.player.seek(targetSec);
+      this.renderer.seek(targetSec);
     };
 
     const onTempoInput = () => {
       const factor = parseFloat(this.tempoSlider.value);
       this.tempoValEl.textContent = `${factor.toFixed(2)}x`;
-      this.player.setTempo(factor);
+      this.renderer.setTempo(factor);
     };
 
     const onFileChange = () => {
@@ -237,6 +338,8 @@ export class TransportBar {
     this.playBtn.addEventListener('click', onPlayClick);
     this.pauseBtn.addEventListener('click', onPauseClick);
     this.stopBtn.addEventListener('click', onStopClick);
+    this.cancelBtn.addEventListener('click', onCancelClick);
+    this.exportWavBtn.addEventListener('click', onExportWavClick);
     this.seekBar.addEventListener('input', onSeekInput);
     this.tempoSlider.addEventListener('input', onTempoInput);
     this.fileInput.addEventListener('change', onFileChange);
@@ -247,6 +350,8 @@ export class TransportBar {
       this.playBtn.removeEventListener('click', onPlayClick);
       this.pauseBtn.removeEventListener('click', onPauseClick);
       this.stopBtn.removeEventListener('click', onStopClick);
+      this.cancelBtn.removeEventListener('click', onCancelClick);
+      this.exportWavBtn.removeEventListener('click', onExportWavClick);
       this.seekBar.removeEventListener('input', onSeekInput);
       this.tempoSlider.removeEventListener('input', onTempoInput);
       this.fileInput.removeEventListener('change', onFileChange);

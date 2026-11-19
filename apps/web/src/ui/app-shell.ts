@@ -1,11 +1,11 @@
 /** Root application shell orchestrating audio host, MIDI player, input devices, and UI panels. */
 
 import type { BodyId, LidState, ListenerPerspective } from '../audio/abi';
+import { OfflineRenderer } from '../audio/offline-renderer';
 import type { TelemetryClient } from '../audio/telemetry-client';
 import type { WasmAudioHost } from '../audio/wasm-host';
 import { triggerWavDownload } from '../audio/wav-recorder';
 import { fetchDemoScore } from '../midi/demo-scores';
-import { MidiPlayer } from '../midi/midi-player';
 import { parseSmf } from '../midi/smf-parser';
 import { WebMidiManager } from '../midi/web-midi';
 import { PerfMeter } from '../viz/perf-meter';
@@ -22,12 +22,21 @@ import { TouchCurveSelector } from './touch-curve-selector';
 import { TransportBar } from './transport-bar';
 import { VoicingPanel, type VoicingState } from './voicing-panel';
 
+function hashBytesFnv1a(bytes: Uint8Array): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes[i];
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
 export class AppShell {
   private readonly root: HTMLElement;
   private readonly host: WasmAudioHost;
   private readonly telemetry: TelemetryClient;
   private readonly midiManager: WebMidiManager;
-  private readonly midiPlayer: MidiPlayer;
+  private readonly offlineRenderer: OfflineRenderer;
   private inputRouter!: AppInputRouter;
 
   private keyboardView!: KeyboardView;
@@ -57,13 +66,13 @@ export class AppShell {
     host: WasmAudioHost,
     telemetry: TelemetryClient,
     midiManager?: WebMidiManager,
-    midiPlayer?: MidiPlayer,
+    offlineRenderer?: OfflineRenderer,
   ) {
     this.root = root;
     this.host = host;
     this.telemetry = telemetry;
     this.midiManager = midiManager ?? new WebMidiManager(host);
-    this.midiPlayer = midiPlayer ?? new MidiPlayer(host);
+    this.offlineRenderer = offlineRenderer ?? new OfflineRenderer(host);
 
     this.inputRouter = new AppInputRouter(this.host, this.midiManager, {
       ensureUnlocked: () => this.ensureUnlocked(),
@@ -167,6 +176,7 @@ export class AppShell {
         st.temperamentId,
         st.condition,
       );
+      this.offlineRenderer.invalidateIfStale();
     });
 
     const spaceContainer = this.root.querySelector<HTMLElement>('#space-mount')!;
@@ -175,11 +185,13 @@ export class AppShell {
         void this.ensureUnlocked();
         this.presetBar?.setCustom();
         this.host.setSpace(persp, lid, bodyId);
+        this.offlineRenderer.invalidateIfStale();
       },
       onReverbChange: (decayS: number, mix: number) => {
         void this.ensureUnlocked();
         this.presetBar?.setCustom();
         this.host.setReverb(decayS, mix);
+        this.offlineRenderer.invalidateIfStale();
       },
     });
 
@@ -201,6 +213,7 @@ export class AppShell {
         );
         this.host.setSpace(preset.space.perspective, preset.space.lidState, preset.space.bodyId);
         this.host.setReverb(preset.space.reverbDecayS, preset.space.reverbMix);
+        this.offlineRenderer.invalidateIfStale();
       },
     });
 
@@ -221,7 +234,7 @@ export class AppShell {
       this.host.getPerfConfig(),
     );
 
-    this.midiPlayer.setCallbacks({
+    this.offlineRenderer.setCallbacks({
       onNotePress: (midiKey) => this.keyboardView?.setKeyActive(midiKey, true),
       onNoteRelease: (midiKey) => this.keyboardView?.setKeyActive(midiKey, false),
       onPedalChange: (pedalKind, value7) => this.inputRouter.syncPedalFromExternal(pedalKind, value7),
@@ -229,25 +242,41 @@ export class AppShell {
       onStateChange: (isPlaying) => {
         if (!isPlaying) this.keyboardView?.clearActiveKeys();
       },
+      onRenderStatus: (status, progress, error) => {
+        this.transportBar?.updateRenderStatus(status, progress);
+        if (status === 'error' && error) {
+          this.showError(error);
+        }
+      },
+      getVoicing: () => this.voicingPanel.getState(),
+      getSpace: () => ({
+        bodyId: this.spacePanel.getBodyId(),
+        perspective: this.spacePanel.getPerspective(),
+        lidState: this.spacePanel.getLidState(),
+        reverbDecayS: this.spacePanel.getReverbDecayS(),
+        reverbMix: this.spacePanel.getReverbMix(),
+      }),
     });
 
     const transportContainer = this.root.querySelector<HTMLElement>('#transport-mount')!;
     this.transportBar = new TransportBar(
       transportContainer,
-      this.midiPlayer,
+      this.offlineRenderer,
       this.midiManager,
       {
         onSelectDemo: (demoId) => this.loadDemo(demoId),
-        onUploadMidi: (bytes) => {
+        onUploadMidi: (bytes, fileName) => {
           this.demoLoadGen++;
           this.clearError();
           try {
             const score = parseSmf(bytes);
-            this.midiPlayer.load(score);
+            const key = `file:${fileName}:${bytes.byteLength}:${hashBytesFnv1a(new Uint8Array(bytes))}`;
+            this.offlineRenderer.load(score, key);
           } catch (err) {
             this.showError(err instanceof Error ? err.message : String(err));
           }
         },
+        onError: (msg) => this.showError(msg),
       },
     );
 
@@ -313,10 +342,12 @@ export class AppShell {
   private async loadDemo(demoId: string): Promise<void> {
     const gen = ++this.demoLoadGen;
     this.clearError();
-    this.midiPlayer.stop();
+    this.offlineRenderer.stop();
     try {
       const score = await fetchDemoScore(demoId);
-      if (gen === this.demoLoadGen) this.midiPlayer.load(score);
+      if (gen === this.demoLoadGen) {
+        this.offlineRenderer.load(score, `demo:${demoId}`);
+      }
     } catch (err) {
       if (gen === this.demoLoadGen) {
         this.showError(err instanceof Error ? err.message : String(err));
@@ -326,7 +357,7 @@ export class AppShell {
 
   private panicAll(): void {
     this.inputRouter.resetAll();
-    this.midiPlayer.stop();
+    this.offlineRenderer.stop();
     this.host.allNotesOff();
     this.telemetry.clearClip();
     this.keyboardView.clearActiveKeys();

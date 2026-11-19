@@ -168,6 +168,23 @@
   accent-color: var(--accent);
 }
 
+.offline-row {
+  padding-top: 8px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.offline-status {
+  font-size: 12px;
+  min-width: 96px;
+  color: var(--text);
+}
+
+.offline-progress {
+  width: 140px;
+  height: 10px;
+  accent-color: var(--accent);
+}
+
 /* Voicing & Space Panels */
 .studio-panels-row {
   display: grid;
