@@ -17,6 +17,7 @@ export const DEFAULT_LIVE_PERF_PRESET: PerfPresetId = PERF_PRESET_BALANCED;
 export interface PerfProfileConfig {
   readonly horizMaxHz: number;
   readonly deadModePruneDb: number;
+  readonly lowOrderEnergyHorizonDb: number;
   readonly energyHorizonDb: number;
   readonly savDormancyDb: number;
   readonly savMaxKeyIdx: number;
@@ -49,11 +50,12 @@ export const PERF_PRESET_LABELS: Readonly<Record<PerfPresetId, string>> = {
   [PERF_PRESET_REALTIME]: 'Realtime',
 };
 
-/** Exact calibrated preset configs matching `crates/piano-spec/src/perf_profile.rs` (ba5976b). */
+/** Exact calibrated preset configs matching `crates/piano-spec/src/perf_profile.rs` (cb85fc8). */
 export const PERF_PRESET_CONFIGS: Readonly<Record<PerfPresetId, PerfProfileConfig>> = {
   [PERF_PRESET_FULL]: {
     horizMaxHz: 20_000,
     deadModePruneDb: -120,
+    lowOrderEnergyHorizonDb: -120,
     energyHorizonDb: -120,
     savDormancyDb: -55,
     savMaxKeyIdx: 52,
@@ -74,7 +76,8 @@ export const PERF_PRESET_CONFIGS: Readonly<Record<PerfPresetId, PerfProfileConfi
   [PERF_PRESET_BALANCED]: {
     horizMaxHz: 3_500,
     deadModePruneDb: -50,
-    energyHorizonDb: -92,
+    lowOrderEnergyHorizonDb: -112,
+    energyHorizonDb: -96,
     savDormancyDb: -42,
     savMaxKeyIdx: 39,
     bassPhantomSparse: true,
@@ -87,14 +90,15 @@ export const PERF_PRESET_CONFIGS: Readonly<Record<PerfPresetId, PerfProfileConfi
     actionOversample: 4,
     polynomialAdaa: true,
     shankFlexEnabled: true,
-    damperControlDecim: 2,
+    damperControlDecim: 8,
     hertzNonlinear: false,
     activeBridgePoles: 8,
   },
   [PERF_PRESET_REALTIME]: {
     horizMaxHz: 2_800,
     deadModePruneDb: -45,
-    energyHorizonDb: -88,
+    lowOrderEnergyHorizonDb: -108,
+    energyHorizonDb: -84,
     savDormancyDb: -38,
     savMaxKeyIdx: 26,
     bassPhantomSparse: true,
@@ -107,7 +111,7 @@ export const PERF_PRESET_CONFIGS: Readonly<Record<PerfPresetId, PerfProfileConfi
     actionOversample: 4,
     polynomialAdaa: true,
     shankFlexEnabled: false,
-    damperControlDecim: 4,
+    damperControlDecim: 16,
     hertzNonlinear: false,
     activeBridgePoles: 8,
   },
@@ -132,6 +136,7 @@ export const PERF_KNOB_ID: Readonly<Record<PerfKnobKey, number>> = {
   firHeadTaps: 15,
   firBlockFft: 16,
   actionOversample: 17,
+  lowOrderEnergyHorizonDb: 18,
 };
 
 export type PerfKnobControlKind = 'range' | 'select' | 'bool';
@@ -154,9 +159,10 @@ export const PERF_KNOB_SPECS: ReadonlyArray<PerfKnobSpec> = [
   { key: 'actionOversample', knobId: 17, snakeCase: 'action_oversample', label: 'Action Oversample', stage: 'Stage 1', kind: 'select', options: [2, 4, 8] },
   { key: 'polynomialAdaa', knobId: 9, snakeCase: 'polynomial_adaa', label: 'Polynomial ADAA', stage: 'Stage 1', kind: 'bool' },
   { key: 'shankFlexEnabled', knobId: 8, snakeCase: 'shank_flex_enabled', label: 'Shank Flex', stage: 'Stage 1', kind: 'bool' },
-  { key: 'damperControlDecim', knobId: 5, snakeCase: 'damper_control_decim', label: 'Damper Decim', stage: 'Stage 1', kind: 'select', options: [1, 2, 4] },
+  { key: 'damperControlDecim', knobId: 5, snakeCase: 'damper_control_decim', label: 'Damper Decim', stage: 'Stage 1', kind: 'select', options: [1, 2, 4, 8, 16] },
   { key: 'horizMaxHz', knobId: 10, snakeCase: 'horiz_max_hz', label: 'Horiz Max Hz', stage: 'Stage 2', kind: 'range', min: 500, max: 20_000, step: 100 },
   { key: 'deadModePruneDb', knobId: 11, snakeCase: 'dead_mode_prune_db', label: 'Mode Prune dB', stage: 'Stage 2', kind: 'range', min: -120, max: -20, step: 1 },
+  { key: 'lowOrderEnergyHorizonDb', knobId: 18, snakeCase: 'low_order_energy_horizon_db', label: 'Low Energy Horizon dB', stage: 'Stage 2', kind: 'range', min: -120, max: -40, step: 1 },
   { key: 'energyHorizonDb', knobId: 0, snakeCase: 'energy_horizon_db', label: 'Energy Horizon dB', stage: 'Stage 2', kind: 'range', min: -120, max: -40, step: 1 },
   { key: 'savDormancyDb', knobId: 1, snakeCase: 'sav_dormancy_db', label: 'SAV Dormancy dB', stage: 'Stage 2', kind: 'range', min: -80, max: -20, step: 1 },
   { key: 'savMaxKeyIdx', knobId: 2, snakeCase: 'sav_max_key_idx', label: 'SAV Max Key', stage: 'Stage 2', kind: 'range', min: 0, max: 52, step: 1 },

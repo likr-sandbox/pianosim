@@ -59,6 +59,8 @@ const PROCESSOR_NAME = 'piano-wasm-processor';
 const MAX_FRAMES = 512;
 const MAX_PENDING_MESSAGES = 256;
 
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
 const clamp = (v: number, lo: number, hi: number, fallback: number): number =>
   Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : fallback;
 
@@ -83,7 +85,7 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
   private reportedSpaceSeq = 0;
   private reportedVoicingSeq = 0;
   private activePerfConfig: PerfProfileConfig = PERF_PRESET_CONFIGS[DEFAULT_LIVE_PERF_PRESET];
-  private cachedState: CachedWorkletState = defaultCachedWorkletState();
+  private readonly cachedState: Mutable<CachedWorkletState> = defaultCachedWorkletState();
   private readonly recorder = new WorkletRecorderPool();
   private readonly telemTracker = new WorkletTelemetryTracker();
   private readonly postTransferable = (
@@ -138,23 +140,17 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       if (this.destroyed || !this.exports || this.ctx === 0) return;
       const d = event.data;
       if (d.type === 'spaceBlob') {
-        this.cachedState = {
-          ...this.cachedState,
-          bodyId: (d.bodyId ?? BODY_CONCERT_GRAND) as BodyId,
-          perspective: d.perspective,
-          lidState: d.lidState,
-        };
+        this.cachedState.bodyId = (d.bodyId ?? BODY_CONCERT_GRAND) as BodyId;
+        this.cachedState.perspective = d.perspective;
+        this.cachedState.lidState = d.lidState;
       } else if (d.type === 'voicingBlob') {
-        this.cachedState = {
-          ...this.cachedState,
-          hammerHardness: d.hammerHardness,
-          unisonDetune: d.unisonDetune,
-          stretchTuning: d.stretchTuning,
-          stringLengthScale: d.stringLengthScale,
-          a4FreqHz: d.a4FreqHz,
-          temperamentId: d.temperamentId,
-          condition: d.condition,
-        };
+        this.cachedState.hammerHardness = d.hammerHardness;
+        this.cachedState.unisonDetune = d.unisonDetune;
+        this.cachedState.stretchTuning = d.stretchTuning;
+        this.cachedState.stringLengthScale = d.stringLengthScale;
+        this.cachedState.a4FreqHz = d.a4FreqHz;
+        this.cachedState.temperamentId = d.temperamentId;
+        this.cachedState.condition = d.condition;
       }
       this.blobStreamer.onPrepBlob(d);
     };
@@ -265,43 +261,40 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
         break;
       case 'setHammer': {
         const h = clamp(msg.hammerHardness, 0.0, 1.0, 0.5);
-        this.cachedState = { ...this.cachedState, hammerHardness: h };
+        this.cachedState.hammerHardness = h;
         exports.piano_set_hammer_hardness(ctx, h);
         break;
       }
       case 'setVoicing': {
-        const next: CachedWorkletState = {
-          ...this.cachedState,
-          hammerHardness: clamp(msg.hammerHardness, 0.0, 1.0, 0.5),
-          unisonDetune: clamp(msg.unisonDetune, 0.0, 4.0, 1.0),
-          stretchTuning: clamp(msg.stretchTuning, 0.0, 2.0, 1.0),
-          stringLengthScale: clamp(msg.stringLengthScale, 0.5, 2.0, 1.0),
-          a4FreqHz: clamp(msg.a4FreqHz, A4_FREQ_MIN, A4_FREQ_MAX, A4_FREQ_DEFAULT),
-          temperamentId: ((msg.temperamentId >>> 0) & 0x3) as TemperamentId,
-          condition: clamp(msg.condition, CONDITION_MIN, CONDITION_MAX, CONDITION_DEFAULT),
-        };
-        this.cachedState = next;
+        const s = this.cachedState;
+        s.hammerHardness = clamp(msg.hammerHardness, 0.0, 1.0, 0.5);
+        s.unisonDetune = clamp(msg.unisonDetune, 0.0, 4.0, 1.0);
+        s.stretchTuning = clamp(msg.stretchTuning, 0.0, 2.0, 1.0);
+        s.stringLengthScale = clamp(msg.stringLengthScale, 0.5, 2.0, 1.0);
+        s.a4FreqHz = clamp(msg.a4FreqHz, A4_FREQ_MIN, A4_FREQ_MAX, A4_FREQ_DEFAULT);
+        s.temperamentId = ((msg.temperamentId >>> 0) & 0x3) as TemperamentId;
+        s.condition = clamp(msg.condition, CONDITION_MIN, CONDITION_MAX, CONDITION_DEFAULT);
         exports.piano_set_voicing_full(
-          ctx, next.hammerHardness, next.unisonDetune, next.stretchTuning,
-          next.stringLengthScale, next.a4FreqHz, next.temperamentId, next.condition,
+          ctx, s.hammerHardness, s.unisonDetune, s.stretchTuning,
+          s.stringLengthScale, s.a4FreqHz, s.temperamentId, s.condition,
         );
         break;
       }
       case 'setConcertPitch': {
         const a4 = clamp(msg.concertPitchHz, A4_FREQ_MIN, A4_FREQ_MAX, A4_FREQ_DEFAULT);
-        this.cachedState = { ...this.cachedState, a4FreqHz: a4 };
+        this.cachedState.a4FreqHz = a4;
         exports.piano_set_concert_pitch(ctx, a4);
         break;
       }
       case 'setTemperament': {
         const t = ((msg.temperamentId >>> 0) & 0x3) as TemperamentId;
-        this.cachedState = { ...this.cachedState, temperamentId: t };
+        this.cachedState.temperamentId = t;
         exports.piano_set_temperament(ctx, t);
         break;
       }
       case 'setCondition': {
         const c = clamp(msg.condition, CONDITION_MIN, CONDITION_MAX, CONDITION_DEFAULT);
-        this.cachedState = { ...this.cachedState, condition: c };
+        this.cachedState.condition = c;
         exports.piano_set_condition(ctx, c);
         break;
       }
@@ -315,14 +308,17 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
         const bodyId = ((msg.bodyId ?? BODY_CONCERT_GRAND) & 0x3) as BodyId;
         const persp = ((msg.perspective >>> 0) & 0x3) as ListenerPerspective;
         const lid = ((msg.lidState >>> 0) & 0x3) as LidState;
-        this.cachedState = { ...this.cachedState, bodyId, perspective: persp, lidState: lid };
+        this.cachedState.bodyId = bodyId;
+        this.cachedState.perspective = persp;
+        this.cachedState.lidState = lid;
         exports.piano_set_body_space(ctx, bodyId, persp, lid);
         break;
       }
       case 'setReverb': {
         const decayS = clamp(msg.decayS, REVERB_DECAY_MIN, REVERB_DECAY_MAX, REVERB_DECAY_DEFAULT);
         const mix = clamp(msg.mix, REVERB_MIX_MIN, REVERB_MIX_MAX, REVERB_MIX_DEFAULT);
-        this.cachedState = { ...this.cachedState, reverbDecayS: decayS, reverbMix: mix };
+        this.cachedState.reverbDecayS = decayS;
+        this.cachedState.reverbMix = mix;
         exports.piano_set_reverb(ctx, decayS, mix);
         break;
       }
@@ -376,7 +372,21 @@ class PianoWasmProcessor extends AudioWorkletProcessor {
       return;
     }
 
-    if (msg.cachedState) this.cachedState = msg.cachedState;
+    if (msg.cachedState) {
+      const s = msg.cachedState;
+      this.cachedState.bodyId = s.bodyId;
+      this.cachedState.perspective = s.perspective;
+      this.cachedState.lidState = s.lidState;
+      this.cachedState.reverbDecayS = s.reverbDecayS;
+      this.cachedState.reverbMix = s.reverbMix;
+      this.cachedState.hammerHardness = s.hammerHardness;
+      this.cachedState.unisonDetune = s.unisonDetune;
+      this.cachedState.stretchTuning = s.stretchTuning;
+      this.cachedState.stringLengthScale = s.stringLengthScale;
+      this.cachedState.a4FreqHz = s.a4FreqHz;
+      this.cachedState.temperamentId = s.temperamentId;
+      this.cachedState.condition = s.condition;
+    }
     this.blobStreamer.reset(msg.minSpaceSeq ?? 0, msg.minVoicingSeq ?? 0);
     exports.piano_destroy(this.ctx);
     const nextCtx = buildEngineContext(exports, sampleRate, msg.perfConfig);
