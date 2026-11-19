@@ -1,89 +1,40 @@
-//! Local `8x` multirate hammer-string loop (`384 kHz` @ `48 kHz`) active ONLY
-//! while a hammer is in flight/contact or draining its 16-tap polyphase FIR tail.
+//! Local `2x/4x/8x` multirate hammer-string loop active ONLY while a hammer
+//! is in flight/contact or draining its polyphase FIR tail.
 
-use core::f64::consts::{PI, TAU};
-
-use piano_simd::{AdaaPowerLut, AdaaState};
+use piano_simd::{AdaaPowerLut, AdaaState, PolyPowerApprox};
 
 use crate::agraffe_delay::AgraffeDelayLine;
+pub use crate::decimation_fir::{DecimationFir, DecimationFir16, MAX_OVERSAMPLE_FACTOR};
 use crate::felt_stulov::{FeltSharedCoeffs, FeltState, KeyFeltSpec};
 use crate::k_method::{
-    compute_lambda_for_p, solve_coupled_substep_lerp, BorinKLut, CoupledSubstepInput,
+    compute_lambda_for_p, solve_coupled_substep, solve_coupled_substep_lerp,
+    solve_coupled_substep_poly, BorinKLut, CoupledSubstepInput,
 };
-use crate::math::sin_cos_f64;
 use crate::shank_timoshenko::{ShankParams, ShankState, HAMMER_LET_OFF_Y0_M};
 
-const FIR_TAPS: usize = 16;
-const OVERSAMPLE_FACTOR: usize = 8;
-const FIR_CUTOFF_NORM: f64 = 0.44 / 8.0;
+const OVERSAMPLE_FACTOR: usize = MAX_OVERSAMPLE_FACTOR;
 
-/// DC-normalized (`sum == 1.0`, strictly non-negative) 16-tap Blackman-sinc
-/// polyphase decimation filter downsampling `8x` forces to host rate.
-#[derive(Copy, Clone, Debug)]
-pub struct DecimationFir16 {
-    coeffs: [f32; FIR_TAPS],
+/// Dispatch target for nonlinear felt contact inside oversampled substeps.
+#[derive(Copy, Clone)]
+pub enum HammerContactSolver<'a> {
+    /// Single-table LUT path (exact `p_t <= 1e-5` or `p_t >= 1 - 1e-5` fast-path).
+    LutSingle {
+        adaa: &'a AdaaPowerLut,
+        borin: &'a BorinKLut,
+    },
+    /// Linearly interpolated `(lo, hi)` `p`-grid LUT path.
+    LutLerp {
+        adaa_lo: &'a AdaaPowerLut,
+        adaa_hi: &'a AdaaPowerLut,
+        borin_lo: &'a BorinKLut,
+        borin_hi: &'a BorinKLut,
+        p_t: f32,
+    },
+    /// Zero-LUT analytical Bernstein-monomial polynomial ADAA + Newton K-method.
+    Poly { poly: &'a PolyPowerApprox },
 }
 
-impl DecimationFir16 {
-    /// Precomputes the symmetric 16-tap Blackman-sinc kernel with `sum == 1.0`.
-    #[must_use]
-    pub fn new() -> Self {
-        let mut raw = [0.0_f64; FIR_TAPS];
-        let mut sum = 0.0_f64;
-        let center = 0.5 * ((FIR_TAPS - 1) as f64);
-
-        for (i, slot) in raw.iter_mut().enumerate() {
-            let x = (i as f64) - center;
-            let sinc = if x == 0.0 {
-                2.0 * FIR_CUTOFF_NORM
-            } else {
-                let s = sin_cos_f64(2.0 * PI * FIR_CUTOFF_NORM * x).0;
-                s / (PI * x)
-            };
-            let phase = TAU * ((i as f64) + 0.5) / (FIR_TAPS as f64);
-            let c1 = sin_cos_f64(phase).1;
-            let c2 = sin_cos_f64(2.0 * phase).1;
-            let blackman = 0.42 - 0.50 * c1 + 0.08 * c2;
-            let w = (sinc * blackman).max(0.0);
-            *slot = w;
-            sum += w;
-        }
-
-        let inv_sum = if sum > 0.0 { 1.0 / sum } else { 1.0 };
-        let mut coeffs = [0.0_f32; FIR_TAPS];
-        for (dst, &src) in coeffs.iter_mut().zip(raw.iter()) {
-            *dst = (src * inv_sum) as f32;
-        }
-        Self { coeffs }
-    }
-
-    /// Returns the 16 FIR taps.
-    #[must_use]
-    #[inline]
-    pub const fn coeffs(&self) -> &[f32; FIR_TAPS] {
-        &self.coeffs
-    }
-
-    /// Filters 8 new oversampled forces against the previous 8 substeps in `prev_sub`.
-    #[inline]
-    pub fn process_8(&self, prev_sub: &mut [f32; OVERSAMPLE_FACTOR], cur: &[f32; 8]) -> f32 {
-        let mut acc = 0.0_f32;
-        for k in 0..OVERSAMPLE_FACTOR {
-            acc += self.coeffs[k] * cur[7 - k];
-            acc += self.coeffs[8 + k] * prev_sub[7 - k];
-        }
-        *prev_sub = *cur;
-        acc
-    }
-}
-
-impl Default for DecimationFir16 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Per-key mutable `8x` oversampled strike state.
+/// Per-key mutable oversampled strike state.
 #[derive(Copy, Clone, Debug)]
 pub struct HammerOversampleState {
     pub shank: ShankState,
@@ -122,7 +73,7 @@ impl HammerOversampleState {
     }
 
     /// Launches a new strike at `v_h0` (`m/s`), resetting ADAA phase tracking
-    /// while preserving 16-tap polyphase FIR history across rapid re-strikes.
+    /// while preserving polyphase FIR history across rapid re-strikes.
     #[inline]
     pub fn launch(&mut self, v_h0: f32) {
         self.shank.launch(v_h0);
@@ -140,8 +91,8 @@ impl HammerOversampleState {
         self.shank.active || self.tail_samples_left > 0
     }
 
-    /// Executes 8 oversampled substeps (`384 kHz` @ `48 kHz`) and returns the
-    /// decimated host-rate strike force (`N`) onto the string.
+    /// Executes `fir.factor()` oversampled substeps using LUT interpolation and returns
+    /// the decimated host-rate strike force (`N`) onto the string.
     #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn step_host_sample(
@@ -155,7 +106,7 @@ impl HammerOversampleState {
         borin_lo: &BorinKLut,
         borin_hi: &BorinKLut,
         p_t: f32,
-        fir: &DecimationFir16,
+        fir: &DecimationFir,
         memory_enabled: bool,
         una_corda_mod: (f32, f32),
         y_str_m: f32,
@@ -183,9 +134,8 @@ impl HammerOversampleState {
         )
     }
 
-    /// Executes 8 oversampled substeps (`384 kHz` @ `48 kHz`, `768 kHz` @ `96 kHz`)
-    /// with optional short-string agraffe reflection feedback and returns the
-    /// decimated host-rate strike force (`N`) onto the string.
+    /// Executes `fir.factor()` oversampled substeps with optional short-string agraffe
+    /// reflection feedback and returns the decimated host-rate strike force (`N`).
     #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn step_host_sample_with_agraffe(
@@ -199,7 +149,63 @@ impl HammerOversampleState {
         borin_lo: &BorinKLut,
         borin_hi: &BorinKLut,
         p_t: f32,
-        fir: &DecimationFir16,
+        fir: &DecimationFir,
+        memory_enabled: bool,
+        una_corda_mod: (f32, f32),
+        y_str_m: f32,
+        v_str_mps: f32,
+        r_port_strike: f32,
+        agraffe: Option<&mut AgraffeDelayLine>,
+        uc_choir_scale: f32,
+    ) -> f32 {
+        let solver = if p_t <= 1.0e-5 {
+            HammerContactSolver::LutSingle {
+                adaa: adaa_lo,
+                borin: borin_lo,
+            }
+        } else if p_t >= 1.0 - 1.0e-5 {
+            HammerContactSolver::LutSingle {
+                adaa: adaa_hi,
+                borin: borin_hi,
+            }
+        } else {
+            HammerContactSolver::LutLerp {
+                adaa_lo,
+                adaa_hi,
+                borin_lo,
+                borin_hi,
+                p_t,
+            }
+        };
+        self.step_host_sample_with_solver(
+            shank_params,
+            felt_spec,
+            felt_coeffs,
+            felt_state,
+            solver,
+            fir,
+            memory_enabled,
+            una_corda_mod,
+            y_str_m,
+            v_str_mps,
+            r_port_strike,
+            agraffe,
+            uc_choir_scale,
+        )
+    }
+
+    /// Executes `fir.factor()` (`2 | 4 | 8`) oversampled substeps using `solver` and returns
+    /// the decimated host-rate strike force (`N`) onto the string.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    pub fn step_host_sample_with_solver(
+        &mut self,
+        shank_params: &ShankParams,
+        felt_spec: &KeyFeltSpec,
+        felt_coeffs: &FeltSharedCoeffs,
+        felt_state: &mut FeltState,
+        solver: HammerContactSolver<'_>,
+        fir: &DecimationFir,
         memory_enabled: bool,
         una_corda_mod: (f32, f32),
         y_str_m: f32,
@@ -226,16 +232,20 @@ impl HammerOversampleState {
             0.0
         };
 
+        let os_u8 = fir.factor();
+        let os = usize::from(os_u8);
+        let os_f32 = f32::from(os_u8);
         let mut sub_forces = [0.0_f32; OVERSAMPLE_FACTOR];
         let dt_sub = shank_params.dt_sub;
-        let dt_host = (OVERSAMPLE_FACTOR as f32) * dt_sub;
+        let dt_host = os_f32 * dt_sub;
+
         if self.shank.active {
             if self.shank.elapsed_host_samples == 0 {
                 self.delta_prev_m = self.shank.y_h() - safe_y;
             }
-            let r_sub = safe_r * (1.0 / 8.0);
+            let r_sub = safe_r / os_f32;
             // Include host-rate ZOH/FIR port series compliance so high-register strikes
-            // (where K_felt * r_port * dt_host > 1) stay strictly Nyquist-passive across 8x->1x.
+            // (where K_felt * r_port * dt_host > 1) stay strictly Nyquist-passive across os->1x.
             let k_str_end = 0.5 * r_sub * dt_sub + 0.68 * safe_r * dt_host;
 
             let (f_base_n, eps_base) = felt_state.effective_params(felt_spec, memory_enabled);
@@ -247,18 +257,23 @@ impl HammerOversampleState {
             };
             let c_inst = 1.0 - eps_eff * (1.0 - felt_coeffs.a_fast_sub);
             let k_ham_nom = self.shank.predict_free(shank_params).k_ham;
-            let lambda_end = compute_lambda_for_p(
-                felt_spec.exponent_p,
-                felt_spec.delta_scale_m,
-                k_ham_nom + k_str_end,
-                f_scale_eff_n * c_inst,
-            );
+            let lambda_end = match solver {
+                HammerContactSolver::Poly { .. } => 0.0,
+                HammerContactSolver::LutSingle { .. } | HammerContactSolver::LutLerp { .. } => {
+                    compute_lambda_for_p(
+                        felt_spec.exponent_p,
+                        felt_spec.delta_scale_m,
+                        k_ham_nom + k_str_end,
+                        f_scale_eff_n * c_inst,
+                    )
+                }
+            };
 
             let mut y_s_loc = safe_y;
             let mut v_s_loc = safe_v;
             let mut u_norm_peak = 0.0_f32;
 
-            for slot in &mut sub_forces {
+            for slot in &mut sub_forces[..os] {
                 let pred = self.shank.predict_free(shank_params);
                 let (y_agg, v_agg) = if let Some(ref mut agg) = agraffe {
                     agg.step_substep_before(dt_sub, uc_choir_scale)
@@ -269,25 +284,47 @@ impl HammerOversampleState {
                 let p_end_m = pred.y_h_free - y_s_free;
                 let k_loop_end = pred.k_ham + k_str_end;
 
-                let out = solve_coupled_substep_lerp(
-                    adaa_lo,
-                    adaa_hi,
-                    borin_lo,
-                    borin_hi,
-                    p_t,
-                    &mut self.adaa_state,
-                    &mut felt_state.z_fast,
-                    CoupledSubstepInput {
-                        delta_prev_m: self.delta_prev_m,
-                        p_end_m,
-                        k_loop_end,
-                        delta_scale_m: felt_spec.delta_scale_m,
-                        f_scale_eff_n,
-                        eps_eff,
-                        a_fast_sub: felt_coeffs.a_fast_sub,
-                        lambda_end,
-                    },
-                );
+                let inp = CoupledSubstepInput {
+                    delta_prev_m: self.delta_prev_m,
+                    p_end_m,
+                    k_loop_end,
+                    delta_scale_m: felt_spec.delta_scale_m,
+                    f_scale_eff_n,
+                    eps_eff,
+                    a_fast_sub: felt_coeffs.a_fast_sub,
+                    lambda_end,
+                };
+                let out = match solver {
+                    HammerContactSolver::LutSingle { adaa, borin } => solve_coupled_substep(
+                        adaa,
+                        borin,
+                        &mut self.adaa_state,
+                        &mut felt_state.z_fast,
+                        inp,
+                    ),
+                    HammerContactSolver::LutLerp {
+                        adaa_lo,
+                        adaa_hi,
+                        borin_lo,
+                        borin_hi,
+                        p_t,
+                    } => solve_coupled_substep_lerp(
+                        adaa_lo,
+                        adaa_hi,
+                        borin_lo,
+                        borin_hi,
+                        p_t,
+                        &mut self.adaa_state,
+                        &mut felt_state.z_fast,
+                        inp,
+                    ),
+                    HammerContactSolver::Poly { poly } => solve_coupled_substep_poly(
+                        poly,
+                        &mut self.adaa_state,
+                        &mut felt_state.z_fast,
+                        inp,
+                    ),
+                };
 
                 self.shank.apply_force(shank_params, pred, out.force_n);
                 if let Some(ref mut agg) = agraffe {
@@ -314,11 +351,8 @@ impl HammerOversampleState {
             self.last_u_norm *= 0.5;
         }
 
-        let f_fir = fir
-            .process_8(&mut self.prev_sub_forces, &sub_forces)
-            .max(0.0);
+        let f_fir = fir.process(&mut self.prev_sub_forces, &sub_forces).max(0.0);
         self.last_host_force_n = f_fir;
-        let _ = (dt_host, safe_v);
         f_fir
     }
 }
@@ -328,35 +362,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decimation_fir_is_dc_normalized_symmetric_and_non_negative() {
-        let fir = DecimationFir16::new();
-        let c = fir.coeffs();
-        let sum: f32 = c.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-6, "sum={sum}");
-        for i in 0..8 {
-            assert!((c[i] - c[15 - i]).abs() < 1e-7);
-        }
-        assert!(c.iter().all(|&x| x >= 0.0));
-
-        // Constant unit input converges to exact 1.0 output.
-        let mut prev = [0.0_f32; 8];
-        let ones = [1.0_f32; 8];
-        let y0 = fir.process_8(&mut prev, &ones);
-        let y1 = fir.process_8(&mut prev, &ones);
-        assert!(y0 > 0.0 && y0 < 1.0);
-        assert!((y1 - 1.0).abs() < 1e-6, "y1={y1}");
-
-        // Draining with zeros hits exact 0.0 after 2 host steps.
-        let zeros = [0.0_f32; 8];
-        let t0 = fir.process_8(&mut prev, &zeros);
-        let t1 = fir.process_8(&mut prev, &zeros);
-        assert!(t0 > 0.0);
-        assert_eq!(t1, 0.0);
-    }
-
-    #[test]
     fn rapid_restrike_launch_preserves_fir_history_while_reset_clears_it() {
-        let fir = DecimationFir16::new();
+        let fir = DecimationFir::new();
         let mut st = HammerOversampleState {
             prev_sub_forces: [2.5; OVERSAMPLE_FACTOR],
             ..Default::default()
@@ -365,7 +372,7 @@ mod tests {
         assert_eq!(st.prev_sub_forces, [2.5; OVERSAMPLE_FACTOR]);
 
         // Next host step with zero new sub-forces drains the preserved FIR tail smoothly.
-        let drained = fir.process_8(&mut st.prev_sub_forces, &[0.0; OVERSAMPLE_FACTOR]);
+        let drained = fir.process(&mut st.prev_sub_forces, &[0.0; OVERSAMPLE_FACTOR]);
         assert!(
             drained > 0.0,
             "expected continuous FIR tail drain, got {drained}"

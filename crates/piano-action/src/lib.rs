@@ -1,27 +1,30 @@
 //! Stage 1 physical piano action: pedals, 1st-order Timoshenko hammer shank,
 //! two-timescale Stulov wool felt, Borin K-method + 1st-order ADAA contact solver,
-//! `8x` oversampled strike loop, and FTO #3 unilateral hysteretic damper pad.
+//! `2x/4x/8x` oversampled strike loop, and FTO #3 unilateral hysteretic damper pad.
 
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 
-use piano_spec::{
-    build_scale_design, PedalKind, StringPhysicalParams, VoicingSpec, CHOIR_LAYOUTS, NUM_KEYS,
-};
+use piano_spec::{PerfProfile, VoicingSpec, CHOIR_LAYOUTS, NUM_KEYS};
 
+mod action_bank_ops;
 pub mod agraffe_delay;
+pub mod borin_k;
 pub mod damper_pad;
+mod damper_pad_symp;
+pub mod decimation_fir;
 pub mod felt_stulov;
 pub mod k_method;
+pub mod k_method_poly;
 pub mod keybed;
 mod math;
 pub mod oversample;
 pub mod p_grid;
 pub mod pedals;
+mod pedals_clearance;
 pub mod shank_timoshenko;
 
 #[cfg(test)]
@@ -32,96 +35,45 @@ mod tests_damper;
 mod tests_escapement;
 #[cfg(test)]
 mod tests_hammer;
+#[cfg(test)]
+mod tests_m3_action;
 
-use agraffe_delay::AgraffeDelayLine;
+use action_bank_ops::KeyActionSlot;
 use damper_pad::DamperPadBank;
-use felt_stulov::{FeltSharedCoeffs, FeltState, KeyFeltSpec};
+use decimation_fir::DecimationFir;
+use felt_stulov::FeltSharedCoeffs;
 use keybed::KeybedBank;
-use oversample::{DecimationFir16, HammerOversampleState};
+use oversample::HammerContactSolver;
 use p_grid::PGridLuts;
 use pedals::PedalBank;
-use shank_timoshenko::{velocity_from_u16, ShankParams, SILENT_KEY_MAX_U16};
-
-#[derive(Clone, Debug)]
-struct KeyActionSlot {
-    shank_params: ShankParams,
-    felt_spec: KeyFeltSpec,
-    felt_state: FeltState,
-    hammer: HammerOversampleState,
-    agraffe: AgraffeDelayLine,
-}
-
-impl KeyActionSlot {
-    fn new(
-        key_idx: usize,
-        sample_rate: f64,
-        voicing: &VoicingSpec,
-        specs: &[StringPhysicalParams; NUM_KEYS],
-    ) -> Self {
-        let shank_params = ShankParams::for_key(key_idx, sample_rate);
-        let felt_spec = KeyFeltSpec::for_key(key_idx, sample_rate, voicing);
-        let agraffe = AgraffeDelayLine::new(key_idx, sample_rate, voicing, specs);
-
-        Self {
-            shank_params,
-            felt_spec,
-            felt_state: FeltState::default(),
-            hammer: HammerOversampleState::default(),
-            agraffe,
-        }
-    }
-}
 
 /// Complete Stage 1 physical piano action bank for all 88 keys and 230 strings.
 ///
-/// All LUTs and per-key buffers are allocated once inside [`ActionBank::new`].
-/// Every sample-rate and event method executes with zero heap allocations, zero
-/// locks, zero syscalls, and zero panics.
+/// All LUTs and per-key buffers are allocated once inside [`ActionBank::new`] /
+/// [`ActionBank::new_with_profile`]. Every sample-rate and event method executes
+/// with zero heap allocations, zero locks, zero syscalls, and zero panics.
 #[derive(Clone, Debug)]
 pub struct ActionBank {
-    sample_rate: f32,
-    memory_enabled: bool,
-    felt_coeffs: FeltSharedCoeffs,
-    p_grid: PGridLuts,
-    decimation_fir: DecimationFir16,
-    pedals: PedalBank,
-    damper_pad: DamperPadBank,
-    keybed: KeybedBank,
-    keys: Box<[KeyActionSlot]>,
-    hammer_voicing: VoicingSpec,
-    key_hardness_applied: [f32; NUM_KEYS],
+    pub(crate) sample_rate: f32,
+    pub(crate) memory_enabled: bool,
+    pub(crate) perf: PerfProfile,
+    pub(crate) felt_coeffs: FeltSharedCoeffs,
+    pub(crate) p_grid: Option<PGridLuts>,
+    pub(crate) decimation_fir: DecimationFir,
+    pub(crate) pedals: PedalBank,
+    pub(crate) damper_pad: DamperPadBank,
+    pub(crate) keybed: KeybedBank,
+    pub(crate) keys: Box<[KeyActionSlot]>,
+    pub(crate) hammer_voicing: VoicingSpec,
+    pub(crate) key_hardness_applied: [f32; NUM_KEYS],
 }
 
 impl ActionBank {
-    /// Constructs and pre-tabulates the Stage 1 action bank for `sample_rate` and `voicing`.
+    /// Constructs and pre-tabulates the Stage 1 action bank for `sample_rate` and `voicing`
+    /// using [`PerfProfile::full()`].
     #[must_use]
     pub fn new(sample_rate: f32, voicing: &VoicingSpec) -> Self {
-        let sr = if sample_rate.is_finite() {
-            sample_rate.clamp(8_000.0, 384_000.0)
-        } else {
-            48_000.0
-        };
-        let sr_f64 = f64::from(sr);
-
-        let specs = build_scale_design(voicing);
-        let mut keys = Vec::with_capacity(NUM_KEYS);
-        for k in 0..NUM_KEYS {
-            keys.push(KeyActionSlot::new(k, sr_f64, voicing, &specs));
-        }
-
-        Self {
-            sample_rate: sr,
-            memory_enabled: true,
-            felt_coeffs: FeltSharedCoeffs::new(sr_f64),
-            p_grid: PGridLuts::new(),
-            decimation_fir: DecimationFir16::new(),
-            pedals: PedalBank::new(sr),
-            damper_pad: DamperPadBank::new(sr, voicing),
-            keybed: KeybedBank::new(sr),
-            keys: keys.into_boxed_slice(),
-            hammer_voicing: voicing.sanitized(),
-            key_hardness_applied: [voicing.effective_global_hammer_hardness(); NUM_KEYS],
-        }
+        Self::new_with_profile(sample_rate, voicing, &PerfProfile::full())
     }
 
     /// Configured host audio sample rate in Hz.
@@ -129,96 +81,6 @@ impl ActionBank {
     #[inline]
     pub const fn sample_rate(&self) -> f32 {
         self.sample_rate
-    }
-
-    /// Resets hammers, dampers, pedals, keybed, and Stulov compaction memory to initial rest.
-    pub fn reset(&mut self) {
-        self.pedals.reset();
-        self.damper_pad.reset();
-        self.keybed.reset();
-        for slot in self.keys.iter_mut() {
-            slot.hammer.reset();
-            slot.felt_state.reset();
-            slot.agraffe.reset();
-        }
-    }
-
-    /// Triggers key strike (`velocity_u16 > 0`), or release (`velocity_u16 == 0`).
-    ///
-    /// Lifts the key's damper to `+5.0 mm` and launches the hammer behind `-20 um` let-off.
-    /// Slow Stulov wool compaction memory `z_mem` persists across strikes.
-    #[inline]
-    pub fn note_on(&mut self, key_idx: usize, velocity_u16: u16) {
-        if key_idx >= NUM_KEYS {
-            return;
-        }
-        if velocity_u16 == 0 {
-            self.note_off(key_idx, 0);
-            return;
-        }
-        if velocity_u16 > SILENT_KEY_MAX_U16 {
-            self.pedals.note_on(key_idx);
-        } else {
-            self.pedals.note_on_silent(key_idx);
-        }
-        self.damper_pad.lift_key_open(key_idx);
-        self.keybed.note_on(key_idx, velocity_u16);
-        let slot = &mut self.keys[key_idx];
-        let target_h = self.hammer_voicing.hammer_hardness;
-        if (self.key_hardness_applied[key_idx] - target_h).abs() > 1.0e-6 {
-            slot.felt_spec.update_voicing_in_place(
-                key_idx,
-                f64::from(self.sample_rate),
-                &self.hammer_voicing,
-            );
-            self.key_hardness_applied[key_idx] = target_h;
-        }
-        if !self.memory_enabled {
-            slot.felt_state.reset();
-        }
-        slot.agraffe.reset();
-        slot.hammer.launch(velocity_from_u16(velocity_u16));
-    }
-
-    /// Releases `key_idx`, initiating damper drop and key-return Zone 8 shock scaled by `release_vel_u16`.
-    #[inline]
-    pub fn note_off(&mut self, key_idx: usize, release_vel_u16: u16) {
-        if key_idx >= NUM_KEYS {
-            return;
-        }
-        self.pedals.note_off(key_idx, release_vel_u16);
-        self.keybed.note_off(key_idx, release_vel_u16);
-    }
-
-    /// Updates continuous pedal position (`Sustain`, `UnaCorda`, `Sostenuto`).
-    #[inline]
-    pub fn set_pedal(&mut self, kind: PedalKind, value_u16: u16) {
-        self.pedals.set_pedal(kind, value_u16);
-    }
-
-    /// Decays Stulov felt memory across `host_frames` idle samples for inactive hammers.
-    #[inline]
-    pub fn decay_idle_memory(&mut self, host_frames: usize) {
-        if host_frames == 0 {
-            return;
-        }
-        for slot in self.keys.iter_mut() {
-            if !slot.hammer.is_active() {
-                slot.felt_state
-                    .decay_host_frames(&self.felt_coeffs, host_frames);
-            }
-        }
-    }
-
-    /// Enables or disables slow Stulov compaction memory across repeated strikes.
-    #[inline]
-    pub fn set_memory_enabled(&mut self, enabled: bool) {
-        self.memory_enabled = enabled;
-        if !enabled {
-            for slot in self.keys.iter_mut() {
-                slot.felt_state.z_mem = 0.0;
-            }
-        }
     }
 
     /// Returns `true` if `key_idx`'s hammer or polyphase FIR tail is active.
@@ -235,6 +97,15 @@ impl ActionBank {
     #[inline]
     pub fn damper_clearance_m(&self, key_idx: usize) -> f32 {
         self.pedals.damper_clearance_m(key_idx)
+    }
+
+    /// Returns `Some(clearance_m)` when `key_idx`'s damper is settled open
+    /// (`>= clear_threshold_m`) with no active smoothing or peel-off pulse.
+    #[must_use]
+    #[inline]
+    pub fn is_damper_settled_open(&self, key_idx: usize, clear_threshold_m: f32) -> Option<f32> {
+        self.pedals
+            .is_damper_settled_open(key_idx, clear_threshold_m)
     }
 
     /// Current continuous sustain pedal position (`0.0..=1.0`).
@@ -292,7 +163,7 @@ impl ActionBank {
         self.pedals.step_key_clearance(key_idx)
     }
 
-    /// Steps one host sample of the `8x` oversampled hammer-string strike interaction,
+    /// Steps one host sample of the oversampled hammer-string strike interaction,
     /// returning the decimated upward force (`N >= 0`) applied to the string choir.
     #[inline]
     pub fn step_hammer_sample(
@@ -310,18 +181,43 @@ impl ActionBank {
         let w_sum = (w[0] + w[1] + w[2]).max(1.0);
         let n_str = f32::from(CHOIR_LAYOUTS[key_idx].strings_per_key.max(1));
         let uc_choir_scale = n_str / w_sum;
-        let (p_lo, p_hi, p_t) = self.p_grid.lookup(slot.felt_spec.exponent_p);
-        let (adaa_lo, adaa_hi, borin_lo, borin_hi) = self.p_grid.luts_for(p_lo, p_hi);
-        slot.hammer.step_host_sample_with_agraffe(
+        let solver = if self.perf.polynomial_adaa {
+            HammerContactSolver::Poly {
+                poly: &slot.poly_adaa,
+            }
+        } else if let Some(ref p_grid) = self.p_grid {
+            let (p_lo, p_hi, p_t) = p_grid.lookup(slot.felt_spec.exponent_p);
+            let (adaa_lo, adaa_hi, borin_lo, borin_hi) = p_grid.luts_for(p_lo, p_hi);
+            if p_t <= 1.0e-5 {
+                HammerContactSolver::LutSingle {
+                    adaa: adaa_lo,
+                    borin: borin_lo,
+                }
+            } else if p_t >= 1.0 - 1.0e-5 {
+                HammerContactSolver::LutSingle {
+                    adaa: adaa_hi,
+                    borin: borin_hi,
+                }
+            } else {
+                HammerContactSolver::LutLerp {
+                    adaa_lo,
+                    adaa_hi,
+                    borin_lo,
+                    borin_hi,
+                    p_t,
+                }
+            }
+        } else {
+            HammerContactSolver::Poly {
+                poly: &slot.poly_adaa,
+            }
+        };
+        slot.hammer.step_host_sample_with_solver(
             &slot.shank_params,
             &slot.felt_spec,
             &self.felt_coeffs,
             &mut slot.felt_state,
-            adaa_lo,
-            adaa_hi,
-            borin_lo,
-            borin_hi,
-            p_t,
+            solver,
             &self.decimation_fir,
             self.memory_enabled,
             uc_mod,
@@ -333,7 +229,7 @@ impl ActionBank {
         )
     }
 
-    /// Overrides `key_idx`'s `8x` agraffe round-trip delay and wave admittance.
+    /// Overrides `key_idx`'s oversampled agraffe round-trip delay and wave admittance.
     #[inline]
     pub fn set_agraffe_delay_samples(
         &mut self,
@@ -451,38 +347,5 @@ impl ActionBank {
     #[inline]
     pub fn step_keybed_force_sample(&mut self) -> f32 {
         self.keybed.step_sample()
-    }
-
-    /// Updates only global hammer hardness cleanly (`< 1 us`), updating active hammers
-    /// immediately and lazily syncing resting hammers on next `note_on` without recomputing dampers.
-    pub fn update_hammer_hardness_in_place(&mut self, voicing: &VoicingSpec) {
-        let sr = f64::from(self.sample_rate);
-        let h = voicing.effective_global_hammer_hardness();
-        self.hammer_voicing.hammer_hardness = h;
-        for (key_idx, slot) in self.keys.iter_mut().enumerate() {
-            if slot.hammer.is_active() {
-                slot.felt_spec
-                    .update_voicing_in_place(key_idx, sr, &self.hammer_voicing);
-                self.key_hardness_applied[key_idx] = h;
-            }
-        }
-    }
-
-    /// Updates felt stiffness/scaling and damper pad impedance smoothly in-place
-    /// for `voicing` with zero heap allocations, zero locks, and zero panics.
-    pub fn update_voicing_in_place(&mut self, voicing: &VoicingSpec) {
-        let sr = f64::from(self.sample_rate);
-        self.hammer_voicing = voicing.sanitized();
-        let specs = build_scale_design(&self.hammer_voicing);
-        self.key_hardness_applied
-            .fill(self.hammer_voicing.hammer_hardness);
-        for (key_idx, slot) in self.keys.iter_mut().enumerate() {
-            slot.felt_spec
-                .update_voicing_in_place(key_idx, sr, &self.hammer_voicing);
-            slot.agraffe
-                .update_voicing(key_idx, sr, &self.hammer_voicing, &specs);
-        }
-        self.damper_pad
-            .update_voicing_in_place(&self.hammer_voicing);
     }
 }

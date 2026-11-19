@@ -4,6 +4,7 @@
 use piano_simd::{AdaaPowerLut, AdaaState};
 use piano_spec::{build_scale_design, VoicingSpec, CHOIR_LAYOUTS, DAMPED_KEYS, TOTAL_STRINGS};
 
+use crate::damper_pad_symp::{passive_damp_force, smooth_felt_engage};
 use crate::math::exp_f64;
 
 /// Total independent unilateral damper pad slots (`2 * s_idx` = V, `2 * s_idx + 1` = H).
@@ -13,66 +14,28 @@ const DAMPER_EXPONENT_P: f32 = 2.2;
 const DAMPER_LUT_SIZE: usize = 512;
 const DAMPER_LUT_X_MAX: f32 = 2.0;
 const RESTING_PRELOAD_M: f32 = -3.0e-4;
-const ENGAGE_ONSET_M: f32 = 3.0e-6;
+pub(crate) const ENGAGE_ONSET_M: f32 = 3.0e-6;
+#[cfg(test)]
 const ENGAGE_HALF_M: f32 = 8.0e-5;
-const INV_ENGAGE_HALF_M: f32 = 1.0 / ENGAGE_HALF_M;
-const MIN_CLOSED_LINEAR_CLEAR_M: f32 = -2.0e-7;
+pub(crate) const INV_ENGAGE_HALF_M: f32 = 1.0 / 8.0e-5;
+pub(crate) const MIN_CLOSED_LINEAR_CLEAR_M: f32 = -2.0e-7;
 const TAU_DAMP_FELT_S: f64 = 1.2e-3;
-const EPS_DAMP_HYST: f32 = 0.25;
+pub(crate) const EPS_DAMP_HYST: f32 = 0.25;
 const DAMPER_C_PER_MASS: f64 = 380.0;
-const HYST_DAMP_GAIN: f32 = 1.2;
-const MAX_PASSIVE_PORT_RATIO: f32 = 2.4;
-
-/// Smooth `C^2`-continuous Hunt-Crossley wool-fiber engagement curve (`g = g' = g'' = 0` at `3 um`),
-/// preventing `1x` host-rate corner buzzing during half-pedal grazing contact.
-#[inline(always)]
-fn smooth_felt_engage(s_sum: f32) -> f32 {
-    let s_eff = s_sum - ENGAGE_ONSET_M;
-    if s_eff <= 0.0 {
-        return 0.0;
-    }
-    let u = s_eff * INV_ENGAGE_HALF_M;
-    if u >= 1.0e4 {
-        return 1.0;
-    }
-    let u3 = u * u * u;
-    u3 / (1.0 + u3)
-}
-
-#[inline(always)]
-fn pow_usize(mut base: f32, mut exp: usize) -> f32 {
-    let mut acc = 1.0_f32;
-    while exp > 0 {
-        if (exp & 1) != 0 {
-            acc *= base;
-        }
-        base *= base;
-        exp >>= 1;
-    }
-    acc
-}
-
-#[inline(always)]
-fn passive_damp_force(c_raw: f32, safe_r: f32, v_mps: f32) -> f32 {
-    let c_eff = if c_raw * safe_r > MAX_PASSIVE_PORT_RATIO && safe_r > 0.0 {
-        MAX_PASSIVE_PORT_RATIO / safe_r
-    } else {
-        c_raw
-    };
-    (-c_eff * v_mps) / (1.0 + 0.5 * safe_r * c_eff)
-}
+pub(crate) const HYST_DAMP_GAIN: f32 = 1.2;
+pub(crate) const MAX_PASSIVE_PORT_RATIO: f32 = 2.4;
 
 #[derive(Copy, Clone, Debug, Default)]
-struct DamperStringSlot {
-    adaa_pos: AdaaState,
-    adaa_neg: AdaaState,
-    z_pos: f32,
-    z_neg: f32,
+pub(crate) struct DamperStringSlot {
+    pub(crate) adaa_pos: AdaaState,
+    pub(crate) adaa_neg: AdaaState,
+    pub(crate) z_pos: f32,
+    pub(crate) z_neg: f32,
 }
 
 impl DamperStringSlot {
     #[inline]
-    fn reset_to_preload(&mut self, u_eq: f32, phi_eq: f32) {
+    pub(crate) fn reset_to_preload(&mut self, u_eq: f32, phi_eq: f32) {
         self.adaa_pos.sync_x(u_eq);
         self.adaa_neg.sync_x(u_eq);
         self.z_pos = phi_eq;
@@ -83,11 +46,11 @@ impl DamperStringSlot {
 /// Unilateral geometric-clearance damper contact bank covering all `460` orthogonal V/H slots.
 #[derive(Clone, Debug)]
 pub struct DamperPadBank {
-    lut: AdaaPowerLut,
-    a_damp_felt: f32,
-    c_nom_key: [f32; DAMPED_KEYS],
-    f_scale_key: [f32; DAMPED_KEYS],
-    slots: [DamperStringSlot; DAMPER_PAD_SLOTS],
+    pub(crate) lut: AdaaPowerLut,
+    pub(crate) a_damp_felt: f32,
+    pub(crate) c_nom_key: [f32; DAMPED_KEYS],
+    pub(crate) f_scale_key: [f32; DAMPED_KEYS],
+    pub(crate) slots: [DamperStringSlot; DAMPER_PAD_SLOTS],
 }
 
 fn fill_damper_key_coeffs(
@@ -327,170 +290,6 @@ impl DamperPadBank {
         let fv = self.step_damper_sample(key_idx, sv_idx, y_dv_m, v_dv_mps, r_dv, y_clear_m);
         let fh = self.step_damper_sample(key_idx, sv_idx + 1, y_dh_m, v_dh_mps, r_dh, y_clear_m);
         (fv, fh)
-    }
-
-    /// Relaxes damper felt hysteresis states `(z_pos, z_neg)` across `sub` contact-free samples
-    /// when positive damper clearance (`y_clear > 0`) exceeds string excursion.
-    #[inline]
-    pub fn relax_open_gap_chunk(&mut self, str_idx: usize, sub: usize) {
-        let sv_idx = str_idx * 2;
-        if sv_idx + 2 > self.slots.len() {
-            return;
-        }
-        let [sv, sh] = &mut self.slots[sv_idx..sv_idx + 2] else {
-            return;
-        };
-        sv.adaa_pos.sync_x(0.0);
-        sv.adaa_neg.sync_x(0.0);
-        sh.adaa_pos.sync_x(0.0);
-        sh.adaa_neg.sync_x(0.0);
-        if sv.z_pos != 0.0 || sv.z_neg != 0.0 || sh.z_pos != 0.0 || sh.z_neg != 0.0 {
-            let a_pow = pow_usize(self.a_damp_felt, sub);
-            let flush = |z: f32| if z.abs() < 1.0e-20 { 0.0 } else { z };
-            (sv.z_pos, sv.z_neg) = (flush(sv.z_pos * a_pow), flush(sv.z_neg * a_pow));
-            (sh.z_pos, sh.z_neg) = (flush(sh.z_pos * a_pow), flush(sh.z_neg * a_pow));
-        }
-    }
-
-    /// Returns pre-evaluated linear equilibrium V/H damper force-per-velocity gains `(gv, gh)`
-    /// for `(key_idx, str_idx)` when `y_clear_m <= -2e-7` and felt hysteresis state `z` has
-    /// converged to its exact fixed point `phi(y_clear_m)` (within `1e-5`).
-    #[inline]
-    pub fn symp_linear_gains_if_settled(
-        &mut self,
-        key_idx: usize,
-        str_idx: usize,
-        r_dv: f32,
-        r_dh: f32,
-        y_clear_m: f32,
-    ) -> Option<(f32, f32)> {
-        if key_idx >= DAMPED_KEYS
-            || str_idx >= TOTAL_STRINGS
-            || !y_clear_m.is_finite()
-            || y_clear_m > MIN_CLOSED_LINEAR_CLEAR_M
-            || !r_dv.is_finite()
-            || !r_dh.is_finite()
-        {
-            return None;
-        }
-        let u_eq = -y_clear_m * 1000.0_f32;
-        let phi_eq = self.lut.eval_f(u_eq);
-        let sv_idx = str_idx * 2;
-        let [sv, sh] = &mut self.slots[sv_idx..sv_idx + 2] else {
-            return None;
-        };
-        if (sv.z_pos - phi_eq).abs() > 1.0e-5
-            || (sv.z_neg - phi_eq).abs() > 1.0e-5
-            || (sh.z_pos - phi_eq).abs() > 1.0e-5
-            || (sh.z_neg - phi_eq).abs() > 1.0e-5
-        {
-            return None;
-        }
-        sv.adaa_pos.sync_x(u_eq);
-        sv.adaa_neg.sync_x(u_eq);
-        sh.adaa_pos.sync_x(u_eq);
-        sh.adaa_neg.sync_x(u_eq);
-        let (zv, zh) = (sv.z_pos, sh.z_pos);
-        Some(self.eval_symp_linear_gains(key_idx, r_dv, r_dh, y_clear_m, phi_eq, zv, zh))
-    }
-
-    /// Advances quiescent felt relaxation `z` over `sub` samples across `[yc0, yc_end]`
-    /// (`yc0.min(yc_end) <= -2e-7`) and returns Simpson-averaged passive V/H velocity gains.
-    #[allow(clippy::too_many_arguments)]
-    #[inline]
-    pub fn symp_linear_gains_for_chunk(
-        &mut self,
-        key_idx: usize,
-        str_idx: usize,
-        r_dv: f32,
-        r_dh: f32,
-        yc0: f32,
-        yc_end: f32,
-        sub: usize,
-    ) -> Option<(f32, f32)> {
-        if key_idx >= DAMPED_KEYS
-            || str_idx >= TOTAL_STRINGS
-            || !yc0.is_finite()
-            || !yc_end.is_finite()
-            || yc0.min(yc_end) > MIN_CLOSED_LINEAR_CLEAR_M
-            || !r_dv.is_finite()
-            || !r_dh.is_finite()
-        {
-            return None;
-        }
-        let yc_mid = 0.5 * (yc0 + yc_end);
-        let (c0, cm, c1) = (yc0.min(0.0), yc_mid.min(0.0), yc_end.min(0.0));
-        let (p0, pm, p1) = (
-            self.lut.eval_f(-c0 * 1000.0),
-            self.lut.eval_f(-cm * 1000.0),
-            self.lut.eval_f(-c1 * 1000.0),
-        );
-        let phi_avg = (p0 + 4.0 * pm + p1) * (1.0 / 6.0);
-        let a_pow = pow_usize(self.a_damp_felt, sub);
-        let one_m_ap = 1.0 - a_pow;
-        let [sv, sh] = &mut self.slots[str_idx * 2..str_idx * 2 + 2] else {
-            return None;
-        };
-        let (zv0, zh0) = (sv.z_pos, sh.z_pos);
-        let (zv1, zh1) = (
-            a_pow * zv0 + one_m_ap * phi_avg,
-            a_pow * zh0 + one_m_ap * phi_avg,
-        );
-        sv.reset_to_preload(-c1 * 1000.0, zv1);
-        sh.reset_to_preload(-c1 * 1000.0, zh1);
-        let (gv0, gh0) = self.eval_symp_linear_gains(key_idx, r_dv, r_dh, c0, p0, zv0, zh0);
-        let (gvm, ghm) = self.eval_symp_linear_gains(
-            key_idx,
-            r_dv,
-            r_dh,
-            cm,
-            pm,
-            0.5 * (zv0 + zv1),
-            0.5 * (zh0 + zh1),
-        );
-        let (gv1, gh1) = self.eval_symp_linear_gains(key_idx, r_dv, r_dh, c1, p1, zv1, zh1);
-        Some((
-            (gv0 + 4.0 * gvm + gv1) * (1.0 / 6.0),
-            (gh0 + 4.0 * ghm + gh1) * (1.0 / 6.0),
-        ))
-    }
-
-    #[inline(always)]
-    fn eval_preload_c_vh(
-        &self,
-        key_idx: usize,
-        y_clear_m: f32,
-        phi_eq: f32,
-        zv: f32,
-        zh: f32,
-    ) -> (f32, f32) {
-        let engage = smooth_felt_engage(-2.0 * y_clear_m);
-        let (c_nom, f_scale) = (self.c_nom_key[key_idx], self.f_scale_key[key_idx]);
-        let hv = 2.0 * (phi_eq - EPS_DAMP_HYST * zv).max(0.0);
-        let hh = 2.0 * (phi_eq - EPS_DAMP_HYST * zh).max(0.0);
-        (
-            engage * (c_nom * (1.0 + HYST_DAMP_GAIN * hv) + f_scale * hv),
-            engage * (c_nom * (1.0 + HYST_DAMP_GAIN * hh) + f_scale * hh),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[inline(always)]
-    fn eval_symp_linear_gains(
-        &self,
-        key_idx: usize,
-        r_dv: f32,
-        r_dh: f32,
-        y_clear_m: f32,
-        phi_eq: f32,
-        zv: f32,
-        zh: f32,
-    ) -> (f32, f32) {
-        let (cv, ch) = self.eval_preload_c_vh(key_idx, y_clear_m, phi_eq, zv, zh);
-        (
-            passive_damp_force(cv, r_dv.max(0.0), 1.0),
-            passive_damp_force(ch, r_dh.max(0.0), 1.0),
-        )
     }
 }
 

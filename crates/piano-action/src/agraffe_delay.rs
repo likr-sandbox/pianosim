@@ -12,13 +12,12 @@ use piano_spec::{
     A4_FREQ_MIN_HZ, CHOIR_LAYOUTS, NUM_KEYS,
 };
 
-use crate::math::exp_f64;
+use crate::math::{exp_f64, snap_oversample};
 
 const AGRAFFE_REFL_GAIN: f64 = 0.85;
 const AGRAFFE_LP_CUTOFF_HZ: f64 = 10_500.0;
 const AGRAFFE_LEAK_TAU_S: f64 = 20.0e-6;
 const DIRECT_FRAC_MAX: f32 = 0.25;
-const OVERSAMPLE_FACTOR: f64 = 8.0;
 const WORST_CASE_PITCH_DROP_OCT: f64 = -2.0 / 12.0;
 
 /// Relative strike-position ratio `beta(k)` along the speaking length from the agraffe.
@@ -35,6 +34,7 @@ pub struct AgraffeDelayLine {
     buf: Box<[f32]>,
     write_idx: usize,
     cap: usize,
+    oversample: u8,
     delay_substeps: f32,
     wave_admittance: f32,
     direct_frac: f32,
@@ -54,6 +54,20 @@ impl AgraffeDelayLine {
         voicing: &VoicingSpec,
         specs: &[StringPhysicalParams; NUM_KEYS],
     ) -> Self {
+        Self::new_oversampled(key_idx, sample_rate, voicing, specs, 8)
+    }
+
+    /// Pre-allocates the ring buffer for worst-case `tau_agg = beta / f0_min` at `oversample * sample_rate`
+    /// (`oversample` snapped to `2`, `4`, or `8`).
+    #[must_use]
+    pub fn new_oversampled(
+        key_idx: usize,
+        sample_rate: f64,
+        voicing: &VoicingSpec,
+        specs: &[StringPhysicalParams; NUM_KEYS],
+        oversample: u8,
+    ) -> Self {
+        let os = snap_oversample(oversample);
         let k = key_idx.min(NUM_KEYS - 1);
         let sr_safe = if sample_rate.is_finite() {
             sample_rate.clamp(8_000.0, 384_000.0)
@@ -63,7 +77,7 @@ impl AgraffeDelayLine {
         let f0_min = (equal_temperament_hz_with_a4(k, A4_FREQ_MIN_HZ)
             * exp_f64(WORST_CASE_PITCH_DROP_OCT * LN_2))
         .max(1.0);
-        let sr_sub = OVERSAMPLE_FACTOR * sr_safe;
+        let sr_sub = f64::from(os) * sr_safe;
         let max_delay_sub = (((hammer_beta_for_key(k) / f0_min) * sr_sub) as usize) + 1;
         let cap = (max_delay_sub + 4).max(8);
         let buf = alloc::vec![0.0_f32; cap].into_boxed_slice();
@@ -72,6 +86,7 @@ impl AgraffeDelayLine {
             buf,
             write_idx: 0,
             cap,
+            oversample: os,
             delay_substeps: 1.0,
             wave_admittance: 0.0,
             direct_frac: 0.0,
@@ -98,11 +113,11 @@ impl AgraffeDelayLine {
         } else {
             48_000.0
         };
+        let os_f64 = f64::from(self.oversample);
         let f0 = key_tuned_f0_hz(k, specs, voicing).max(1.0);
         let tau_agg = hammer_beta_for_key(k) / f0;
         let max_delay = (self.cap.saturating_sub(2)).max(1) as f32;
-        self.delay_substeps =
-            ((tau_agg * OVERSAMPLE_FACTOR * sr_safe) as f32).clamp(1.0, max_delay);
+        self.delay_substeps = ((tau_agg * os_f64 * sr_safe) as f32).clamp(1.0, max_delay);
 
         let n_str = f64::from(CHOIR_LAYOUTS[k].strings_per_key.max(1));
         let m_str = specs[k].linear_density_kg_m * specs[k].speaking_length_m;
@@ -110,9 +125,49 @@ impl AgraffeDelayLine {
         self.wave_admittance = (AGRAFFE_REFL_GAIN / (2.0 * z_choir)) as f32;
         self.direct_frac = (((k as f32) - 51.0) / 36.0).clamp(0.0, 1.0) * DIRECT_FRAC_MAX;
 
-        let dt_sub = 1.0 / (OVERSAMPLE_FACTOR * sr_safe);
+        let dt_sub = 1.0 / (os_f64 * sr_safe);
         self.lp_alpha = (1.0 - exp_f64(-TAU * AGRAFFE_LP_CUTOFF_HZ * dt_sub)) as f32;
         self.leak = exp_f64(-dt_sub / AGRAFFE_LEAK_TAU_S) as f32;
+    }
+
+    /// Reconfigures the oversample factor (`2 | 4 | 8`), growing buffer capacity if needed.
+    pub fn set_oversample(
+        &mut self,
+        oversample: u8,
+        key_idx: usize,
+        sample_rate: f64,
+        voicing: &VoicingSpec,
+        specs: &[StringPhysicalParams; NUM_KEYS],
+    ) {
+        let os = snap_oversample(oversample);
+        if os == self.oversample {
+            return;
+        }
+        let k = key_idx.min(NUM_KEYS - 1);
+        let sr_safe = if sample_rate.is_finite() {
+            sample_rate.clamp(8_000.0, 384_000.0)
+        } else {
+            48_000.0
+        };
+        let f0_min = (equal_temperament_hz_with_a4(k, A4_FREQ_MIN_HZ)
+            * exp_f64(WORST_CASE_PITCH_DROP_OCT * LN_2))
+        .max(1.0);
+        let sr_sub = f64::from(os) * sr_safe;
+        let needed_cap = ((((hammer_beta_for_key(k) / f0_min) * sr_sub) as usize) + 5).max(8);
+        if needed_cap > self.cap {
+            self.buf = alloc::vec![0.0_f32; needed_cap].into_boxed_slice();
+            self.cap = needed_cap;
+        }
+        self.oversample = os;
+        self.reset();
+        self.update_voicing(k, sr_safe, voicing, specs);
+    }
+
+    /// Configured oversampling factor (`2`, `4`, or `8`).
+    #[must_use]
+    #[inline]
+    pub const fn oversample(&self) -> u8 {
+        self.oversample
     }
 
     /// Overrides the fractional `8x` substep delay and wave admittance directly.

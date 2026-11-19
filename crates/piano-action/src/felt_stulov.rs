@@ -3,7 +3,7 @@
 
 use piano_spec::{VoicingSpec, NUM_KEYS};
 
-use crate::math::{exp_f64, pow_nonneg_f64, pow_usize_f32};
+use crate::math::{exp_f64, pow_nonneg_f64, pow_usize_f32, snap_oversample};
 use crate::shank_timoshenko::ShankParams;
 
 /// Fast intra-strike Stulov wool relaxation time constant (`50 us`).
@@ -30,8 +30,15 @@ impl FeltSharedCoeffs {
     /// Precomputes exact ZOH exponential decay factors at `sample_rate` and `8x`.
     #[must_use]
     pub fn new(sample_rate: f64) -> Self {
+        Self::new_oversampled(sample_rate, 8)
+    }
+
+    /// Precomputes exact ZOH exponential decay factors at `sample_rate` and `oversample` (`2 | 4 | 8`).
+    #[must_use]
+    pub fn new_oversampled(sample_rate: f64, oversample: u8) -> Self {
+        let os = snap_oversample(oversample);
         let dt_host = 1.0 / sample_rate;
-        let dt_sub = dt_host / 8.0;
+        let dt_sub = dt_host / f64::from(os);
         let a_fast_sub = exp_f64(-dt_sub / TAU_FAST_S);
         let a_fast_host = exp_f64(-dt_host / TAU_FAST_S);
         let a_mem_host = exp_f64(-dt_host / TAU_MEM_S);
@@ -65,7 +72,9 @@ fn compute_key_felt_spec(
     sample_rate: f64,
     voicing: &VoicingSpec,
     fixed_exponent_p: Option<f64>,
+    oversample: u8,
 ) -> KeyFeltSpec {
+    let os = snap_oversample(oversample);
     let k = key_idx.min(NUM_KEYS - 1);
     let x = (k as f64) / ((NUM_KEYS - 1) as f64);
     let h = f64::from(voicing.effective_hammer_hardness(k));
@@ -81,7 +90,7 @@ fn compute_key_felt_spec(
     let c_hertz = 3.21 + 0.34 * (exponent_p - 2.2);
     let delta_mf = tau_c * MF_REF_SPEED_MPS / c_hertz;
 
-    let shank = ShankParams::for_key(k, sample_rate);
+    let shank = ShankParams::for_key_oversampled(k, sample_rate, os);
     let m_h = f64::from(shank.hammer_mass_kg);
     let k0_nominal = (exponent_p + 1.0) * m_h * MF_REF_SPEED_MPS * MF_REF_SPEED_MPS
         / (2.0 * pow_nonneg_f64(delta_mf, exponent_p + 1.0));
@@ -97,7 +106,7 @@ fn compute_key_felt_spec(
     };
     let delta_scale_m = (3.4 * delta_mf_eff).max(1.2e-4);
     let f_scale_n = k0_si * pow_nonneg_f64(delta_scale_m, exponent_p);
-    let dt_sub = 1.0 / (8.0 * sample_rate);
+    let dt_sub = 1.0 / (f64::from(os) * sample_rate);
     let mem_sub_gain = (f64::from(MEM_ACCUM_GAIN) * dt_sub / TAU_COMPACT_S) as f32;
 
     KeyFeltSpec {
@@ -111,10 +120,21 @@ fn compute_key_felt_spec(
 }
 
 impl KeyFeltSpec {
-    /// Builds physical felt parameters for `key_idx` under `voicing`.
+    /// Builds physical felt parameters for `key_idx` under `voicing` (`8x` oversampled).
     #[must_use]
     pub fn for_key(key_idx: usize, sample_rate: f64, voicing: &VoicingSpec) -> Self {
-        compute_key_felt_spec(key_idx, sample_rate, voicing, None)
+        Self::for_key_oversampled(key_idx, sample_rate, voicing, 8)
+    }
+
+    /// Builds physical felt parameters for `key_idx` under `voicing` and `oversample` (`2 | 4 | 8`).
+    #[must_use]
+    pub fn for_key_oversampled(
+        key_idx: usize,
+        sample_rate: f64,
+        voicing: &VoicingSpec,
+        oversample: u8,
+    ) -> Self {
+        compute_key_felt_spec(key_idx, sample_rate, voicing, None, oversample)
     }
 
     /// Updates `exponent_p`, stiffness, and scaling parameters in-place for `voicing`
@@ -125,7 +145,19 @@ impl KeyFeltSpec {
         sample_rate: f64,
         voicing: &VoicingSpec,
     ) {
-        *self = compute_key_felt_spec(key_idx, sample_rate, voicing, None);
+        self.update_voicing_in_place_oversampled(key_idx, sample_rate, voicing, 8);
+    }
+
+    /// Updates `exponent_p`, stiffness, and scaling parameters in-place for `voicing`
+    /// and `oversample` (`2 | 4 | 8`) with zero heap allocations.
+    pub fn update_voicing_in_place_oversampled(
+        &mut self,
+        key_idx: usize,
+        sample_rate: f64,
+        voicing: &VoicingSpec,
+        oversample: u8,
+    ) {
+        *self = compute_key_felt_spec(key_idx, sample_rate, voicing, None, oversample);
     }
 }
 

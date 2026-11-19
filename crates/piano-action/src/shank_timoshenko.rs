@@ -5,7 +5,7 @@ use core::f64::consts::TAU;
 
 use piano_spec::{u16_to_unit_f32, NUM_KEYS};
 
-use crate::math::pow_nonneg_f64;
+use crate::math::{pow_nonneg_f64, snap_oversample};
 
 /// Gravitational deceleration (`m/s^2`) acting on the hammer during free flight.
 pub const GRAVITY_MPS2: f32 = 9.81;
@@ -47,16 +47,24 @@ pub struct ShankParams {
 }
 
 impl ShankParams {
-    /// Builds physical Timoshenko shank parameters for `key_idx` at `sample_rate`.
+    /// Builds physical Timoshenko shank parameters for `key_idx` at `sample_rate` (`8x` oversampled).
     #[must_use]
     pub fn for_key(key_idx: usize, sample_rate: f64) -> Self {
+        Self::for_key_oversampled(key_idx, sample_rate, 8)
+    }
+
+    /// Builds physical Timoshenko shank parameters for `key_idx` at `oversample * sample_rate`
+    /// (`oversample` snapped to `2`, `4`, or `8`).
+    #[must_use]
+    pub fn for_key_oversampled(key_idx: usize, sample_rate: f64, oversample: u8) -> Self {
+        let os = snap_oversample(oversample);
         let x = (key_idx.min(NUM_KEYS - 1) as f64) / ((NUM_KEYS - 1) as f64);
         let hammer_mass_kg = MASS_C8_KG + (MASS_A0_KG - MASS_C8_KG) * pow_nonneg_f64(1.0 - x, 1.35);
         let shank_freq_hz =
             SHANK_FREQ_A0_HZ + (SHANK_FREQ_C8_HZ - SHANK_FREQ_A0_HZ) * pow_nonneg_f64(x, 1.1);
         let modal_mass_kg = (1.4 + 1.0 * x) * hammer_mass_kg;
 
-        let dt = 1.0 / (8.0 * sample_rate);
+        let dt = 1.0 / (f64::from(os) * sample_rate);
         let h = 0.5 * dt;
         let omega1 = TAU * shank_freq_hz;
         let gamma1 = 2.0 * SHANK_ZETA * omega1;

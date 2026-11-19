@@ -168,6 +168,17 @@ pub(crate) fn exp_f64(y: f64) -> f64 {
 }
 
 #[inline]
+pub(crate) const fn snap_oversample(os: u8) -> u8 {
+    if os <= 3 {
+        2
+    } else if os <= 6 {
+        4
+    } else {
+        8
+    }
+}
+
+#[inline]
 pub(crate) fn pow_nonneg_f64(base: f64, exp: f64) -> f64 {
     if exp == 0.0 {
         1.0
