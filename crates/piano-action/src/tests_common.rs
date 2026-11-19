@@ -22,7 +22,9 @@ impl ActionBank {
     }
 
     pub(crate) fn lut_table_bytes(&self) -> usize {
-        self.p_grid.table_bytes()
+        self.p_grid
+            .as_ref()
+            .map_or(0, crate::p_grid::PGridLuts::table_bytes)
     }
 }
 
