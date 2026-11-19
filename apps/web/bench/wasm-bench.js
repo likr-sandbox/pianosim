@@ -26,10 +26,19 @@ const D1_TARGET_US = D1_BUDGET_US * 0.7; // 1866.7 us
 const BENCH_PORT = Number(process.env.PIANOSIM_PORT || 5189);
 const PROFILE_PRESETS = { full: 0, balanced: 1, realtime: 2 };
 
-function parseBenchProfile(argv) {
+function parseBenchArgs(argv) {
   let profile = 'balanced';
+  let prepIsolate = true;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    if (arg === '--prep-isolate') {
+      prepIsolate = true;
+      continue;
+    }
+    if (arg === '--no-prep-isolate') {
+      prepIsolate = false;
+      continue;
+    }
     let val = null;
     if (arg === '--profile' || arg === '--perf-profile') {
       val = argv[++i];
@@ -45,7 +54,7 @@ function parseBenchProfile(argv) {
     }
     profile = val;
   }
-  return { name: profile, presetId: PROFILE_PRESETS[profile] };
+  return { name: profile, presetId: PROFILE_PRESETS[profile], prepIsolate };
 }
 
 function computePercentiles(samples) {
@@ -63,7 +72,7 @@ function fmtUs(v) {
 }
 
 async function main() {
-  const benchProfile = parseBenchProfile(process.argv.slice(2));
+  const benchProfile = parseBenchArgs(process.argv.slice(2));
   console.log('='.repeat(118));
   console.log('WebAssembly & Browser Real-Time Performance Benchmarks (F11)');
   console.log(
@@ -127,6 +136,30 @@ async function main() {
       );
     }
 
+    if (wasmRes.prepIsolation) {
+      const pi = wasmRes.prepIsolation;
+      console.log('-'.repeat(118));
+      console.log(
+        `Phase 1b: Direct Wasm Prep Commit Breakdown (SpaceBlob=${pi.spaceBlobF32} f32, VoicingBlob=${pi.voicingBlobF32} f32)`,
+      );
+      const p1PrepRows = [
+        ['Direct: Half-pedal render_block', pi.steadyRender],
+        ['Direct: Space chunk0 (incl. reset)', pi.chunk0],
+        ['Direct: Space chunk mid', pi.chunkMid],
+        ['Direct: Space last + commit', pi.commit],
+        ['Direct: Space xfade render_block', pi.xfadeRender],
+        ['Direct: Voicing staging memcpy', pi.voicingMemcpy],
+        ['Direct: Voicing apply_voicing_blob', pi.voicingApply],
+        ['Direct: Voicing post-commit render', pi.voicingCommitRender],
+      ];
+      for (const [label, arr] of p1PrepRows) {
+        const s = computePercentiles(arr);
+        console.log(
+          `${label.padEnd(36)} | ${fmtUs(s.p50)} | ${fmtUs(s.p95)} | ${fmtUs(s.p99)} | ${fmtUs(s.max)} | mean ${fmtUs(s.mean)} | INFO`,
+        );
+      }
+    }
+
     console.log('='.repeat(118));
     console.log('Phase 2: Live Chromium AudioWorklet RT Auditioning & Offline MIDI Worker (F12)');
     console.log('-'.repeat(118));
@@ -136,7 +169,9 @@ async function main() {
     console.log('-'.repeat(118));
 
     const livePage = await browser.newPage();
-    const liveRes = await runLiveWorkletBench(livePage, origin, benchProfile);
+    const liveRes = await runLiveWorkletBench(livePage, origin, benchProfile, {
+      prepIsolate: benchProfile.prepIsolate,
+    });
     await livePage.close();
 
     const p2Phases = [
@@ -163,6 +198,25 @@ async function main() {
       console.log(
         `${ph.name.padEnd(32)} | ${fmtUs(r.p50Us)} | ${fmtUs(r.p95Us)} | ${fmtUs(r.p99Us)} | ${fmtUs(r.maxUs)} | ${String(r.strideOverruns).padStart(4)} | ${String(r.singleBlockOverruns).padStart(4)} | ${String(r.stallCount).padStart(4)} | ${r.rms.toFixed(4).padStart(7)} | ${r.timingSource.padStart(4)} | ${status}`,
       );
+    }
+
+    if (liveRes.prepIsolation) {
+      console.log('-'.repeat(118));
+      const isoRows = [
+        { name: 'Half-pedal + SpaceBlob-only', r: liveRes.prepIsolation.spaceOnly },
+        { name: 'Half-pedal + VoicingBlob-only', r: liveRes.prepIsolation.voicingOnly },
+        { name: 'Half-pedal + Combined Prep', r: liveRes.prepIsolation.combined },
+      ];
+      for (const ph of isoRows) {
+        const r = ph.r;
+        const tag =
+          r.singleBlockOverruns > 0 || r.maxUs > D1_BUDGET_US
+            ? `SPIKE (Sngl=${r.singleBlockOverruns}, Max>${D1_BUDGET_US.toFixed(0)})`
+            : 'INFO (<=D1)';
+        console.log(
+          `${ph.name.padEnd(32)} | ${fmtUs(r.p50Us)} | ${fmtUs(r.p95Us)} | ${fmtUs(r.p99Us)} | ${fmtUs(r.maxUs)} | ${String(r.strideOverruns).padStart(4)} | ${String(r.singleBlockOverruns).padStart(4)} | ${String(r.stallCount).padStart(4)} | ${r.rms.toFixed(4).padStart(7)} | ${r.timingSource.padStart(4)} | ${tag}`,
+        );
+      }
     }
 
     console.log('-'.repeat(118));

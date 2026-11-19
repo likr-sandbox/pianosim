@@ -73,8 +73,41 @@ async function waitForSilence(page) {
   );
 }
 
+async function waitForPrepIdle(page, settleBlocks = 12) {
+  await page.waitForFunction(
+    () => {
+      const d = window.__PIANO_DIAG__;
+      return (
+        d &&
+        d.appliedSpaceSeq >= d.requestedSpaceSeq &&
+        d.appliedVoicingSeq >= d.requestedVoicingSeq &&
+        d.appliedPerfSeq >= d.requestedPerfSeq
+      );
+    },
+    { timeout: 15_000 },
+  );
+  if (settleBlocks > 0) {
+    await waitAudioBlocks(page, settleBlocks);
+  }
+}
+
+async function selectOption(page, testId, value) {
+  await page.evaluate(
+    ({ testId, value }) => {
+      const el = document.querySelector(`[data-testid="${testId}"]`);
+      if (el) {
+        el.value = String(value);
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    },
+    { testId, value },
+  );
+}
+
 async function collectStrides(page, minStrides, actionFn = null) {
-  const startState = await page.evaluate(() => {
+  const hasAction = Boolean(actionFn);
+  const startState = await page.evaluate((waitAction) => {
+    window.__PIANO_BENCH_DONE__ = !waitAction;
     const d = window.__PIANO_DIAG__;
     return {
       blocks: d.telemetryBlocksReceived,
@@ -82,7 +115,7 @@ async function collectStrides(page, minStrides, actionFn = null) {
       singleOverruns: d.telemetry.singleBlockOverruns,
       stalls: d.telemetry.stallCount,
     };
-  });
+  }, hasAction);
 
   const collectorPromise = page.evaluate(
     ({ startBlocks, minStrides }) =>
@@ -123,7 +156,7 @@ async function collectStrides(page, minStrides, actionFn = null) {
               if (rms > peakRms) peakRms = rms;
             }
           }
-          if (strides.length >= minStrides) {
+          if (strides.length >= minStrides && window.__PIANO_BENCH_DONE__) {
             resolve({
               strides,
               maxPerBlock,
@@ -147,7 +180,13 @@ async function collectStrides(page, minStrides, actionFn = null) {
   );
 
   if (actionFn) {
-    await actionFn();
+    try {
+      await actionFn();
+    } finally {
+      await page.evaluate(() => {
+        window.__PIANO_BENCH_DONE__ = true;
+      });
+    }
   }
   const collected = await collectorPromise;
   const strideStats = summarizeSamples(collected.strides);
@@ -170,7 +209,87 @@ async function collectStrides(page, minStrides, actionFn = null) {
   };
 }
 
-export async function runLiveWorkletBench(page, origin, benchProfile) {
+async function measureHalfPedalPrepPhase(page, actionFn) {
+  await setSlider(page, 'sustain-slider', 0.5);
+  for (const m of [48, 55, 60, 64, 67, 72, 76, 79]) {
+    await strikeKey(page, m, true);
+  }
+  await waitAudioBlocks(page, 16);
+  const res = await collectStrides(page, 36, actionFn);
+  await setSlider(page, 'sustain-slider', 0.0);
+  await page.getByTestId('panic-btn').click();
+  await waitForSilence(page);
+  return res;
+}
+
+export async function runPrepIsolationWorkletBench(page) {
+  const spaceOnly = await measureHalfPedalPrepPhase(page, async () => {
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await page.getByTestId('lid-closed').click();
+      await page.getByTestId('perspective-hall').click();
+      await page.getByTestId('body-upright-studio').click();
+      await waitForPrepIdle(page);
+
+      await page.getByTestId('lid-half').click();
+      await page.getByTestId('perspective-binaural').click();
+      await page.getByTestId('body-vintage-saloon').click();
+      await waitForPrepIdle(page);
+
+      await page.getByTestId('lid-open').click();
+      await page.getByTestId('perspective-player').click();
+      await page.getByTestId('body-concert-grand').click();
+      await waitForPrepIdle(page);
+    }
+  });
+
+  const voicingOnly = await measureHalfPedalPrepPhase(page, async () => {
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await page.getByTestId('voicing-a4-chip-415').click();
+      await selectOption(page, 'voicing-temperament', '1');
+      await setSlider(page, 'voicing-unison', 2.2);
+      await setSlider(page, 'voicing-stretch', 1.4);
+      await waitForPrepIdle(page);
+
+      await page.getByTestId('voicing-a4-chip-442').click();
+      await selectOption(page, 'voicing-temperament', '2');
+      await setSlider(page, 'voicing-unison', 1.6);
+      await setSlider(page, 'voicing-stretch', 1.2);
+      await waitForPrepIdle(page);
+
+      await page.getByTestId('voicing-a4-chip-440').click();
+      await selectOption(page, 'voicing-temperament', '0');
+      await setSlider(page, 'voicing-unison', 1.0);
+      await setSlider(page, 'voicing-stretch', 1.0);
+      await waitForPrepIdle(page);
+    }
+  });
+
+  const combined = await measureHalfPedalPrepPhase(page, async () => {
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await setSlider(page, 'voicing-hammer', 0.85);
+      await page.getByTestId('voicing-a4-chip-415').click();
+      await selectOption(page, 'voicing-temperament', '1');
+      await setSlider(page, 'voicing-unison', 2.2);
+      await page.getByTestId('lid-closed').click();
+      await page.getByTestId('perspective-hall').click();
+      await page.getByTestId('body-upright-studio').click();
+      await waitForPrepIdle(page);
+
+      await setSlider(page, 'voicing-hammer', 0.3);
+      await page.getByTestId('voicing-a4-chip-440').click();
+      await selectOption(page, 'voicing-temperament', '0');
+      await setSlider(page, 'voicing-unison', 1.0);
+      await page.getByTestId('lid-open').click();
+      await page.getByTestId('perspective-player').click();
+      await page.getByTestId('body-concert-grand').click();
+      await waitForPrepIdle(page);
+    }
+  });
+
+  return { spaceOnly, voicingOnly, combined };
+}
+
+export async function runLiveWorkletBench(page, origin, benchProfile, options = {}) {
   const url = `${origin}?perf=${benchProfile.name}`;
   await page.goto(url);
   await page.getByTestId('unlock-audio').click();
@@ -218,6 +337,8 @@ export async function runLiveWorkletBench(page, origin, benchProfile) {
   await setSlider(page, 'sustain-slider', 0.0);
   await page.getByTestId('panic-btn').click();
   await waitForSilence(page);
+
+  const prepIsolation = options.prepIsolate !== false ? await runPrepIsolationWorkletBench(page) : null;
 
   // Phase 2b: Offline Worker render of 06-rachmaninoff-prelude-op3-no2.mid + AudioBufferSourceNode check
   await page.locator('#select-demo').selectOption('rachmaninoff-prelude');
@@ -293,5 +414,5 @@ export async function runLiveWorkletBench(page, origin, benchProfile) {
     ...offlineMetrics,
   };
 
-  return { sustain20, auditionGliss, offlineRach };
+  return { sustain20, auditionGliss, prepIsolation, offlineRach };
 }

@@ -252,6 +252,123 @@ export async function runDirectWasmBench(page, repoRoot, wasmPath, presetId) {
         };
       }
 
+      async function measurePrepCommits() {
+        const instance = await WebAssembly.instantiate(wasmModule, {});
+        const wasm = instance.exports;
+        const ctx = initContext(wasm);
+        wasm.piano_set_reverb(ctx, 1.6, 0.18);
+        wasm.piano_pedal(ctx, 0, Math.round((64 * 65535) / 127), 0);
+        for (const k of [48, 55, 60, 64, 67, 72, 76, 79]) wasm.piano_note_on(ctx, k, toU16(88), 0);
+        for (let i = 0; i < warmupCount; i++) wasm.piano_render(ctx, 128);
+
+        const prep = wasm.piano_prep_init(48000.0);
+        wasm.piano_prep_set_perf_preset(prep, presetId);
+        const copyPrepBlob = (len) => {
+          const ptr = wasm.piano_prep_out_ptr(prep) >>> 0;
+          const view = new Float32Array(wasm.memory.buffer, ptr, len);
+          return Float32Array.from(view);
+        };
+        const spDefs = [
+          { body: 1, persp: 2, lid: 0 },
+          { body: 0, persp: 0, lid: 2 },
+          { body: 2, persp: 3, lid: 1 },
+          { body: 0, persp: 1, lid: 2 },
+        ].map((d) => {
+          const len = wasm.piano_prep_space_for_body(prep, d.body, d.persp, d.lid) >>> 0;
+          return { ...d, blob: copyPrepBlob(len) };
+        });
+        const vcDefs = [
+          { h: 0.85, u: 2.2, st: 1.4, sc: 1.0, a4: 415.0, t: 1, c: 0.2 },
+          { h: 0.3, u: 1.0, st: 1.0, sc: 1.0, a4: 440.0, t: 0, c: 0.0 },
+          { h: 0.65, u: 1.6, st: 1.2, sc: 1.05, a4: 442.0, t: 2, c: 0.5 },
+          { h: 0.5, u: 1.0, st: 1.0, sc: 1.0, a4: 440.0, t: 0, c: 0.0 },
+        ].map((d) => {
+          const len = wasm.piano_prep_voicing_ex(prep, d.h, d.u, d.st, d.sc, d.a4, d.t, d.c) >>> 0;
+          return { ...d, blob: copyPrepBlob(len) };
+        });
+
+        const CHUNK = 8192;
+        const streamSpace = (sp, rec) => {
+          let off = 0;
+          while (off < sp.blob.length) {
+            const n = Math.min(CHUNK, sp.blob.length - off);
+            const t0 = performance.now();
+            const ptr = wasm.piano_staging_ptr(ctx, n) >>> 0;
+            new Float32Array(wasm.memory.buffer).set(sp.blob.subarray(off, off + n), ptr >>> 2);
+            wasm.piano_stage_body_space_chunk(ctx, sp.body, sp.persp, sp.lid, off, n, sp.blob.length);
+            const isLast = off + n >= sp.blob.length;
+            if (isLast) wasm.piano_commit_body_space(ctx, sp.body, sp.persp, sp.lid);
+            const us = (performance.now() - t0) * 1000.0;
+            if (rec) {
+              if (isLast) rec.commit.push(us);
+              else if (off === 0) rec.chunk0.push(us);
+              else rec.chunkMid.push(us);
+            }
+            off += n;
+            wasm.piano_render(ctx, 128);
+          }
+          for (let i = 0; i < 6; i++) {
+            const xf = wasm.piano_is_space_crossfading(ctx) !== 0;
+            const t0 = performance.now();
+            wasm.piano_render(ctx, 128);
+            const us = (performance.now() - t0) * 1000.0;
+            if (rec && xf) rec.xfadeRender.push(us);
+          }
+        };
+        const applyVoicing = (vc, rec) => {
+          const tMem0 = performance.now();
+          let off = 0;
+          while (off < vc.blob.length) {
+            const n = Math.min(CHUNK, vc.blob.length - off);
+            const ptr = wasm.piano_staging_offset_ptr(ctx, off, n) >>> 0;
+            new Float32Array(wasm.memory.buffer).set(vc.blob.subarray(off, off + n), ptr >>> 2);
+            off += n;
+          }
+          const memUs = (performance.now() - tMem0) * 1000.0;
+          const tApp0 = performance.now();
+          wasm.piano_apply_voicing_blob_ex(
+            ctx, vc.h, vc.u, vc.st, vc.sc, vc.a4, vc.t, vc.c, vc.blob.length,
+          );
+          const appUs = (performance.now() - tApp0) * 1000.0;
+          const tRen0 = performance.now();
+          wasm.piano_render(ctx, 128);
+          const renUs = (performance.now() - tRen0) * 1000.0;
+          if (rec) {
+            rec.memcpy.push(memUs);
+            rec.apply.push(appUs);
+            rec.commitRender.push(renUs);
+          }
+        };
+
+        for (let w = 0; w < 2; w++) {
+          streamSpace(spDefs[w % spDefs.length], null);
+          applyVoicing(vcDefs[w % vcDefs.length], null);
+        }
+
+        const steadyRender = [];
+        for (let i = 0; i < 64; i++) {
+          const t0 = performance.now();
+          wasm.piano_render(ctx, 128);
+          steadyRender.push((performance.now() - t0) * 1000.0);
+        }
+        const spRec = { chunk0: [], chunkMid: [], commit: [], xfadeRender: [] };
+        for (let i = 0; i < 8; i++) streamSpace(spDefs[i % spDefs.length], spRec);
+        const vcRec = { memcpy: [], apply: [], commitRender: [] };
+        for (let i = 0; i < 8; i++) applyVoicing(vcDefs[i % vcDefs.length], vcRec);
+
+        wasm.piano_prep_destroy(prep);
+        wasm.piano_destroy(ctx);
+        return {
+          spaceBlobF32: spDefs[0].blob.length,
+          voicingBlobF32: vcDefs[0].blob.length,
+          steadyRender,
+          ...spRec,
+          voicingMemcpy: vcRec.memcpy,
+          voicingApply: vcRec.apply,
+          voicingCommitRender: vcRec.commitRender,
+        };
+      }
+
       const idle = await executeScenario('idle');
       // Allow V8 TurboFan background SIMD tier-up to settle after initial instantiation.
       {
@@ -270,8 +387,9 @@ export async function runDirectWasmBench(page, repoRoot, wasmPath, presetId) {
       const sustain20 = await executeScenario('sustain20');
       const halfPedalArp = await executeScenario('half_pedal_arp');
       const smfRach = await executeScenario('smf_rachmaninoff');
+      const prepIsolation = await measurePrepCommits();
 
-      return { idle, chord, sustain20, halfPedalArp, smfRach };
+      return { idle, chord, sustain20, halfPedalArp, smfRach, prepIsolation };
     },
     {
       wasmBase64,

@@ -9,6 +9,7 @@ use crate::bench_composite::{
     measure_ir_synthesis, measure_radiator_block, measure_scenario, BenchScenario, IrBenchStats,
     Workload, WARMUP_BLOCKS,
 };
+use crate::bench_prep::run_prep_isolation_section;
 use crate::cli_profile::CliProfileArgs;
 
 const TIMED_BLOCKS: usize = 1_000;
@@ -244,6 +245,7 @@ pub fn run_bench(args: &[String]) -> Result<(), String> {
         r_stat,
     );
     println!("{EQ_SEP}");
+    run_prep_isolation_section(profile);
 
     if gate_failures.is_empty() {
         Ok(())

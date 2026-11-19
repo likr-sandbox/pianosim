@@ -1,6 +1,7 @@
 //! Native verification, WAV export, Wasm SIMD inspection, and static check CLI.
 
 mod bench_composite;
+mod bench_prep;
 mod bench_rt;
 mod check_lines;
 mod cli_profile;
