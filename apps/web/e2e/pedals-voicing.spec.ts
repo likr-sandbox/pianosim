@@ -95,8 +95,9 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     await note2.dispatchEvent('pointerup', { buttons: 0 });
     await waitAudioBlocks(page, 160); // Allow Note 2 to decay
 
-    // Step 5: Verify Note 2 decayed while Note 1 still rings
-    const sustainedState = await sampleDestinationAudio(page);
+    // Step 5: Verify Note 2 decayed while Note 1 still rings (band-limited to C4..G4 fundamentals
+    // so natural trichord beating on C4's 3rd partial at ~785 Hz cannot mask C4 > G4 dominance)
+    const sustainedState = await sampleDestinationAudio(page, { minFreq: 240, maxFreq: 420 });
     expect(sustainedState.nonFiniteCount).toBe(0);
     expect(sustainedState.rms).toBeGreaterThan(0.001);
     expect(sustainedState.rms).toBeGreaterThan(unlatchedReleased.rms * 5);
@@ -182,57 +183,64 @@ test.describe('E2E Pedals & Voicing Studio Controls', () => {
     page,
   }) => {
     const e5Key = page.locator('[data-midi="76"]'); // E5 (659 Hz): strong HF harmonics across lid LP/shelf
-    const waitBlocks = async (delta: number) => {
-      const b0 = await page.evaluate(() => window.__PIANO_DIAG__?.telemetry.blockCount ?? 0);
-      await expect
-        .poll(async () => {
-          const s = await sampleDestinationAudio(page);
-          expect(s.nonFiniteCount).toBe(0);
-          expect(s.peak).toBeLessThanOrEqual(1.0);
-          return page.evaluate(() => window.__PIANO_DIAG__?.telemetry.blockCount ?? 0);
-        }, { timeout: 6000 })
-        .toBeGreaterThanOrEqual(b0 + delta);
-    };
     const restrikeE5 = async () => {
       await e5Key.dispatchEvent('pointerup', { buttons: 0 });
       await e5Key.dispatchEvent('pointerdown', { buttons: 1 });
-      await waitBlocks(48); // ~128 ms rendered audio post-attack
+      await waitAudioBlocks(page, 48); // ~128 ms rendered audio post-attack
       return sampleDestinationAudio(page);
     };
 
+    // Baseline open-lid E5 onset-aligned f32 capture (eliminates AnalyserNode polling jitter)
+    const initialOpen = await captureStrikeAttack(page, 76, 200, false);
+    expect(initialOpen.nonFiniteCount).toBe(0);
+    expect(initialOpen.attackPeak).toBeLessThanOrEqual(1.0);
+    expect(initialOpen.attackRms).toBeGreaterThan(0.002);
+
+    // Closed lid: verify clickless crossfade under sounding note, then onset-aligned HF attenuation
     await setSlider(page, 'sustain-slider', 1.0);
     await e5Key.dispatchEvent('pointerdown', { buttons: 1 });
-    await waitBlocks(48);
-    const initialOpen = await sampleDestinationAudio(page);
-    expect(initialOpen.rms).toBeGreaterThan(0.002);
-
-    // Closed lid: wait for PrepWorker + BlobStreamer + 8ms crossfade
+    await waitAudioBlocks(page, 48);
     await page.getByTestId('lid-closed').click();
     await waitForPrepIdle(page, 32);
-    let closedLid = initialOpen;
-    await expect.poll(async () => {
-      closedLid = await restrikeE5();
-      return (
-        closedLid.rms > 0.002 &&
-        closedLid.spectralCentroidHz < initialOpen.spectralCentroidHz * 0.9 &&
-        closedLid.highFreqRatio < initialOpen.highFreqRatio * 0.25
-      );
-    }, { timeout: 6000, intervals: [100] }).toBe(true);
+    const crossfadeClosed = await sampleDestinationAudio(page);
+    expect(crossfadeClosed.nonFiniteCount).toBe(0);
+    expect(crossfadeClosed.peak).toBeLessThanOrEqual(1.0);
+    expect(crossfadeClosed.rms).toBeGreaterThan(0.001);
+    await e5Key.dispatchEvent('pointerup', { buttons: 0 });
+    await setSlider(page, 'sustain-slider', 0.0);
+
+    const closedLid = await captureStrikeAttack(page, 76, 200, false);
+    expect(closedLid.nonFiniteCount).toBe(0);
+    expect(closedLid.attackPeak).toBeLessThanOrEqual(1.0);
+    expect(closedLid.attackRms).toBeGreaterThan(0.002);
+    expect(closedLid.spectralCentroidHz).toBeLessThan(initialOpen.spectralCentroidHz * 0.9);
+    expect(closedLid.highFreqRatio).toBeLessThan(initialOpen.highFreqRatio * 0.25);
 
     // Open lid: verify clickless crossfade + restored HF energy & brightness
+    await setSlider(page, 'sustain-slider', 1.0);
+    await e5Key.dispatchEvent('pointerdown', { buttons: 1 });
+    await waitAudioBlocks(page, 48);
     await page.getByTestId('lid-open').click();
     await waitForPrepIdle(page, 32);
-    let openLid = closedLid;
-    await expect.poll(async () => {
-      openLid = await restrikeE5();
-      return (
-        openLid.rms > 0.002 &&
-        openLid.highFreqRatio > closedLid.highFreqRatio * 10 &&
-        openLid.spectralCentroidHz > closedLid.spectralCentroidHz * 1.15
-      );
-    }, { timeout: 6000, intervals: [100] }).toBe(true);
+    const crossfadeOpen = await sampleDestinationAudio(page);
+    expect(crossfadeOpen.nonFiniteCount).toBe(0);
+    expect(crossfadeOpen.peak).toBeLessThanOrEqual(1.0);
+    expect(crossfadeOpen.rms).toBeGreaterThan(0.001);
+    await e5Key.dispatchEvent('pointerup', { buttons: 0 });
+    await setSlider(page, 'sustain-slider', 0.0);
+
+    const openLid = await captureStrikeAttack(page, 76, 200, false);
+    expect(openLid.nonFiniteCount).toBe(0);
+    expect(openLid.attackPeak).toBeLessThanOrEqual(1.0);
+    expect(openLid.attackRms).toBeGreaterThan(0.002);
+    expect(openLid.highFreqRatio).toBeGreaterThan(closedLid.highFreqRatio * 10);
+    expect(openLid.spectralCentroidHz).toBeGreaterThan(closedLid.spectralCentroidHz * 1.15);
     expect(openLid.highFreqRatio).toBeGreaterThan(0);
 
+    // Perspectives: verify clickless crossfade + clean restrike across all 4 positions
+    await setSlider(page, 'sustain-slider', 1.0);
+    await e5Key.dispatchEvent('pointerdown', { buttons: 1 });
+    await waitAudioBlocks(page, 48);
     for (const p of ['perspective-close', 'perspective-hall', 'perspective-binaural', 'perspective-player']) {
       await page.getByTestId(p).click();
       await waitForPrepIdle(page, 16);

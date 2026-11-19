@@ -5,6 +5,7 @@ export interface StrikeAttackStats {
   readonly attackRms: number;
   readonly attackPeak: number;
   readonly spectralCentroidHz: number;
+  readonly highFreqRatio: number;
   readonly nonFiniteCount: number;
 }
 
@@ -366,6 +367,8 @@ export async function captureStrikeAttack(
   const binW = wav.sampleRate / n;
   let totLin = 0;
   let wFreq = 0;
+  let totEnergy = 0;
+  let highEnergy = 0;
   const maxBin = Math.min(n / 2 - 1, Math.ceil(12000 / binW));
   for (let k = Math.max(1, Math.floor(minFreqHz / binW)); k <= maxBin; k++) {
     let re = 0;
@@ -378,14 +381,21 @@ export async function captureStrikeAttack(
     }
     const lin = Math.hypot(re, im) / (n * 0.25);
     if (lin > 1e-5) {
-      wFreq += k * binW * lin;
+      const freq = k * binW;
+      wFreq += freq * lin;
       totLin += lin;
+      const e = lin * lin;
+      totEnergy += e;
+      if (freq >= 4000) {
+        highEnergy += e;
+      }
     }
   }
   return {
     attackRms: windowRms(wav.mono, t0, 4096),
     attackPeak,
     spectralCentroidHz: totLin > 0 ? wFreq / totLin : 0,
+    highFreqRatio: totEnergy > 1e-12 ? highEnergy / totEnergy : 0,
     nonFiniteCount: wav.nonFiniteCount,
   };
 }
