@@ -14,7 +14,7 @@ pub use radiator::cmd_diag_radiator;
 /// Returns CLI usage lines for all diagnostic subcommands.
 #[must_use]
 pub(crate) fn diag_usage() -> &'static str {
-    "  piano-cli diag-radiator [out_dir] [--body <concert-grand|upright-studio|vintage-saloon>] [--perspective <player|close|hall|binaural>] [--lid <closed|half|open>] [--reverb-mix <f32>]\n  piano-cli diag-bridge [out_dir] [--keys C2,C4]\n  piano-cli diag-hammer [out_csv] [--in-csv <path>] [--midi <u8>] [--vel <u8>] [--duration-ms <f64>]\n  piano-cli diag-buzz [wav_dir] [--demos-dir <dir>]"
+    "  piano-cli diag-radiator [out_dir] [--body <concert-grand|upright-studio|vintage-saloon>] [--perspective <player|close|hall|binaural>] [--lid <closed|half|open>] [--reverb-mix <f32>] [--perf-profile <full|balanced|realtime> ...]\n  piano-cli diag-bridge [out_dir] [--keys C2,C4]\n  piano-cli diag-hammer [out_csv] [--in-csv <path>] [--midi <u8>] [--vel <u8>] [--duration-ms <f64>]\n  piano-cli diag-buzz [wav_dir] [--demos-dir <dir>]"
 }
 
 pub(crate) fn parse_flag_value<'a>(

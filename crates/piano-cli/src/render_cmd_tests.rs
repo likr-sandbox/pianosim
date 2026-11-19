@@ -142,4 +142,23 @@ fn parse_render_demos_args_defaults_overrides_and_rejections() {
         WavFormat::Pcm24
     )
     .is_err());
+
+    let with_prof = parse_render_options(
+        &[
+            "out.wav",
+            "--midi",
+            "piece.mid",
+            "--perf-profile",
+            "realtime",
+            "--fir-head-taps",
+            "16",
+        ]
+        .map(String::from),
+        true,
+        WavFormat::Pcm16,
+    )
+    .expect("render-wav with perf profile");
+    assert_eq!(with_prof.profile.ir_duration_secs, 0.125);
+    assert_eq!(with_prof.profile.fir_head_taps, 16);
+    assert_eq!(with_prof.profile_label, "realtime+overrides");
 }

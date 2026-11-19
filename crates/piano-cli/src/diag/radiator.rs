@@ -3,11 +3,12 @@
 use std::fs;
 use std::path::PathBuf;
 
-use piano_engine::DEFAULT_REVERB_DECAY_S;
+use piano_engine::{PerfProfile, DEFAULT_REVERB_DECAY_S};
 use piano_radiator::{embedded_body_bytes, BodyArchetype, RadiatorBank};
 use piano_simd::RealFft;
 use piano_spec::{LidState, ListenerPerspective, PRESET_BRIDGE_ZONES, PRESET_RADIATOR_ZONES};
 
+use crate::cli_profile::CliProfileArgs;
 use crate::scenarios::spectral_utils::{mono_mix, ols_slope, slice_rms};
 use crate::wav_writer::write_stereo_f32_wav;
 
@@ -47,6 +48,8 @@ struct RadiatorDiagOptions {
     perspective: ListenerPerspective,
     lid: LidState,
     reverb_mix: f32,
+    profile: PerfProfile,
+    profile_label: String,
 }
 
 fn parse_body(raw: &str) -> Result<BodyArchetype, String> {
@@ -90,9 +93,13 @@ fn parse_options(args: &[String]) -> Result<RadiatorDiagOptions, String> {
     let mut perspective = ListenerPerspective::Player;
     let mut lid = LidState::Open;
     let mut reverb_mix = 0.0_f32;
+    let mut cli_profile = CliProfileArgs::default();
 
     let mut i = 0;
     while i < args.len() {
+        if cli_profile.try_consume_arg(args, &mut i)? {
+            continue;
+        }
         if let Some(v) = parse_flag_value(args, &mut i, "--body", usage)? {
             body = parse_body(v)?;
         } else if let Some(v) = parse_flag_value(args, &mut i, "--perspective", usage)? {
@@ -123,6 +130,8 @@ fn parse_options(args: &[String]) -> Result<RadiatorDiagOptions, String> {
         perspective,
         lid,
         reverb_mix,
+        profile: cli_profile.resolve(),
+        profile_label: cli_profile.label(),
     })
 }
 
@@ -200,9 +209,14 @@ pub fn analyze_zone_ir(zone: usize, mono: &[f32], sr: f64) -> ZoneSpectralReport
 pub fn cmd_diag_radiator(args: &[String]) -> Result<(), String> {
     let opts = parse_options(args)?;
     let bytes = embedded_body_bytes(opts.body);
-    let mut bank =
-        RadiatorBank::from_preset_bytes_with_space(bytes, SR, opts.perspective, opts.lid)
-            .map_err(|e| format!("failed to decode body preset: {e:?}"))?;
+    let mut bank = RadiatorBank::from_preset_bytes_with_profile(
+        bytes,
+        SR,
+        opts.perspective,
+        opts.lid,
+        &opts.profile,
+    )
+    .map_err(|e| format!("failed to decode body preset: {e:?}"))?;
     bank.set_reverb(DEFAULT_REVERB_DECAY_S, opts.reverb_mix);
 
     if let Some(ref dir) = opts.out_dir {
@@ -241,8 +255,8 @@ pub fn cmd_diag_radiator(args: &[String]) -> Result<(), String> {
     }
 
     println!(
-        "diag-radiator [{:?} / {:?} / {:?}, reverb_mix={:.2}, sr={SR_U32}, ir_len={ir_len}]",
-        opts.body, opts.perspective, opts.lid, opts.reverb_mix
+        "diag-radiator [{:?} / {:?} / {:?}, perf={}, reverb_mix={:.2}, sr={SR_U32}, ir_len={ir_len}]",
+        opts.body, opts.perspective, opts.lid, opts.profile_label, opts.reverb_mix
     );
     println!(
         "Zone |   h[0]  |    RMS   | Decay | Slope(dB/oct) | <90Hz(dB) | MidHump(dB) | 45-90 | 125-250 | 300-700 | 1k-2k | 4k-8k"

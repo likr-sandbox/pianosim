@@ -3,7 +3,7 @@
 //! 2. Binaural IACC (`ListenerPerspective::BinauralHrtf`: `< 350 Hz` coherent vs `> 1.2 kHz` decorrelated)
 //! 3. Fortissimo (`ff`) multi-tone / chord IMD & spurious aliasing floor
 
-use piano_engine::PianoEngine;
+use piano_engine::{PerfProfile, PianoEngine};
 use piano_radiator::BodyArchetype;
 use piano_simd::RealFft;
 use piano_spec::{
@@ -172,8 +172,8 @@ fn band_iacc(l: &[f32], r: &[f32], sr: f64, f_lo: f64, f_hi: f64) -> f64 {
     cross / (el * er).sqrt().max(1.0e-30)
 }
 
-/// Executes Wave 4 Stage 4 unified acoustic gates (`IV-3`).
-pub fn verify_challenge4() -> Result<Challenge4Report, String> {
+/// Executes Wave 4 Stage 4 unified acoustic gates (`IV-3`) under `profile`.
+pub fn verify_challenge4_with_profile(profile: PerfProfile) -> Result<Challenge4Report, String> {
     let mut details = Vec::new();
     let mut all_pass = true;
 
@@ -184,7 +184,7 @@ pub fn verify_challenge4() -> Result<Challenge4Report, String> {
     let total_frames = s_start + n_fft;
     let vel_mf = u7_to_u16(72);
 
-    let mut eng_88 = PianoEngine::new(SR);
+    let mut eng_88 = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
     for k in 0..NUM_KEYS {
         let midi = 21 + (k as u8);
         eng_88.reset();
@@ -233,7 +233,7 @@ pub fn verify_challenge4() -> Result<Challenge4Report, String> {
     }
 
     // --- Gate 4B: Binaural IACC (<350 Hz coherent vs >1.2 kHz decorrelated) ---
-    let mut eng_bin = PianoEngine::new(SR);
+    let mut eng_bin = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
     eng_bin.set_body_space(
         BodyArchetype::ConcertGrand,
         ListenerPerspective::BinauralHrtf,
@@ -262,7 +262,7 @@ pub fn verify_challenge4() -> Result<Challenge4Report, String> {
     let voicing = VoicingSpec::default();
     let specs = build_scale_design(&voicing);
     let dyad_keys = [84_u8, 91_u8]; // C6 (1046.5 Hz) + G6 (1568.0 Hz)
-    let mut eng_ff = PianoEngine::new(SR);
+    let mut eng_ff = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
     let dyad_evs = [
         note_on(dyad_keys[0], u16::MAX, 0),
         note_on(dyad_keys[1], u16::MAX, 0),
@@ -312,7 +312,7 @@ pub fn verify_challenge4() -> Result<Challenge4Report, String> {
     let alias_hf_db = 10.0 * (hf_alias_pow / sig_pow.max(1e-24)).max(1e-18).log10();
 
     // Also verify 4-note ff chord remains bounded <= 1.0 and finite.
-    let mut eng_ch = PianoEngine::new(SR);
+    let mut eng_ch = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
     let chord_evs = [
         note_on(60, u16::MAX, 0),
         note_on(64, u16::MAX, 8),
@@ -401,7 +401,8 @@ mod tests {
     #[cfg(not(debug_assertions))]
     #[test]
     fn verify_challenge4_wave4_gates_pass() {
-        let rep = verify_challenge4().unwrap_or_else(|e| panic!("{e}"));
+        let rep =
+            verify_challenge4_with_profile(PerfProfile::full()).unwrap_or_else(|e| panic!("{e}"));
         assert!(rep.pass);
     }
 }

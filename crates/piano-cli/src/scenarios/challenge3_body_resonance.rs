@@ -1,6 +1,6 @@
 //! Challenge 3: Low-Mid Sustained Body Resonance Density & Keybed Thump.
 
-use piano_engine::PianoEngine;
+use piano_engine::{PerfProfile, PianoEngine};
 use piano_spec::{
     build_scale_design, key_tuned_f0_hz, midi_to_key, partial_frequency_hz, u7_to_u16, EventKind,
     PedalKind, SampleEvent, VoicingSpec,
@@ -31,8 +31,14 @@ fn note_on(midi_key: u8, velocity_u16: u16) -> SampleEvent {
     }
 }
 
-fn render_note_hold(midi_key: u8, vel_u16: u16, sustain_u16: u16, secs: f64) -> Vec<f32> {
-    let mut engine = PianoEngine::new(SR);
+fn render_note_hold(
+    midi_key: u8,
+    vel_u16: u16,
+    sustain_u16: u16,
+    secs: f64,
+    profile: PerfProfile,
+) -> Vec<f32> {
+    let mut engine = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
     let total = (secs * SR64).round() as usize;
     let mut out_l = vec![0.0_f32; total];
     let mut out_r = vec![0.0_f32; total];
@@ -64,14 +70,14 @@ fn render_note_hold(midi_key: u8, vel_u16: u16, sustain_u16: u16, secs: f64) -> 
     mono_mix(&out_l, &out_r)
 }
 
-/// Executes Challenge 3 body resonance, two-stage decay, and keybed thump verification.
-pub fn verify_challenge3() -> Result<Challenge3Report, String> {
+/// Executes Challenge 3 body resonance, two-stage decay, and keybed thump verification under `profile`.
+pub fn verify_challenge3_with_profile(profile: PerfProfile) -> Result<Challenge3Report, String> {
     let mut details = Vec::new();
     let mut all_pass = true;
 
     // --- Gate 3A: Two-stage decay slope ratio >= 1.5x on C3 and A4 ---
-    let c3_mono = render_note_hold(48, 48_000, 0, 3.1);
-    let a4_mono = render_note_hold(69, 48_000, 0, 3.1);
+    let c3_mono = render_note_hold(48, 48_000, 0, 3.1, profile);
+    let a4_mono = render_note_hold(69, 48_000, 0, 3.1, profile);
 
     let c3_prompt = decay_slope_db_per_s(&c3_mono, SR64, 0.05, 0.45, 0.05);
     let c3_late = decay_slope_db_per_s(&c3_mono, SR64, 1.40, 3.00, 0.10);
@@ -93,8 +99,8 @@ pub fn verify_challenge3() -> Result<Challenge3Report, String> {
     }
 
     // --- Gate 3B: Sustain pedal background resonance gain (+6 to +14 dB) ---
-    let c4_dry = render_note_hold(60, 48_000, 0, 3.8);
-    let c4_sus = render_note_hold(60, 48_000, u16::MAX, 3.8);
+    let c4_dry = render_note_hold(60, 48_000, 0, 3.8, profile);
+    let c4_sus = render_note_hold(60, 48_000, u16::MAX, 3.8, profile);
 
     let n_fft = 16_384_usize;
     let hop = 8_192_usize;
@@ -171,7 +177,7 @@ pub fn verify_challenge3() -> Result<Challenge3Report, String> {
         u7_to_u16(100),
         u16::MAX,
     ] {
-        let mut eng = PianoEngine::new(SR);
+        let mut eng = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
         let mut out_l = vec![0.0_f32; 1536];
         let mut out_r = vec![0.0_f32; 1536];
         eng.render_block(&[note_on(60, vel)], &mut out_l, &mut out_r);
@@ -192,7 +198,7 @@ pub fn verify_challenge3() -> Result<Challenge3Report, String> {
 
     // Subdued check: vel=1 keybed thump vs A4 sustained mf tone
     let pp_peak = {
-        let mut eng = PianoEngine::new(SR);
+        let mut eng = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
         let mut out_l = vec![0.0_f32; 2048];
         let mut out_r = vec![0.0_f32; 2048];
         eng.render_block(&[note_on(69, u7_to_u16(1))], &mut out_l, &mut out_r);
@@ -200,7 +206,7 @@ pub fn verify_challenge3() -> Result<Challenge3Report, String> {
     };
 
     let a4_mf_peak = {
-        let a4_mf = render_note_hold(69, u7_to_u16(80), 0, 0.5);
+        let a4_mf = render_note_hold(69, u7_to_u16(80), 0, 0.5, profile);
         let s50 = (0.05 * SR64).round() as usize;
         let s300 = (0.30 * SR64).round() as usize;
         peak_abs(&a4_mf[s50..s300])

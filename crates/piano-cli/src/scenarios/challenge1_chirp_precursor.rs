@@ -1,10 +1,10 @@
 //! Challenge 1: Strike Chirp, Longitudinal Precursor & Zero-Delay Radiation Integration.
 
-use piano_engine::PianoEngine;
+use piano_engine::{PerfProfile, PianoEngine};
 use piano_radiator::{RadiatorBank, PRESET_RADIATOR_ZONES};
 use piano_spec::{
-    build_scale_design, key_tuned_f0_hz, midi_to_key, partial_frequency_hz, EventKind, SampleEvent,
-    VoicingSpec, NUM_KEYS,
+    build_scale_design, key_tuned_f0_hz, midi_to_key, partial_frequency_hz, EventKind, LidState,
+    ListenerPerspective, SampleEvent, VoicingSpec, NUM_KEYS,
 };
 
 use super::spectral_utils::{measure_f0_hz, mono_mix, slice_rms};
@@ -46,8 +46,8 @@ fn render_timeline(engine: &mut PianoEngine, total_frames: usize, evs: &[SampleE
     mono_mix(&out_l, &out_r)
 }
 
-/// Executes all Challenge 1 verification gates.
-pub fn verify_challenge1() -> Result<Challenge1Report, String> {
+/// Executes all Challenge 1 verification gates under the given [`PerfProfile`].
+pub fn verify_challenge1_with_profile(profile: PerfProfile) -> Result<Challenge1Report, String> {
     let mut details = Vec::new();
     let mut all_pass = true;
 
@@ -74,7 +74,7 @@ pub fn verify_challenge1() -> Result<Challenge1Report, String> {
     }
 
     let mono_a0 = {
-        let mut engine = PianoEngine::new(SR);
+        let mut engine = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
         engine.set_nonlinear_coupling(true, true);
         render_timeline(&mut engine, 2048, &[note_on(21, 60_000)])
     };
@@ -112,11 +112,11 @@ pub fn verify_challenge1() -> Result<Challenge1Report, String> {
         );
 
         let mono_ff = {
-            let mut eng = PianoEngine::new(SR);
+            let mut eng = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
             render_timeline(&mut eng, 49_152, &[note_on(test_key, u16::MAX)])
         };
         let mono_pp = {
-            let mut eng = PianoEngine::new(SR);
+            let mut eng = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
             render_timeline(&mut eng, 17_152, &[note_on(test_key, 6_000)])
         };
 
@@ -155,7 +155,8 @@ pub fn verify_challenge1() -> Result<Challenge1Report, String> {
     }
 
     // --- Gate 1C: Zero-delay body initial integration in Stage 4 direct FIR head ---
-    let bank = RadiatorBank::new_concert_grand(SR64);
+    let bank =
+        RadiatorBank::new_with_profile(SR64, ListenerPerspective::Player, LidState::Open, &profile);
     let latency = bank.algorithmic_latency_samples();
     if latency != 0 {
         all_pass = false;
@@ -167,7 +168,8 @@ pub fn verify_challenge1() -> Result<Challenge1Report, String> {
     }
 
     // Impulse verification: non-zero starting at sample 0 without prepending delay
-    let mut rad_test = RadiatorBank::new_concert_grand(SR64);
+    let mut rad_test =
+        RadiatorBank::new_with_profile(SR64, ListenerPerspective::Player, LidState::Open, &profile);
     let mut in_frames = vec![[0.0_f32; PRESET_RADIATOR_ZONES]; 64];
     in_frames[0][0] = 1.0; // impulse at sample 0
     let mut out_l = vec![0.0_f32; 64];

@@ -26,6 +26,29 @@ const TIMED_BLOCKS = 1_000;
 const D1_BUDGET_US = (128 / 48_000) * 1e6; // 2666.7 us
 const D1_TARGET_US = D1_BUDGET_US * 0.7; // 1866.7 us
 const BENCH_PORT = Number(process.env.PIANOSIM_PORT || 5189);
+const PROFILE_PRESETS = { full: 0, balanced: 1, realtime: 2 };
+
+function parseBenchProfile(argv) {
+  let profile = 'full';
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    let val = null;
+    if (arg === '--profile' || arg === '--perf-profile') {
+      val = argv[++i];
+    } else if (arg.startsWith('--profile=')) {
+      val = arg.slice('--profile='.length);
+    } else if (arg.startsWith('--perf-profile=')) {
+      val = arg.slice('--perf-profile='.length);
+    } else {
+      throw new Error(`Unknown bench argument: ${arg}`);
+    }
+    if (!val || !(val in PROFILE_PRESETS)) {
+      throw new Error(`Invalid profile '${val}' (expected full, balanced, or realtime)`);
+    }
+    profile = val;
+  }
+  return { name: profile, presetId: PROFILE_PRESETS[profile] };
+}
 
 function computePercentiles(samples) {
   if (samples.length === 0) {
@@ -48,12 +71,12 @@ function computePercentiles(samples) {
   };
 }
 
-async function runDirectWasmBench(page, wasmPath) {
+async function runDirectWasmBench(page, wasmPath, presetId) {
   const wasmBuffer = fs.readFileSync(wasmPath);
   const wasmBase64 = wasmBuffer.toString('base64');
 
   return page.evaluate(
-    async ({ wasmBase64, warmupCount, timedCount }) => {
+    async ({ wasmBase64, warmupCount, timedCount, presetId }) => {
       const bin = Uint8Array.from(atob(wasmBase64), (c) => c.charCodeAt(0));
       const wasmModule = await WebAssembly.compile(bin.buffer);
 
@@ -68,10 +91,17 @@ async function runDirectWasmBench(page, wasmPath) {
         return Math.floor((v7 * 65535) / 127);
       }
 
+      function initContext(wasm) {
+        if (typeof wasm.piano_init_with_profile === 'function') {
+          return wasm.piano_init_with_profile(48000.0, presetId);
+        }
+        return wasm.piano_init(48000.0);
+      }
+
       async function executeScenario(type) {
         const instance = await WebAssembly.instantiate(wasmModule, {});
         const wasm = instance.exports;
-        const ctx = wasm.piano_init(48000.0);
+        const ctx = initContext(wasm);
 
         if (type === 'chord12_arp') {
           wasm.piano_pedal(ctx, 0, 65535, 0);
@@ -151,7 +181,7 @@ async function runDirectWasmBench(page, wasmPath) {
       {
         const warmInst = await WebAssembly.instantiate(wasmModule, {});
         const ww = warmInst.exports;
-        const wctx = ww.piano_init(48000.0);
+        const wctx = initContext(ww);
         ww.piano_pedal(wctx, 0, Math.round((43 * 65535) / 127), 0);
         for (const key of SUSTAIN_20_KEYS) ww.piano_note_on(wctx, key, toU16Vel(104), 0);
         for (let i = 0; i < 48; i++) ww.piano_render(wctx, 128);
@@ -166,7 +196,7 @@ async function runDirectWasmBench(page, wasmPath) {
 
       return { idle, chord, sustain20, halfPedalArp };
     },
-    { wasmBase64, warmupCount: WARMUP_BLOCKS, timedCount: TIMED_BLOCKS },
+    { wasmBase64, warmupCount: WARMUP_BLOCKS, timedCount: TIMED_BLOCKS, presetId },
   );
 }
 
@@ -271,12 +301,13 @@ async function runLiveWorkletBench(page, origin) {
 }
 
 async function main() {
+  const benchProfile = parseBenchProfile(process.argv.slice(2));
   console.log(
     '====================================================================================================',
   );
   console.log('WebAssembly & Browser Real-Time Performance Benchmarks');
   console.log(
-    `Chromium Headless | Port: ${BENCH_PORT} | D1 Budget: ${D1_BUDGET_US.toFixed(1)} µs | Target: < ${D1_TARGET_US.toFixed(1)} µs`,
+    `Chromium Headless | Profile: ${benchProfile.name} | Port: ${BENCH_PORT} | D1 Budget: ${D1_BUDGET_US.toFixed(1)} µs | Target: < ${D1_TARGET_US.toFixed(1)} µs`,
   );
   console.log(
     '====================================================================================================',
@@ -323,7 +354,7 @@ async function main() {
     );
 
     const wasmPage = await browser.newPage();
-    const wasmRes = await runDirectWasmBench(wasmPage, wasmPath);
+    const wasmRes = await runDirectWasmBench(wasmPage, wasmPath, benchProfile.presetId);
     await wasmPage.close();
     const scenarios = [
       { name: 'Direct Wasm: Idle / Silence', res: wasmRes.idle },

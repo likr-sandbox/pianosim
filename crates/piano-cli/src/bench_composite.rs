@@ -9,12 +9,12 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use piano_engine::PianoEngine;
+use piano_engine::{PerfProfile, PianoEngine};
 use piano_radiator::{
-    ir_len_for_sample_rate, synthesize_irs, BodyPreset, IrSynthScratch, LidState,
-    ListenerPerspective, RadiatorBank, CONCERT_GRAND_PRESET_BYTES, PRESET_RADIATOR_ZONES,
+    ir_len_for_sample_rate_secs, synthesize_irs_with_duration, BodyPreset, IrSynthScratch,
+    LidState, ListenerPerspective, RadiatorBank, CONCERT_GRAND_PRESET_BYTES, PRESET_RADIATOR_ZONES,
 };
-use piano_spec::{u7_to_u16, EventKind, PedalKind, SampleEvent};
+use piano_spec::{u7_to_u16, EventKind, PedalKind, SampleEvent, VoicingSpec};
 
 use crate::bench_rt::{compute_percentiles, Percentiles};
 
@@ -160,8 +160,9 @@ impl BalasubramaniamComposite {
     }
 }
 
-pub fn measure_scenario(scenario: &BenchScenario) -> Percentiles {
-    let mut engine = PianoEngine::new(scenario.sample_rate);
+pub fn measure_scenario(scenario: &BenchScenario, profile: PerfProfile) -> Percentiles {
+    let mut engine =
+        PianoEngine::new_with_profile(scenario.sample_rate, VoicingSpec::default(), profile);
     let mut out_l = vec![0.0_f32; scenario.frames];
     let mut out_r = vec![0.0_f32; scenario.frames];
     let mut timings_us = vec![0.0_f64; TIMED_BLOCKS];
@@ -277,8 +278,13 @@ pub fn measure_scenario(scenario: &BenchScenario) -> Percentiles {
     compute_percentiles(&mut timings_us)
 }
 
-pub fn measure_radiator_block() -> Percentiles {
-    let mut bank = RadiatorBank::new_concert_grand(48_000.0);
+pub fn measure_radiator_block(profile: PerfProfile) -> Percentiles {
+    let mut bank = RadiatorBank::new_with_profile(
+        48_000.0,
+        ListenerPerspective::Player,
+        LidState::Open,
+        &profile,
+    );
     let block = [[0.01_f32; PRESET_RADIATOR_ZONES]; 128];
     let mut out_l = [0.0_f32; 128];
     let mut out_r = [0.0_f32; 128];
@@ -297,18 +303,25 @@ pub fn measure_radiator_block() -> Percentiles {
     compute_percentiles(&mut timings_us)
 }
 
-pub fn measure_ir_synthesis() -> (IrBenchStats, IrBenchStats, usize) {
+pub fn measure_ir_synthesis(profile: PerfProfile) -> (IrBenchStats, IrBenchStats, usize) {
     let preset = BodyPreset::decode(CONCERT_GRAND_PRESET_BYTES).expect("valid baked preset");
     let mode_count = preset.modes.len();
-    let mut bank = RadiatorBank::new_concert_grand(48_000.0);
-    let mut scratch = IrSynthScratch::new(ir_len_for_sample_rate(48_000.0));
+    let ir_dur = f64::from(profile.ir_duration_secs);
+    let mut bank = RadiatorBank::new_with_profile(
+        48_000.0,
+        ListenerPerspective::Player,
+        LidState::Open,
+        &profile,
+    );
+    let mut scratch = IrSynthScratch::new(ir_len_for_sample_rate_secs(48_000.0, ir_dur));
 
     for _ in 0..2 {
-        synthesize_irs(
+        synthesize_irs_with_duration(
             &preset,
             ListenerPerspective::BinauralHrtf,
             LidState::Half,
             48_000.0,
+            ir_dur,
             &mut scratch,
         );
         bank.reconfigure_space(ListenerPerspective::BinauralHrtf, LidState::Half);
@@ -317,11 +330,12 @@ pub fn measure_ir_synthesis() -> (IrBenchStats, IrBenchStats, usize) {
     let mut synth_timings = vec![0.0_f64; 10];
     for slot in &mut synth_timings {
         let t0 = Instant::now();
-        synthesize_irs(
+        synthesize_irs_with_duration(
             &preset,
             ListenerPerspective::BinauralHrtf,
             LidState::Half,
             48_000.0,
+            ir_dur,
             &mut scratch,
         );
         *slot = t0.elapsed().as_secs_f64() * 1_000.0;

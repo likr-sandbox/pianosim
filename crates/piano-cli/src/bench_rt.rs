@@ -2,12 +2,14 @@
 
 use std::hint::black_box;
 
-use piano_engine::PianoEngine;
+use piano_engine::{PerfProfile, PianoEngine};
+use piano_spec::VoicingSpec;
 
 use crate::bench_composite::{
     measure_ir_synthesis, measure_radiator_block, measure_scenario, BenchScenario, IrBenchStats,
     Workload, WARMUP_BLOCKS,
 };
+use crate::cli_profile::CliProfileArgs;
 
 const TIMED_BLOCKS: usize = 1_000;
 const D1_WARN_RATIO: f64 = 0.70;
@@ -97,8 +99,26 @@ fn print_ir_row(label: &str, b: f64, s: &IrBenchStats, stat: &str) {
     );
 }
 
-pub fn run_bench() -> Result<(), String> {
-    let mut warmup_engine = PianoEngine::new(48_000.0);
+fn parse_bench_profile(args: &[String]) -> Result<(PerfProfile, String), String> {
+    let mut cli_profile = CliProfileArgs::default();
+    let mut i = 0;
+    while i < args.len() {
+        if cli_profile.try_consume_arg(args, &mut i)? {
+            continue;
+        }
+        return Err(format!(
+            "unknown bench argument '{}'\nUsage: piano-cli bench {}",
+            args[i],
+            CliProfileArgs::usage()
+        ));
+    }
+    Ok((cli_profile.resolve(), cli_profile.label()))
+}
+
+pub fn run_bench(args: &[String]) -> Result<(), String> {
+    let (profile, profile_label) = parse_bench_profile(args)?;
+    let mut warmup_engine =
+        PianoEngine::new_with_profile(48_000.0, VoicingSpec::default(), profile);
     let mut w_l = [0.0_f32; 128];
     let mut w_r = [0.0_f32; 128];
     for _ in 0..WARMUP_BLOCKS {
@@ -109,7 +129,9 @@ pub fn run_bench() -> Result<(), String> {
 
     let mode_count = warmup_engine.total_modes();
     println!("{EQ_SEP}\nNative Real-Time DSP Benchmarks (D1 Budget & Component Performance)");
-    println!("Engine: 88 keys / {mode_count} modes (warmup={WARMUP_BLOCKS} blocks, timed={TIMED_BLOCKS} blocks)\n{EQ_SEP}");
+    println!(
+        "Engine: 88 keys / {mode_count} modes (profile={profile_label}, warmup={WARMUP_BLOCKS} blocks, timed={TIMED_BLOCKS} blocks)\n{EQ_SEP}"
+    );
     println!(
         "{:<44} | {:>9} | {:>8} | {:>8} | {:>8} | {:>8} | Status\n{SEP}",
         "Scenario / Component", "Budget", "p50", "p95", "p99", "Max"
@@ -120,11 +142,11 @@ pub fn run_bench() -> Result<(), String> {
     for s in &SCENARIOS {
         let nom_budget = f64::from(s.frames as u32) / f64::from(s.sample_rate) * 1e6;
         let eff_budget = s.gate_budget_us.unwrap_or(nom_budget);
-        let mut pct = measure_scenario(s);
+        let mut pct = measure_scenario(s, profile);
 
         if s.enforce_gate && pct.p99 > eff_budget {
             for _ in 0..4 {
-                let retry = measure_scenario(s);
+                let retry = measure_scenario(s, profile);
                 if retry.p99 < pct.p99 {
                     pct = retry;
                 }
@@ -155,10 +177,10 @@ pub fn run_bench() -> Result<(), String> {
 
     println!("{SEP}");
     let rad_b = 650.0_f64;
-    let mut rad_pct = measure_radiator_block();
+    let mut rad_pct = measure_radiator_block(profile);
     if rad_pct.p99 > rad_b {
         for _ in 0..2 {
-            let r = measure_radiator_block();
+            let r = measure_radiator_block(profile);
             if r.p99 < rad_pct.p99 {
                 rad_pct = r;
             }
@@ -188,7 +210,7 @@ pub fn run_bench() -> Result<(), String> {
         "{EQ_SEP}\n{:<44} | {:>9} | {:>8} | {:>8} | {:>8} | {:>8} | Status\n{SEP}",
         "Spatial IR Synthesis (Off-Thread)", "Budget", "Min", "p50", "Mean", "Max"
     );
-    let (s_stats, r_stats, ir_modes) = measure_ir_synthesis();
+    let (s_stats, r_stats, ir_modes) = measure_ir_synthesis(profile);
     let ir_b = 40.0_f64;
     let s_stat = if s_stats.p50_ms > ir_b {
         gate_failures.push(format!(

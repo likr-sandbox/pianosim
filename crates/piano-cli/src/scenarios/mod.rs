@@ -13,10 +13,12 @@ pub mod challenge4_wave4_gates;
 pub mod f0_estimator;
 pub mod spectral_utils;
 
-use challenge1_chirp_precursor::verify_challenge1;
-use challenge2_ribattuto::verify_challenge2;
-use challenge3_body_resonance::verify_challenge3;
-use challenge4_wave4_gates::verify_challenge4;
+use challenge1_chirp_precursor::verify_challenge1_with_profile;
+use challenge2_ribattuto::verify_challenge2_with_profile;
+use challenge3_body_resonance::verify_challenge3_with_profile;
+use challenge4_wave4_gates::verify_challenge4_with_profile;
+
+use crate::cli_profile::CliProfileArgs;
 
 const SEP: &str =
     "====================================================================================================";
@@ -25,13 +27,33 @@ const LINE: &str =
 
 /// Runs all acoustic challenges and Wave 4 Stage 4 gates and reports objective metrics.
 pub fn run_scenarios(args: &[String]) -> Result<(), String> {
-    let json_output = args.iter().any(|a| a == "--json");
-    let markdown_output = args.iter().any(|a| a == "--markdown");
+    let mut json_output = false;
+    let mut markdown_output = false;
+    let mut cli_profile = CliProfileArgs::default();
+    let mut i = 0;
+    while i < args.len() {
+        if cli_profile.try_consume_arg(args, &mut i)? {
+            continue;
+        }
+        match args[i].as_str() {
+            "--json" => json_output = true,
+            "--markdown" => markdown_output = true,
+            other => {
+                return Err(format!(
+                    "unknown scenarios argument '{other}'\nUsage: piano-cli scenarios [--json] [--markdown] {}",
+                    CliProfileArgs::usage()
+                ));
+            }
+        }
+        i += 1;
+    }
+    let profile = cli_profile.resolve();
+    let profile_label = cli_profile.label();
 
-    let c1 = verify_challenge1();
-    let c2 = verify_challenge2();
-    let c3 = verify_challenge3();
-    let c4 = verify_challenge4();
+    let c1 = verify_challenge1_with_profile(profile);
+    let c2 = verify_challenge2_with_profile(profile);
+    let c3 = verify_challenge3_with_profile(profile);
+    let c4 = verify_challenge4_with_profile(profile);
 
     let c1_ok = c1.as_ref().is_ok_and(|r| r.pass);
     let c2_ok = c2.as_ref().is_ok_and(|r| r.pass);
@@ -216,7 +238,7 @@ pub fn run_scenarios(args: &[String]) -> Result<(), String> {
             }
         );
     } else {
-        println!("{SEP}\nAcoustic Challenges & Wave 4 Stage 4 Verification Report\n{SEP}");
+        println!("{SEP}\nAcoustic Challenges & Wave 4 Stage 4 Verification Report [profile={profile_label}]\n{SEP}");
         println!(
             "{:<50} | {:>14} | {:>18} | Status\n{LINE}",
             "Verification Check", "Measured", "Threshold"

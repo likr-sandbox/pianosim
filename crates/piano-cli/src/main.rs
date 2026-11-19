@@ -3,8 +3,10 @@
 mod bench_composite;
 mod bench_rt;
 mod check_lines;
+mod cli_profile;
 mod diag;
 mod render_cmd;
+mod render_presets;
 mod scenarios;
 mod smf_parser;
 mod wasm_check;
@@ -21,7 +23,7 @@ use wasm_check::inspect_wasm_simd;
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        Some("bench") => bench_rt::run_bench(),
+        Some("bench") => bench_rt::run_bench(&args[1..]),
         Some("check-lines") => cmd_check_lines(&args[1..]),
         Some("check-wasm-simd") => cmd_check_wasm_simd(&args[1..]),
         Some("render-wav") => render_cmd::cmd_render_wav(&args[1..]),
@@ -42,7 +44,9 @@ fn main() {
 
 fn usage() -> String {
     format!(
-        "Usage:\n  piano-cli bench\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli scenarios [--json] [--markdown]\n{}\n{}",
+        "Usage:\n  piano-cli bench {}\n  piano-cli check-lines [root]\n  piano-cli check-wasm-simd <path.wasm>\n  piano-cli scenarios [--json] [--markdown] {}\n{}\n{}",
+        cli_profile::CliProfileArgs::usage(),
+        cli_profile::CliProfileArgs::usage(),
         render_cmd::render_usage(),
         diag::diag_usage()
     )

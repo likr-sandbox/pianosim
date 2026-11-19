@@ -4,170 +4,19 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use piano_engine::{BodyArchetype, PianoEngine, DEFAULT_REVERB_DECAY_S, DEFAULT_REVERB_MIX};
-use piano_spec::voicing::{A4_FREQ_DEFAULT, A4_FREQ_MAX, A4_FREQ_MIN};
-use piano_spec::{LidState, ListenerPerspective, SampleEvent, Temperament, VoicingSpec};
+use piano_engine::{PerfProfile, PianoEngine};
+use piano_spec::voicing::{A4_FREQ_MAX, A4_FREQ_MIN};
+use piano_spec::SampleEvent;
 
 use crate::check_lines::find_repo_root;
+use crate::cli_profile::CliProfileArgs;
+pub(crate) use crate::render_presets::SHOWCASE_DEMOS;
+use crate::render_presets::{PresetId, WavFormat};
 use crate::smf_parser::parse_smf_file;
 use crate::wav_writer::{
     analyze_stereo, write_stereo_f32_wav, write_stereo_pcm16_wav, write_stereo_pcm24_tpdf_wav,
     AudioMetrics,
 };
-
-pub(crate) struct ShowcaseDemo {
-    pub(crate) title: &'static str,
-    pub(crate) mid_filename: &'static str,
-    pub(crate) wav_filename: &'static str,
-}
-
-pub(crate) const SHOWCASE_DEMOS: [ShowcaseDemo; 6] = [
-    ShowcaseDemo {
-        title: "Bach: Prelude in C (BWV 846)",
-        mid_filename: "01-bach-prelude-bwv846.mid",
-        wav_filename: "01-bach-prelude-bwv846.wav",
-    },
-    ShowcaseDemo {
-        title: "Chopin: Nocturne in Eb (Op. 9 No. 2)",
-        mid_filename: "02-chopin-nocturne-op9-no2.mid",
-        wav_filename: "02-chopin-nocturne-op9-no2.wav",
-    },
-    ShowcaseDemo {
-        title: "Beethoven: Moonlight Sonata (Op. 27 No. 2)",
-        mid_filename: "03-beethoven-moonlight-op27-no2.mid",
-        wav_filename: "03-beethoven-moonlight-op27-no2.wav",
-    },
-    ShowcaseDemo {
-        title: "Debussy: Clair de Lune",
-        mid_filename: "04-debussy-clair-de-lune.mid",
-        wav_filename: "04-debussy-clair-de-lune.wav",
-    },
-    ShowcaseDemo {
-        title: "Satie: Gymnopédie No. 1",
-        mid_filename: "05-satie-gymnopedie-no1.mid",
-        wav_filename: "05-satie-gymnopedie-no1.wav",
-    },
-    ShowcaseDemo {
-        title: "Rachmaninoff: Prelude in C# Minor (Op. 3 No. 2)",
-        mid_filename: "06-rachmaninoff-prelude-op3-no2.mid",
-        wav_filename: "06-rachmaninoff-prelude-op3-no2.wav",
-    },
-];
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WavFormat {
-    Pcm16,
-    Pcm24,
-    F32,
-}
-
-impl WavFormat {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Pcm16 => "pcm16",
-            Self::Pcm24 => "pcm24",
-            Self::F32 => "f32",
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PresetId {
-    ConcertGrand,
-    IntimateUpright,
-    BrightPop,
-    VintageSaloon,
-}
-
-impl PresetId {
-    fn parse(raw: &str) -> Result<Self, String> {
-        match raw {
-            "concert-grand" => Ok(Self::ConcertGrand),
-            "intimate-upright" => Ok(Self::IntimateUpright),
-            "bright-pop" => Ok(Self::BrightPop),
-            "vintage-saloon" => Ok(Self::VintageSaloon),
-            _ => Err(format!(
-                "invalid --preset '{raw}' (expected concert-grand, intimate-upright, bright-pop, or vintage-saloon)"
-            )),
-        }
-    }
-
-    const fn slug(self) -> &'static str {
-        match self {
-            Self::ConcertGrand => "concert-grand",
-            Self::IntimateUpright => "intimate-upright",
-            Self::BrightPop => "bright-pop",
-            Self::VintageSaloon => "vintage-saloon",
-        }
-    }
-
-    fn configure_engine(self, sample_rate: u32, a4_override: Option<f32>) -> (PianoEngine, f32) {
-        let (hh, ud, st, sl, a4, cond, body, persp, lid, decay_s, mix) = match self {
-            Self::ConcertGrand => (
-                0.50,
-                1.00,
-                1.00,
-                1.00,
-                A4_FREQ_DEFAULT,
-                0.0,
-                BodyArchetype::ConcertGrand,
-                ListenerPerspective::Player,
-                LidState::Open,
-                DEFAULT_REVERB_DECAY_S,
-                DEFAULT_REVERB_MIX,
-            ),
-            Self::IntimateUpright => (
-                0.25,
-                0.60,
-                0.70,
-                0.75,
-                A4_FREQ_DEFAULT,
-                0.0,
-                BodyArchetype::UprightStudio,
-                ListenerPerspective::CloseStereo,
-                LidState::Closed,
-                0.85,
-                0.12,
-            ),
-            Self::BrightPop => (
-                0.80,
-                1.40,
-                1.30,
-                1.15,
-                442.0,
-                0.0,
-                BodyArchetype::ConcertGrand,
-                ListenerPerspective::CloseStereo,
-                LidState::Open,
-                1.25,
-                0.22,
-            ),
-            Self::VintageSaloon => (
-                0.70,
-                2.50,
-                0.20,
-                0.65,
-                435.0,
-                0.25,
-                BodyArchetype::VintageSaloon,
-                ListenerPerspective::Player,
-                LidState::Half,
-                0.55,
-                0.08,
-            ),
-        };
-        let mut voicing =
-            VoicingSpec::from_globals_full(hh, ud, st, sl, a4, Temperament::Equal, cond);
-        if let Some(a4_hz) = a4_override {
-            voicing = voicing.with_concert_pitch_hz(a4_hz);
-        }
-        let eff_a4 = voicing.effective_a4_freq_hz();
-        let mut engine = PianoEngine::new_with_voicing(sample_rate as f32, &voicing);
-        engine.set_body_space(body, persp, lid);
-        engine.set_reverb(decay_s, mix);
-        (engine, eff_a4)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 struct RenderOptions {
@@ -178,11 +27,15 @@ struct RenderOptions {
     sample_rate: u32,
     a4_override: Option<f32>,
     format: WavFormat,
+    profile: PerfProfile,
+    profile_label: String,
 }
 
 pub(crate) fn render_usage() -> String {
-    String::from(
-        "  piano-cli render-wav <out.wav> --midi <path.mid> [--preset <id>] [--sample-rate <48000|96000>] [--a4 <392..466.2>] [--format <pcm16|pcm24|f32>]\n  piano-cli render-demos [out_dir] [--demos-dir <dir>] [--preset <id>] [--sample-rate <48000|96000>] [--a4 <392..466.2>] [--format <pcm16|pcm24|f32>]",
+    format!(
+        "  piano-cli render-wav <out.wav> --midi <path.mid> [--preset <id>] [--sample-rate <48000|96000>] [--a4 <392..466.2>] [--format <pcm16|pcm24|f32>] {}\n  piano-cli render-demos [out_dir] [--demos-dir <dir>] [--preset <id>] [--sample-rate <48000|96000>] [--a4 <392..466.2>] [--format <pcm16|pcm24|f32>] {}",
+        CliProfileArgs::usage(),
+        CliProfileArgs::usage()
     )
 }
 
@@ -190,9 +43,9 @@ pub(crate) fn cmd_render_wav(args: &[String]) -> Result<(), String> {
     let opts = parse_render_options(args, true, WavFormat::Pcm16)?;
     let out_path = opts.target.ok_or_else(render_usage)?;
     let midi_path = opts.midi.ok_or_else(render_usage)?;
-    let (mut engine, a4_hz) = opts
-        .preset
-        .configure_engine(opts.sample_rate, opts.a4_override);
+    let (mut engine, a4_hz) =
+        opts.preset
+            .configure_engine(opts.sample_rate, opts.a4_override, opts.profile);
     let metrics = render_midi_to_wav(
         &mut engine,
         &midi_path,
@@ -201,10 +54,11 @@ pub(crate) fn cmd_render_wav(args: &[String]) -> Result<(), String> {
         &out_path,
     )?;
     println!(
-        "render-wav OK: {} [midi={}, preset={}, {}] ({} frames @ {} Hz, A4={:.1} Hz, peak_l={:.4}, peak_r={:.4}, rms={:.4}, non_finite=0)",
+        "render-wav OK: {} [midi={}, preset={}, perf={}, {}] ({} frames @ {} Hz, A4={:.1} Hz, peak_l={:.4}, peak_r={:.4}, rms={:.4}, non_finite=0)",
         out_path.display(),
         midi_path.display(),
         opts.preset.slug(),
+        opts.profile_label,
         opts.format.label(),
         metrics.frames,
         opts.sample_rate,
@@ -227,16 +81,17 @@ pub(crate) fn cmd_render_demos(args: &[String]) -> Result<(), String> {
         }
     };
     let start_all = Instant::now();
-    let (mut engine, a4_hz) = opts
-        .preset
-        .configure_engine(opts.sample_rate, opts.a4_override);
+    let (mut engine, a4_hz) =
+        opts.preset
+            .configure_engine(opts.sample_rate, opts.a4_override, opts.profile);
 
     println!(
-        "Rendering {} native showcase demos from {} -> {} [preset={}, {}, {} Hz, A4={:.1} Hz]",
+        "Rendering {} native showcase demos from {} -> {} [preset={}, perf={}, {}, {} Hz, A4={:.1} Hz]",
         SHOWCASE_DEMOS.len(),
         demos_dir.display(),
         out_dir.display(),
         opts.preset.slug(),
+        opts.profile_label,
         opts.format.label(),
         opts.sample_rate,
         a4_hz
@@ -411,9 +266,13 @@ fn parse_render_options(
     let mut sample_rate = 48_000_u32;
     let mut a4_override = None;
     let mut format = default_format;
+    let mut cli_profile = CliProfileArgs::default();
 
     let mut i = 0;
     while i < args.len() {
+        if cli_profile.try_consume_arg(args, &mut i)? {
+            continue;
+        }
         if is_render_wav {
             if let Some(v) = parse_flag_value(args, &mut i, "--midi")? {
                 midi = Some(PathBuf::from(v));
@@ -453,6 +312,8 @@ fn parse_render_options(
         sample_rate,
         a4_override,
         format,
+        profile: cli_profile.resolve(),
+        profile_label: cli_profile.label(),
     })
 }
 

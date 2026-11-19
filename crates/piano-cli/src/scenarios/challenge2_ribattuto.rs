@@ -1,7 +1,7 @@
 //! Challenge 2: 12 Hz Ribattuto Stulov Wool Memory Evolution.
 
-use piano_engine::PianoEngine;
-use piano_spec::{EventKind, SampleEvent};
+use piano_engine::{PerfProfile, PianoEngine};
+use piano_spec::{EventKind, SampleEvent, VoicingSpec};
 
 use super::spectral_utils::{mono_mix, slice_rms, spectral_centroid_hz};
 
@@ -38,8 +38,8 @@ fn render_chunks(
     (out_l, out_r)
 }
 
-fn run_series(midi_key: u8, memory_enabled: bool) -> (Vec<f64>, Vec<f64>) {
-    let mut engine = PianoEngine::new(SR);
+fn run_series(midi_key: u8, memory_enabled: bool, profile: PerfProfile) -> (Vec<f64>, Vec<f64>) {
+    let mut engine = PianoEngine::new_with_profile(SR, VoicingSpec::default(), profile);
     engine.set_felt_memory_enabled(memory_enabled);
     let mut rms_list = Vec::with_capacity(STRIKES);
     let mut cent_list = Vec::with_capacity(STRIKES);
@@ -69,8 +69,8 @@ fn run_series(midi_key: u8, memory_enabled: bool) -> (Vec<f64>, Vec<f64>) {
     (rms_list, cent_list)
 }
 
-/// Executes Challenge 2 ribattuto hysteresis memory verification on A4 and C5.
-pub fn verify_challenge2() -> Result<Challenge2Report, String> {
+/// Executes Challenge 2 ribattuto hysteresis memory verification on A4 and C5 under `profile`.
+pub fn verify_challenge2_with_profile(profile: PerfProfile) -> Result<Challenge2Report, String> {
     let mut details = Vec::new();
     let mut all_pass = true;
 
@@ -79,8 +79,8 @@ pub fn verify_challenge2() -> Result<Challenge2Report, String> {
 
     for &midi_key in &[69_u8, 72_u8] {
         let note_name = if midi_key == 69 { "A4" } else { "C5" };
-        let (rms_mem, cent_mem) = run_series(midi_key, true);
-        let (rms_nomem, cent_nomem) = run_series(midi_key, false);
+        let (rms_mem, cent_mem) = run_series(midi_key, true, profile);
+        let (rms_nomem, cent_nomem) = run_series(midi_key, false, profile);
 
         // Gate 2A: Spectral centroid drift across 12 strikes > 0.5%
         let cent_drift = (cent_mem[STRIKES - 1] - cent_mem[0]).abs() / cent_mem[0].max(1.0);
